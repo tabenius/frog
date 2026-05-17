@@ -18,7 +18,7 @@ class LocalDbGuard(unittest.TestCase):
         store._fs_type = lambda p: "fuse.sshfs"
         try:
             with self.assertRaises(store.RemoteDbError):
-                store.connect("/mnt/remote/AGENTS.db")
+                store.connect("/tmp/frog-guard-probe/AGENTS.db")
         finally:
             store._fs_type = orig
 

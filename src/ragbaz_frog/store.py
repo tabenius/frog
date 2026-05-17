@@ -124,8 +124,8 @@ def _guard_local_db(path: Path) -> None:
 
 def connect(db_path: str) -> sqlite3.Connection:
     path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     _guard_local_db(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
