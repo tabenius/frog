@@ -335,6 +335,11 @@ def _emit(payload: dict, as_json: bool) -> int:
         print(f"type: {item['file_type'] or '-'}")
         print(f"source_of_truth: {item['source_of_truth'] or '-'}")
         return 0
+    if "mirrored_events" in payload:
+        for e in payload["mirrored_events"]:
+            print(f"{e['workspace']}#{e['remote_id']}  {e['created_at']}  "
+                  f"{e['kind']}  {e['summary']}")
+        return 0
     if "events" in payload:
         for event in payload["events"]:
             _print_event(event)
@@ -627,7 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file}",
+        metavar="{db,new,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -740,6 +745,19 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_sub.add_parser("serve", help="Run a stdio MCP server")
     mcp_sub.add_parser("tools", help="List the MCP tools that frog exposes")
+
+    sync_cmd = sub.add_parser(
+        "sync",
+        help="Mirror another workspace's event log locally (read-only)",
+    )
+    sync_sub = sync_cmd.add_subparsers(dest="sync_command", required=True)
+    sync_pull = sync_sub.add_parser("pull", help="Pull new events from a workspace")
+    sync_pull.add_argument("workspace")
+    sync_pull.add_argument("--limit", type=int, default=500,
+                           help="Max remote events to fetch per pull")
+    sync_list = sync_sub.add_parser("list", help="Show mirrored events")
+    sync_list.add_argument("workspace", nargs="?")
+    sync_list.add_argument("--limit", type=int, default=20)
 
     repo = sub.add_parser(
         "repo",
@@ -1236,6 +1254,26 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.file_list(conn, repo_ref=args.repo_ref, file_type=args.file_type), args.json)
             if args.file_command == "info":
                 return _emit(store.file_info(conn, args.file_path), args.json)
+        if args.command == "sync":
+            if args.sync_command == "pull":
+                ws = frog_config.resolve_workspace(args.workspace, args.config)
+                if not ws:
+                    return _emit({"ok": False, "error": f"unknown workspace: {args.workspace}"}, args.json)
+                if ws["host"].get("transport", "local") == "local":
+                    return _emit({"ok": True, "message": f"workspace {args.workspace} is local; nothing to mirror"}, args.json)
+                remote = _dispatch_workspace(ws, ["log", "--limit", str(args.limit)])
+                if not remote.get("ok", True):
+                    return _emit(remote, args.json)
+                return _emit(
+                    store.event_mirror_pull(conn, workspace=args.workspace,
+                                            events=remote.get("events", [])),
+                    args.json,
+                )
+            if args.sync_command == "list":
+                return _emit(
+                    store.event_mirror_list(conn, workspace=args.workspace, limit=args.limit),
+                    args.json,
+                )
         return _emit({"ok": False, "error": "unsupported command"}, args.json)
     finally:
         conn.close()

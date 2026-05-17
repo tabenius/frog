@@ -1516,6 +1516,62 @@ def ps_summary(conn, *, repo_ref: str | None) -> dict:
     }
 
 
+def event_mirror_cursor(conn, workspace: str) -> int:
+    row = conn.execute(
+        "SELECT MAX(remote_id) AS m FROM event_mirror WHERE workspace = ?",
+        (workspace,),
+    ).fetchone()
+    return int(row["m"]) if row and row["m"] is not None else 0
+
+
+def event_mirror_pull(conn, *, workspace: str, events: list[dict]) -> dict:
+    """Append remote events (those with id > our cursor) into the read-only
+    mirror. `events` is a list of event_log rows fetched from the remote
+    (the CLI supplies them via the SSH dispatch; tests inject directly)."""
+    cursor = event_mirror_cursor(conn, workspace)
+    now = utc_now_iso()
+    added = 0
+    max_id = cursor
+    for ev in sorted(events, key=lambda e: e.get("id", 0)):
+        rid = int(ev.get("id", 0))
+        if rid <= cursor:
+            continue
+        conn.execute(
+            """INSERT OR IGNORE INTO event_mirror(workspace, remote_id,
+               created_at, kind, repo_path, task_slug, actor, summary,
+               payload_json, mirrored_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                workspace, rid, ev.get("created_at") or now,
+                ev.get("kind") or "?", ev.get("repo_path"),
+                ev.get("task_slug"), ev.get("actor"),
+                ev.get("summary") or "", json.dumps(ev.get("payload") or {}),
+                now,
+            ),
+        )
+        added += 1
+        max_id = max(max_id, rid)
+    if added:
+        conn.commit()
+    return {"ok": True, "workspace": workspace, "pulled": added,
+            "cursor": max_id, "message": f"mirrored {added} event(s) from {workspace}"}
+
+
+def event_mirror_list(conn, *, workspace: str | None, limit: int = 20) -> dict:
+    if workspace:
+        rows = conn.execute(
+            """SELECT * FROM event_mirror WHERE workspace = ?
+               ORDER BY remote_id DESC LIMIT ?""",
+            (workspace, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM event_mirror ORDER BY mirrored_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return {"ok": True, "mirrored_events": [dict(r) for r in rows]}
+
+
 def log_tail(conn, *, limit: int, repo_ref: str | None) -> dict:
     repo_path = None
     params = []
