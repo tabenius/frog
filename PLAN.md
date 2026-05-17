@@ -7,9 +7,9 @@
 Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
 
 ## Phase 0 - foundations
-- [ ] C1: `connect()` sets `journal_mode=WAL`, `busy_timeout=5000`,
+- [x] C1: `connect()` sets `journal_mode=WAL`, `busy_timeout=5000`,
       `synchronous=NORMAL` (robust local multi-writer; common case).
-- [ ] Test harness: stdlib `unittest` under `tests/`, zero new deps,
+- [x] Test harness: stdlib `unittest` under `tests/`, zero new deps,
       `python3 -m unittest discover -s tests` green.
 
 ## Phase A - locks: advisory -> noticed
