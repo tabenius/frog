@@ -134,7 +134,7 @@ def _completion_script(shell: str) -> str:
     task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list next info status dependency conflict tag assign" -- "$cur") ) ;;
     lock) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "check acquire renew release list info" -- "$cur") ) ;;
     file) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "upsert list info" -- "$cur") ) ;;
-    log) COMPREPLY=( $(compgen -W "--follow --limit --repo -f" -- "$cur") ) ;;
+    log) COMPREPLY=( $(compgen -W "why blame --follow --limit --repo -f" -- "$cur") ) ;;
   esac
 }}
 complete -F _frog_complete frog
@@ -156,7 +156,7 @@ complete -c frog -n '__fish_seen_subcommand_from unit' -a 'discover list'
 complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list next info status dependency conflict tag assign'
 complete -c frog -n '__fish_seen_subcommand_from lock' -a 'check acquire renew release list info'
 complete -c frog -n '__fish_seen_subcommand_from file' -a 'upsert list info'
-complete -c frog -n '__fish_seen_subcommand_from log' -a '--follow --limit --repo -f'
+complete -c frog -n '__fish_seen_subcommand_from log' -a 'why blame --follow --limit --repo -f'
 """
     raise ValueError(f"unsupported shell: {shell}")
 
@@ -349,6 +349,21 @@ def _emit(payload: dict, as_json: bool) -> int:
         for e in payload["mirrored_events"]:
             print(f"{e['workspace']}#{e['remote_id']}  {e['created_at']}  "
                   f"{e['kind']}  {e['summary']}")
+        return 0
+    if "file_path" in payload and "locks" in payload and "tasks" in payload:
+        print(f"blame {payload['file_path']}  (repo: {payload.get('repo_path') or '-'})")
+        if payload["tasks"]:
+            print("tasks:")
+            for tk in payload["tasks"]:
+                print(f"  {tk['slug']}  {tk.get('role') or '-'}  {tk['workflow_status']}  {tk['title']}")
+        if payload["locks"]:
+            print("locks:")
+            for lk in payload["locks"]:
+                print(f"  {lk['id']}  {lk['agent_name']}  {lk['lock_kind']}  {lk['status']}  {lk['started_at']}")
+        if payload["events"]:
+            print("recent repo events:")
+            for e in payload["events"][:15]:
+                print(f"  {e['created_at']}  {e['kind']}  {e['summary']}")
         return 0
     if "events" in payload:
         for event in payload["events"]:
@@ -715,6 +730,11 @@ def build_parser() -> argparse.ArgumentParser:
     log.add_argument("--limit", type=int, default=20, help="Number of recent events to show initially")
     log.add_argument("--repo", dest="repo_ref", metavar="REPO", help="Limit events to one repo by name or path")
     log.add_argument("-f", "--follow", action="store_true", help="Follow new events live")
+    log_sub = log.add_subparsers(dest="log_command")
+    log_why = log_sub.add_parser("why", help="Event timeline + history for a task")
+    log_why.add_argument("slug")
+    log_blame = log_sub.add_parser("blame", help="Tasks/locks/events that touched a file")
+    log_blame.add_argument("file")
 
     config_cmd = sub.add_parser(
         "config",
@@ -1077,7 +1097,7 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(frog_config.use_workspace(args.name, args.config), args.json)
         if args.config_command == "path":
             return _emit(frog_config.path_setup(args.shell, args.config), args.json)
-    if args.command == "log" and getattr(args, "follow", False):
+    if args.command == "log" and getattr(args, "follow", False) and not getattr(args, "log_command", None):
         workspace = frog_config.resolve_workspace(args.workspace, args.config)
         if workspace and workspace["host"].get("transport") != "local":
             return _emit(_dispatch_workspace(workspace, argv), args.json)
@@ -1124,6 +1144,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":
             return _emit(store.status_summary(conn, repo_ref=args.repo_ref), args.json)
         if args.command == "log":
+            lc = getattr(args, "log_command", None)
+            if lc == "why":
+                return _emit(store.log_why(conn, args.slug), args.json)
+            if lc == "blame":
+                return _emit(store.log_blame(conn, args.file), args.json)
             return _emit(store.log_tail(conn, limit=args.limit, repo_ref=args.repo_ref), args.json)
         if args.command == "repo":
             if args.repo_command == "list":

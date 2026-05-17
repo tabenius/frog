@@ -1756,6 +1756,60 @@ UNIT_KIND_BY_SOURCE = {
 }
 
 
+def log_why(conn, slug: str) -> dict:
+    """Causality for a task: its event timeline + status history +
+    assignments. Reconstructs 'what happened to this slice and when'."""
+    task = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
+    if not task:
+        return {"ok": False, "error": f"task not found: {slug}"}
+    events = dicts(conn.execute(
+        "SELECT * FROM event_log WHERE task_slug = ? ORDER BY id", (slug,)
+    ).fetchall())
+    history = dicts(conn.execute(
+        "SELECT * FROM task_status_history WHERE task_slug = ? ORDER BY changed_at",
+        (slug,),
+    ).fetchall())
+    assignments = dicts(conn.execute(
+        "SELECT * FROM task_assignments WHERE task_slug = ? ORDER BY assigned_at",
+        (slug,),
+    ).fetchall())
+    return {"ok": True, "task": dict(task), "events": events,
+            "history": history, "assignments": assignments}
+
+
+def log_blame(conn, file_path: str) -> dict:
+    """Causality for a file: which tasks declared it, which locks covered
+    it, and the repo events around it -- 'who touched this, under which
+    task, holding which lock, when'."""
+    fp = str(Path(file_path).expanduser().resolve())
+    file_row = conn.execute(
+        "SELECT * FROM files WHERE file_path = ?", (fp,)
+    ).fetchone()
+    tasks = dicts(conn.execute(
+        """SELECT t.slug, t.title, t.workflow_status, tf.role, tf.created_at
+           FROM task_files tf JOIN tasks t ON t.slug = tf.task_slug
+           WHERE tf.file_path = ? ORDER BY tf.created_at""",
+        (fp,),
+    ).fetchall())
+    locks = []
+    for lk in _lock_rows(conn, include_inactive=True):
+        if fp in lk["file_paths"]:
+            locks.append({
+                "id": lk["id"], "agent_name": lk["agent_name"],
+                "lock_kind": lk["lock_kind"], "status": lk["status"],
+                "started_at": lk["started_at"], "scope_key": lk["scope_key"],
+            })
+    repo_path = file_row["repo_path"] if file_row else None
+    events = []
+    if repo_path:
+        events = dicts(conn.execute(
+            "SELECT * FROM event_log WHERE repo_path = ? ORDER BY id DESC LIMIT 50",
+            (repo_path,),
+        ).fetchall())
+    return {"ok": True, "file_path": fp, "repo_path": repo_path,
+            "tasks": tasks, "locks": locks, "events": events}
+
+
 def _repo_required(conn, repo_ref: str) -> dict | None:
     repo = resolve_repo(conn, repo_ref)
     if not repo:
