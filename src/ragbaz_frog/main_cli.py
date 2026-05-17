@@ -769,9 +769,15 @@ def build_parser() -> argparse.ArgumentParser:
     repo_task_inline_sub = repo_task_inline.add_subparsers(dest="repo_task_inline_command", required=True)
     repo_task_inline_list = repo_task_inline_sub.add_parser("list", help="List tasks for one repo")
     repo_task_inline_list.add_argument("--repo", dest="repo_ref", metavar="REPO", required=True)
+    _runnable = {"build", "clean", "test", "lint", "check", "verify"}
     for command_name in sorted(REPO_ACTIONS):
         cmd = repo_sub.add_parser(command_name, help=REPO_ACTION_HELP[command_name])
         cmd.add_argument("repo_ref", nargs="?", help="Repo name or path; defaults to cwd repo when omitted")
+        if command_name in _runnable:
+            cmd.add_argument(
+                "--no-cache", dest="no_cache", action="store_true",
+                help="Ignore the target_runs cache; always run",
+            )
         if command_name == "diff":
             cmd.add_argument("--stat", action="store_true")
             cmd.add_argument("--tasks", action="store_true")
@@ -923,7 +929,8 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
         return store.repo_diff(conn, repo_ref, stat_only=args.stat, include_tasks=args.tasks, include_impact=args.impact)
     if action == "status":
         return store.status_summary(conn, repo_ref=repo_ref)
-    return store.repo_run(conn, repo_ref, action)
+    use_cache = not getattr(args, "no_cache", False)
+    return store.repo_run(conn, repo_ref, action, use_cache=use_cache)
 
 
 def main(argv: list[str] | None = None) -> int:

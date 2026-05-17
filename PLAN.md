@@ -24,7 +24,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       conflicting active lock held by another agent. Opt-in, harness-only.
 
 ## Phase B - affected-graph: make `repo build` cheap
-- [ ] B1 migration `004_target_runs.sql` + input fingerprint; `repo_run`
+- [x] B1 migration `004_target_runs.sql` + input fingerprint; `repo_run`
       skips a target whose last successful `input_hash` is unchanged.
 - [ ] B2 implement the missing `store.repo_diff` (referenced by
       `frog repo diff`, currently an AttributeError), then

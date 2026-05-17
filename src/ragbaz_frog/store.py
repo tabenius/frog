@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 import os
 import re
 import shutil
@@ -2077,7 +2079,69 @@ def _targets_for_kind(conn, repo_path: str, target_kind: str) -> list[dict]:
     return targets
 
 
-def repo_run(conn, repo_ref: str, target_kind: str) -> dict:
+def _target_input_hash(target: dict) -> str:
+    """Deterministic fingerprint of a target's inputs: the command plus the
+    state of its workdir. Prefers git object ids (cheap, exact); falls back
+    to source mtimes for non-git trees."""
+    h = hashlib.sha256()
+    h.update(("cmd:" + (target.get("command") or "")).encode())
+    h.update(("wd:" + (target.get("workdir") or "")).encode())
+    wd = target.get("workdir") or "."
+    used_git = False
+    try:
+        inside = subprocess.run(
+            ["git", "-C", wd, "rev-parse", "--is-inside-work-tree"],
+            text=True, capture_output=True,
+        )
+        if inside.returncode == 0 and inside.stdout.strip() == "true":
+            used_git = True
+            tree = subprocess.run(
+                ["git", "-C", wd, "ls-files", "-s", "--", "."],
+                text=True, capture_output=True,
+            )
+            h.update(b"tree:")
+            h.update(tree.stdout.encode())
+            # include unstaged/dirty content so a working-tree edit busts cache
+            dirty = subprocess.run(
+                ["git", "-C", wd, "diff", "--", "."],
+                text=True, capture_output=True,
+            )
+            h.update(b"dirty:")
+            h.update(dirty.stdout.encode())
+            untr = subprocess.run(
+                ["git", "-C", wd, "ls-files", "-o", "--exclude-standard", "--", "."],
+                text=True, capture_output=True,
+            )
+            h.update(b"untracked:")
+            h.update(untr.stdout.encode())
+    except OSError:
+        used_git = False
+    if not used_git:
+        h.update(("mtime:%r" % _source_latest_mtime(Path(wd))).encode())
+    return h.hexdigest()
+
+
+def _cached_success(conn, repo_path: str, target: dict, input_hash: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT returncode FROM target_runs
+        WHERE repo_path = ? AND target_kind = ? AND target_name = ?
+          AND workdir = ? AND command = ? AND input_hash = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (
+            repo_path,
+            target["target_kind"] if "target_kind" in target else target.get("_kind", ""),
+            target["name"],
+            target["workdir"],
+            target["command"],
+            input_hash,
+        ),
+    ).fetchone()
+    return bool(row) and row["returncode"] == 0
+
+
+def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True) -> dict:
     repo = _repo_required(conn, repo_ref)
     if not repo:
         return {"ok": False, "error": f"repo not found: {repo_ref}"}
@@ -2095,23 +2159,61 @@ def repo_run(conn, repo_ref: str, target_kind: str) -> dict:
     results = []
     ok = True
     for target in targets:
+        target = dict(target)
+        target["target_kind"] = target_kind
+        input_hash = _target_input_hash(target)
+        if use_cache and _cached_success(conn, repo["repo_path"], target, input_hash):
+            results.append({
+                "name": target["name"],
+                "target_kind": target_kind,
+                "command": target["command"],
+                "workdir": target["workdir"],
+                "returncode": 0,
+                "status": "cached",
+                "stdout": "",
+                "stderr": "",
+            })
+            conn.execute(
+                """INSERT INTO target_runs(repo_path,target_kind,target_name,
+                   workdir,command,input_hash,returncode,status,duration_ms,ran_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (repo["repo_path"], target_kind, target["name"], target["workdir"],
+                 target["command"], input_hash, 0, "cached", 0, utc_now_iso()),
+            )
+            record_event(
+                conn,
+                kind=f"repo.run.{target_kind}",
+                summary=f"cached {target_kind} target {target['name']} (unchanged)",
+                repo_path=repo["repo_path"],
+                payload={"command": target["command"], "cached": True},
+            )
+            continue
+        started = time.monotonic()
         proc = subprocess.run(
-            target["command"],
-            cwd=target["workdir"],
-            shell=True,
-            text=True,
-            capture_output=True,
+            target["command"], cwd=target["workdir"], shell=True,
+            text=True, capture_output=True,
         )
-        result = {
+        duration_ms = int((time.monotonic() - started) * 1000)
+        if proc.returncode != 0:
+            ok = False
+        results.append({
             "name": target["name"],
             "target_kind": target_kind,
             "command": target["command"],
             "workdir": target["workdir"],
             "returncode": proc.returncode,
+            "status": "ran",
             "stdout": proc.stdout,
             "stderr": proc.stderr,
-        }
-        results.append(result)
+        })
+        conn.execute(
+            """INSERT INTO target_runs(repo_path,target_kind,target_name,
+               workdir,command,input_hash,returncode,status,duration_ms,ran_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (repo["repo_path"], target_kind, target["name"], target["workdir"],
+             target["command"], input_hash, proc.returncode, "ran",
+             duration_ms, utc_now_iso()),
+        )
         record_event(
             conn,
             kind=f"repo.run.{target_kind}",
@@ -2121,5 +2223,8 @@ def repo_run(conn, repo_ref: str, target_kind: str) -> dict:
                 "command": target["command"],
                 "workdir": target["workdir"],
                 "returncode": proc.returncode,
+                "duration_ms": duration_ms,
             },
         )
+    conn.commit()
+    return {"ok": ok, "repo": repo, "results": results}
