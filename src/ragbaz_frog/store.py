@@ -1665,6 +1665,12 @@ def _repo_required(conn, repo_ref: str) -> dict | None:
 def _manifest_candidates(repo_path: Path) -> list[tuple[str, Path]]:
     candidates: list[tuple[str, Path]] = []
     names = [
+        ("taskfile", "Taskfile.yml"),
+        ("taskfile", "Taskfile.yaml"),
+        ("justfile", "justfile"),
+        ("justfile", "Justfile"),
+        ("mise", "mise.toml"),
+        ("mise", ".mise.toml"),
         ("makefile", "Makefile"),
         ("package_json", "package.json"),
         ("cargo_toml", "Cargo.toml"),
@@ -1865,6 +1871,84 @@ def _make_target_name(repo_root: Path, workdir: Path, label: str) -> str:
     return f"{rel}:{label}"
 
 
+_RUNNER_KIND_MAP = {"build":"build","clean":"clean","test":"test","lint":"lint","check":"check","verify":"verify","deploy":"deploy","dev":"dev","start":"start","ci":"verify","fmt":"lint","format":"lint","typecheck":"check"}
+
+
+def _runner_target_kind(name: str) -> tuple[str, float]:
+    key = name.strip().lower()
+    if key in _RUNNER_KIND_MAP:
+        # Above make (0.98) / npm (0.95): a declared runner is explicit
+        # operator intent, so it must outrank re-derived manifest targets.
+        return _RUNNER_KIND_MAP[key], 0.99
+    return "task", 0.85
+
+
+def _emit_runner_targets(conn, repo_root: Path, path: Path, *, runner: str,
+                         invoke: str, names: list[str]) -> None:
+    _record_detection_source(
+        conn, repo_path=str(repo_root), source_kind=runner,
+        source_path=path, payload={"recipes": names},
+    )
+    for nm in names:
+        kind, conf = _runner_target_kind(nm)
+        _insert_target(
+            conn,
+            repo_path=str(repo_root),
+            target_kind=kind,
+            name=_make_target_name(repo_root, path.parent, f"{runner}:{nm}"),
+            command=f"{invoke} {nm}",
+            workdir=str(path.parent),
+            runner=runner,
+            source=str(path),
+            confidence=conf,
+            notes=f"delegated to {runner}",
+        )
+
+
+def _detect_from_taskfile(conn, repo_root: Path, path: Path) -> None:
+    # stdlib-only: collect keys under a top-level `tasks:` mapping.
+    text = path.read_text(errors="ignore").splitlines()
+    names, in_tasks = [], False
+    for line in text:
+        if re.match(r"^tasks:\s*$", line):
+            in_tasks = True
+            continue
+        if in_tasks:
+            if re.match(r"^\S", line):  # dedent to col 0 ends the block
+                if not re.match(r"^\s", line):
+                    in_tasks = False
+                    continue
+            m = re.match(r"^  ([A-Za-z0-9_:.-]+):\s*", line)
+            if m:
+                names.append(m.group(1))
+    _emit_runner_targets(conn, repo_root, path, runner="task",
+                         invoke="task", names=sorted(set(names)))
+
+
+def _detect_from_justfile(conn, repo_root: Path, path: Path) -> None:
+    names = []
+    for line in path.read_text(errors="ignore").splitlines():
+        if not line or line[0] in " \t#":
+            continue
+        if line.startswith(("set ", "export ", "alias ")):
+            continue
+        m = re.match(r"^([A-Za-z0-9_-]+)\s*(\([^)]*\))?\s*:", line)
+        if m and "=" not in line.split(":", 1)[0]:
+            names.append(m.group(1))
+    _emit_runner_targets(conn, repo_root, path, runner="just",
+                         invoke="just", names=sorted(set(names)))
+
+
+def _detect_from_mise(conn, repo_root: Path, path: Path) -> None:
+    names = []
+    for line in path.read_text(errors="ignore").splitlines():
+        m = re.match(r"^\[tasks\.([A-Za-z0-9_:.-]+)\]\s*$", line)
+        if m:
+            names.append(m.group(1))
+    _emit_runner_targets(conn, repo_root, path, runner="mise",
+                         invoke="mise run", names=sorted(set(names)))
+
+
 def _detect_from_makefile(conn, repo_root: Path, path: Path) -> None:
     text = path.read_text(errors="ignore")
     targets = sorted(
@@ -2057,7 +2141,13 @@ def repo_scan(conn, repo_ref: str) -> dict:
     conn.execute("DELETE FROM repo_artifacts WHERE repo_path = ?", (repo["repo_path"],))
     conn.execute("DELETE FROM repo_detection_sources WHERE repo_path = ?", (repo["repo_path"],))
     for kind, path in _manifest_candidates(repo_root):
-        if kind == "makefile":
+        if kind == "taskfile":
+            _detect_from_taskfile(conn, repo_root, path)
+        elif kind == "justfile":
+            _detect_from_justfile(conn, repo_root, path)
+        elif kind == "mise":
+            _detect_from_mise(conn, repo_root, path)
+        elif kind == "makefile":
             _detect_from_makefile(conn, repo_root, path)
         elif kind == "package_json":
             _detect_from_package_json(conn, repo_root, path)
