@@ -275,6 +275,22 @@ def _emit(payload: dict, as_json: bool) -> int:
         print(f"workflow_status: {task['workflow_status']}")
         print(f"git_status: {task['git_status']}")
         return 0
+    if "findings" in payload and "agent" in payload:
+        repo = payload.get("repo", {})
+        rname = repo.get("name", "?") if isinstance(repo, dict) else "?"
+        if not payload["findings"]:
+            print(f"{rname}: clean ({payload.get('dirty_count', 0)} dirty, all covered)")
+            return 0
+        print(f"{rname}: {len(payload['findings'])} lock-audit finding(s)")
+        for f in payload["findings"]:
+            who = ("held by " + ", ".join(f["holders"])) if f.get("holders") else "no active lock"
+            print(f"  {f['kind']:9} {f['file']}  ({who})")
+        return 1
+    if "reaped" in payload:
+        print(payload.get("message", f"reaped {len(payload['reaped'])}"))
+        for r in payload["reaped"]:
+            print(f"  {r['id']}  {r.get('scope_key','-')}  {r.get('agent_name','-')}")
+        return 0
     if "locks" in payload:
         for lock in payload["locks"]:
             repo = Path(lock["repo_path"]).name if lock["repo_path"] else "-"
@@ -848,7 +864,20 @@ def build_parser() -> argparse.ArgumentParser:
     lock_release.add_argument("lock_id", type=int)
     lock_list = lock_sub.add_parser("list", help="List locks")
     lock_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
-    lock_list.add_argument("--include-inactive", action="store_true")
+    lock_list.add_argument("--include-inactive", action="store_true",
+                           help="Alias for --status all")
+    lock_list.add_argument("--status",
+                           choices=["active", "stale", "released", "all"],
+                           help="Filter by lock status (default: active)")
+    lock_reap = lock_sub.add_parser(
+        "reap", help="Mark lease-expired active locks as stale and report them")
+    lock_audit = lock_sub.add_parser(
+        "audit",
+        help="Flag working-tree changes not covered by your active lock")
+    lock_audit.add_argument("--repo", dest="repo_ref", metavar="REPO",
+                            help="Repo to audit (defaults to the cwd repo)")
+    lock_audit.add_argument("--agent",
+                            help="Acting agent name (defaults to $USER)")
     lock_info = lock_sub.add_parser("info", help="Show one lock")
     lock_info.add_argument("lock_id", type=int)
 
@@ -1101,7 +1130,23 @@ def main(argv: list[str] | None = None) -> int:
             if args.lock_command == "release":
                 return _emit(store.lock_release(conn, args.lock_id, force=False), args.json)
             if args.lock_command == "list":
-                return _emit(store.lock_list(conn, repo_ref=args.repo_ref, include_inactive=args.include_inactive), args.json)
+                return _emit(
+                    store.lock_list(
+                        conn,
+                        repo_ref=args.repo_ref,
+                        include_inactive=args.include_inactive,
+                        status=args.status,
+                    ),
+                    args.json,
+                )
+            if args.lock_command == "reap":
+                return _emit(store.lock_reap(conn), args.json)
+            if args.lock_command == "audit":
+                agent = args.agent or os.environ.get("USER", "unknown")
+                return _emit(
+                    store.lock_audit(conn, repo_ref=args.repo_ref, agent=agent),
+                    args.json,
+                )
             if args.lock_command == "info":
                 return _emit(store.lock_info(conn, args.lock_id), args.json)
         if args.command == "file":

@@ -1084,12 +1084,21 @@ def _mark_stale_locks(conn) -> None:
         conn.commit()
 
 
-def _lock_rows(conn, include_inactive: bool, repo_path: str | None = None) -> list[dict]:
+def _lock_rows(
+    conn,
+    include_inactive: bool,
+    repo_path: str | None = None,
+    status: str | None = None,
+) -> list[dict]:
     _mark_stale_locks(conn)
     clauses = []
     params = []
     query = "SELECT * FROM locks"
-    if not include_inactive:
+    if status is not None:
+        if status != "all":
+            clauses.append("status = ?")
+            params.append(status)
+    elif not include_inactive:
         clauses.append("status = 'active'")
     if repo_path:
         clauses.append("repo_path = ?")
@@ -1238,12 +1247,128 @@ def lock_release(conn, lock_id: int, *, force: bool) -> dict:
     return lock_info(conn, lock_id)
 
 
-def lock_list(conn, *, include_inactive: bool, repo_ref: str | None) -> dict:
+def lock_list(
+    conn, *, include_inactive: bool, repo_ref: str | None, status: str | None = None
+) -> dict:
     repo_path = None
     if repo_ref:
         repo = resolve_repo(conn, repo_ref)
         repo_path = repo["repo_path"] if repo else str(Path(repo_ref).expanduser().resolve())
-    return {"ok": True, "locks": _lock_rows(conn, include_inactive=include_inactive, repo_path=repo_path)}
+    return {
+        "ok": True,
+        "status_filter": status or ("all" if include_inactive else "active"),
+        "locks": _lock_rows(
+            conn, include_inactive=include_inactive, repo_path=repo_path, status=status
+        ),
+    }
+
+
+def lock_reap(conn) -> dict:
+    """A2: explicit lease reaping. Marks active locks whose lease elapsed as
+    'stale' (via the same path _lock_rows uses lazily) and reports them, so
+    'reap' is an operation an operator/cron can run and observe, not just a
+    silent side effect of listing."""
+    before = {
+        row["id"]
+        for row in conn.execute("SELECT id FROM locks WHERE status = 'stale'")
+    }
+    _mark_stale_locks(conn)
+    after_rows = conn.execute(
+        "SELECT id, scope_key, agent_name, repo_path FROM locks WHERE status = 'stale'"
+    ).fetchall()
+    newly = [dict(r) for r in after_rows if r["id"] not in before]
+    return {
+        "ok": True,
+        "message": f"reaped {len(newly)} expired lock(s)",
+        "reaped": newly,
+    }
+
+
+def _git_dirty_files(repo_path: str) -> list[str]:
+    """Absolute paths of working-tree-dirty files in a repo (porcelain)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo_path, "status", "--porcelain", "--", "."],
+            text=True,
+            capture_output=True,
+        )
+    except OSError:
+        return []
+    if proc.returncode != 0:
+        return []
+    out = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        # porcelain: 'XY <path>' or 'XY <old> -> <new>'
+        rel = line[3:].strip()
+        if " -> " in rel:
+            rel = rel.split(" -> ", 1)[1]
+        out.append(str((Path(repo_path) / rel).resolve()))
+    return sorted(set(out))
+
+
+def lock_audit(conn, *, repo_ref: str | None, agent: str) -> dict:
+    """A1: honest reading of AGENTS.md containment rule 6 -- any working-tree
+    change to a file that is NOT covered by an active lock held by the
+    current agent is a finding.
+
+      - uncovered : dirty file under no active lock at all (unlocked write)
+      - conflict  : dirty file covered only by another agent's active lock
+
+    Emits a lock.audit.* event per finding and returns ok=False when any
+    finding exists so callers/CI exit nonzero."""
+    repo = _repo_required(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    repo_path = repo["repo_path"]
+    dirty = _git_dirty_files(repo_path)
+    active = [
+        lk
+        for lk in _lock_rows(conn, include_inactive=False, repo_path=repo_path)
+    ]
+    # whole-repo coverage: an active lock on this repo with no explicit files
+    repo_holders = {
+        lk["agent_name"] for lk in active if not lk["file_paths"]
+    }
+    file_holders: dict[str, set[str]] = {}
+    for lk in active:
+        for fp in lk["file_paths"]:
+            file_holders.setdefault(fp, set()).add(lk["agent_name"])
+
+    findings = []
+    for fp in dirty:
+        holders = set(file_holders.get(fp, set())) | repo_holders
+        if not holders:
+            findings.append({"file": fp, "kind": "uncovered", "holders": []})
+        elif agent not in holders:
+            findings.append(
+                {"file": fp, "kind": "conflict", "holders": sorted(holders)}
+            )
+        # covered by this agent -> expected, not a finding
+    for f in findings:
+        record_event(
+            conn,
+            kind=f"lock.audit.{f['kind']}",
+            summary=f"audit {f['kind']}: {f['file']}",
+            repo_path=repo_path,
+            actor=agent,
+            payload=f,
+        )
+    if findings:
+        conn.commit()
+    return {
+        "ok": not findings,
+        "repo": repo,
+        "agent": agent,
+        "dirty_count": len(dirty),
+        "findings": findings,
+        "error": None if not findings else f"{len(findings)} lock-audit finding(s)",
+    }
+
+
+def lock_info(conn, lock_id: int) -> dict:
+    _mark_stale_locks(conn)
 
 
 def lock_info(conn, lock_id: int) -> dict:

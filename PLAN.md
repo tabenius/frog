@@ -13,10 +13,10 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       `python3 -m unittest discover -s tests` green.
 
 ## Phase A - locks: advisory -> noticed
-- [ ] A1 `frog lock audit [--repo R]`: git-dirty files not covered by an
+- [x] A1 `frog lock audit [--repo R]`: git-dirty files not covered by an
       active lock held by the current/declared agent -> `lock.audit.uncovered`
       findings + nonzero exit. (Honest reading of AGENTS.md rule 6.)
-- [ ] A2 lease reaping made first-class: `frog lock reap`, `lock list
+- [x] A2 lease reaping made first-class: `frog lock reap`, `lock list
       --status active|stale|expired|all`, expose `_mark_stale_locks` as an
       explicit op + `lock.expired` distinct from `lock.stale`.
 - [ ] A3 hook bridge: `PreToolUse(Edit|Write)` hook running
