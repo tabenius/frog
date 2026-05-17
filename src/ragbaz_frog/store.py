@@ -1,0 +1,1993 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import socket
+import sqlite3
+import subprocess
+import tomllib
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+WORKSPACE_ROOT = Path("/data/src")
+DISCOVERY_MANIFESTS = (
+    "Makefile",
+    "package.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "compose.yml",
+    "compose.yaml",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+)
+DISCOVERY_EXCLUDED_DIRS = {
+    ".claude",
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".turbo",
+    ".next",
+    "build",
+    "dist",
+    "out",
+    "site",
+    "target",
+}
+DISCOVERY_CATEGORY_ROOTS = (
+    "products",
+    "experiments",
+    "infra",
+    "private",
+    "vendor",
+    "archive",
+    "headless",
+    "doc",
+)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_now_iso() -> str:
+    return utc_now().isoformat(timespec="seconds")
+
+
+def parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def connect(db_path: str) -> sqlite3.Connection:
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def migration_dir() -> Path:
+    return Path(__file__).resolve().parent / "migrations"
+
+
+def dicts(rows) -> list[dict]:
+    return [dict(row) for row in rows]
+
+
+def ensure_agent(conn, name: str) -> None:
+    now = utc_now_iso()
+    conn.execute(
+        """
+        INSERT INTO agents(name, created_at, updated_at)
+        VALUES(?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET updated_at = excluded.updated_at
+        """,
+        (name, now, now),
+    )
+
+
+def record_event(
+    conn,
+    *,
+    kind: str,
+    summary: str,
+    repo_path: str | None = None,
+    task_slug: str | None = None,
+    actor: str | None = None,
+    payload: dict | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO event_log(created_at, kind, repo_path, task_slug, actor, summary, payload_json)
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            utc_now_iso(),
+            kind,
+            repo_path,
+            task_slug,
+            actor,
+            summary,
+            json.dumps(payload or {}, sort_keys=True),
+        ),
+    )
+
+
+def migrate(db_path: str) -> dict:
+    conn = connect(db_path)
+    try:
+        applied = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+        }
+        if applied:
+            rows = conn.execute("SELECT name FROM schema_migrations").fetchall()
+            applied = {row["name"] for row in rows}
+        else:
+            applied = set()
+        newly_applied = []
+        for sql_file in sorted(migration_dir().glob("*.sql")):
+            if sql_file.name in applied:
+                continue
+            conn.executescript(sql_file.read_text())
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations(name, applied_at) VALUES(?, ?)",
+                (sql_file.name, utc_now_iso()),
+            )
+            record_event(
+                conn,
+                kind="migration.applied",
+                summary=f"applied {sql_file.name}",
+                payload={"migration": sql_file.name},
+            )
+            conn.commit()
+            newly_applied.append(sql_file.name)
+        return {
+            "ok": True,
+            "message": f"applied {len(newly_applied)} migration(s)",
+            "db_path": db_path,
+            "applied": newly_applied,
+        }
+    finally:
+        conn.close()
+
+
+def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | None = None) -> dict:
+    raw = Path(path_or_name).expanduser()
+    if any(sep in path_or_name for sep in ("/",)) or path_or_name.startswith(("~", ".")):
+        repo_path = raw.resolve()
+    else:
+        repo_path = (WORKSPACE_ROOT / "experiments" / path_or_name).resolve()
+    repo_path.mkdir(parents=True, exist_ok=True)
+    agents_result = write_agent_instructions(conn, str(repo_path))
+    if not agents_result.get("ok", True):
+        return agents_result
+    agents_path = Path(agents_result["agents_path"])
+    repo = register_repo(
+        conn,
+        repo_path=str(repo_path),
+        name=repo_path.name,
+        kind=kind or "embryo",
+        status="active",
+        third_party=False,
+        notes=notes or "initialized by frog",
+    )
+    record_event(
+        conn,
+        kind="repo.initialized",
+        summary=f"initialized repo {repo_path.name}",
+        repo_path=str(repo_path),
+        payload={"agents_path": str(agents_path)},
+    )
+    conn.commit()
+    return {"ok": True, "message": f"initialized {repo_path}", "repo": repo["repo"], "agents_path": str(agents_path)}
+
+
+def agent_instructions_text() -> str:
+    return """# Local AGENTS.md
+
+Read `/data/src/AGENTS.md` before starting work in this repo.
+
+Use the shared coordination system:
+- CLI: `/data/src/ragbaz-frog/bin/frog`
+- DB: `/data/src/AGENTS.db`
+"""
+
+
+def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = False) -> dict:
+    if path_or_dir:
+        raw = Path(path_or_dir).expanduser()
+    else:
+        raw = Path.cwd()
+    if raw.suffix.lower() == ".md":
+        target = raw.resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        target = raw.resolve() / "AGENTS.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and not force:
+        return {"ok": False, "error": f"refusing to overwrite existing file: {target}"}
+    target.write_text(agent_instructions_text(), encoding="utf-8")
+    repo = resolve_repo(conn, str(target.parent))
+    record_event(
+        conn,
+        kind="agents.instructions.written",
+        summary=f"wrote agent instructions to {target}",
+        repo_path=repo["repo_path"] if repo else None,
+        payload={"agents_path": str(target)},
+    )
+    conn.commit()
+    return {"ok": True, "message": f"wrote {target}", "agents_path": str(target)}
+
+
+def snapshot_workspace(conn) -> dict:
+    source_root = Path("/data/src")
+    backup_root = Path("/data/backups")
+    src_last = backup_root / "src.last"
+    src_prev = backup_root / "src.prev"
+
+    backup_root.mkdir(parents=True, exist_ok=True)
+
+    if src_prev.exists():
+        if src_prev.is_dir():
+            shutil.rmtree(src_prev)
+        else:
+            src_prev.unlink()
+
+    if src_last.exists():
+        src_last.rename(src_prev)
+
+    src_last.mkdir(parents=True, exist_ok=True)
+
+    proc = subprocess.run(
+        ["rsync", "-a", f"{source_root}/", f"{src_last}/"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "error": "rsync snapshot failed",
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+
+    record_event(
+        conn,
+        kind="workspace.snapshot",
+        summary="snapshotted /data/src to /data/backups/src.last",
+        payload={
+            "source_root": str(source_root),
+            "backup_root": str(backup_root),
+            "src_last": str(src_last),
+            "src_prev": str(src_prev),
+        },
+    )
+    conn.commit()
+    return {
+        "ok": True,
+        "message": f"snapshotted {source_root} to {src_last}",
+        "source_root": str(source_root),
+        "src_last": str(src_last),
+        "src_prev": str(src_prev),
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+    }
+
+
+def schema_status(db_path: str) -> dict:
+    conn = connect(db_path)
+    try:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone()
+        if not exists:
+            return {"ok": True, "db_path": db_path, "migrations": []}
+        rows = conn.execute(
+            "SELECT name, applied_at FROM schema_migrations ORDER BY name"
+        ).fetchall()
+        return {"ok": True, "db_path": db_path, "migrations": dicts(rows)}
+    finally:
+        conn.close()
+
+
+def register_repo(
+    conn,
+    *,
+    repo_path: str,
+    name: str | None,
+    kind: str | None,
+    status: str,
+    third_party: bool,
+    notes: str | None,
+) -> dict:
+    now = utc_now_iso()
+    repo_path = str(Path(repo_path).expanduser().resolve())
+    preferred_name = name or Path(repo_path).name
+    name = _unique_repo_name(conn, repo_path=repo_path, preferred_name=preferred_name)
+    conn.execute(
+        """
+        INSERT INTO repos(repo_path, name, kind, status, third_party, notes, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(repo_path) DO UPDATE SET
+            name = excluded.name,
+            kind = excluded.kind,
+            status = excluded.status,
+            third_party = excluded.third_party,
+            notes = excluded.notes,
+            updated_at = excluded.updated_at
+        """,
+        (repo_path, name, kind, status, int(third_party), notes, now, now),
+    )
+    record_event(
+        conn,
+        kind="repo.upserted",
+        summary=f"registered repo {name}",
+        repo_path=repo_path,
+        payload={"name": name, "kind": kind, "status": status},
+    )
+    conn.commit()
+    return repo_info(conn, repo_path)
+
+
+def _unique_repo_name(conn, *, repo_path: str, preferred_name: str) -> str:
+    row = conn.execute("SELECT repo_path FROM repos WHERE name = ?", (preferred_name,)).fetchone()
+    if not row or row["repo_path"] == repo_path:
+        return preferred_name
+    repo = Path(repo_path)
+    try:
+        relative = repo.relative_to(WORKSPACE_ROOT)
+        candidate = relative.as_posix().replace("/", ":")
+    except ValueError:
+        candidate = repo.as_posix().replace("/", ":").lstrip(":")
+    existing = conn.execute("SELECT repo_path FROM repos WHERE name = ?", (candidate,)).fetchone()
+    if not existing or existing["repo_path"] == repo_path:
+        return candidate
+    return f"{candidate}:{repo.name}"
+
+
+def repo_list(conn, *, include_third_party: bool) -> dict:
+    query = "SELECT * FROM repos"
+    if not include_third_party:
+        query += " WHERE third_party = 0"
+    query += " ORDER BY name, repo_path"
+    rows = conn.execute(query).fetchall()
+    return {"ok": True, "repos": dicts(rows)}
+
+
+def repo_list_with_activity(conn, *, include_third_party: bool) -> dict:
+    payload = repo_list(conn, include_third_party=include_third_party)
+    if not payload.get("ok", True):
+        return payload
+    for repo in payload["repos"]:
+        repo.update(path_metadata(repo["repo_path"]))
+        repo.update(path_activity(repo["repo_path"]))
+    return payload
+
+
+def _ts_iso(timestamp: float | None) -> str | None:
+    if not timestamp:
+        return None
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+
+
+def path_activity(path: str) -> dict:
+    repo_path = Path(path)
+    latest_source = _source_latest_mtime(repo_path)
+    fs_iso = _ts_iso(latest_source)
+    git_iso = None
+    dirty = None
+    try:
+        git_head = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+            text=True,
+            capture_output=True,
+        )
+        if git_head.returncode == 0 and git_head.stdout.strip() == "true":
+            git_log = subprocess.run(
+                ["git", "-C", str(repo_path), "log", "-1", "--format=%cI", "--", "."],
+                text=True,
+                capture_output=True,
+            )
+            if git_log.returncode == 0:
+                git_iso = git_log.stdout.strip() or None
+            git_status = subprocess.run(
+                ["git", "-C", str(repo_path), "status", "--porcelain", "--", "."],
+                text=True,
+                capture_output=True,
+            )
+            if git_status.returncode == 0:
+                dirty = bool(git_status.stdout.strip())
+    except OSError:
+        pass
+    return {
+        "dirty": dirty,
+        "last_git_change_at": git_iso,
+        "last_fs_change_at": fs_iso,
+    }
+
+
+def path_metadata(path: str) -> dict:
+    resolved = Path(path).resolve()
+    try:
+        relative = resolved.relative_to(WORKSPACE_ROOT)
+        parts = relative.parts
+    except ValueError:
+        parts = resolved.parts
+        relative = resolved
+    category = parts[0] if parts else None
+    suite = parts[1] if len(parts) > 1 else None
+    subgroup = "/".join(parts[2:-1]) if len(parts) > 3 else (parts[2] if len(parts) == 4 else None)
+    return {
+        "relative_path": relative.as_posix(),
+        "category": category,
+        "suite": suite,
+        "subgroup": subgroup,
+    }
+
+
+def resolve_repo(conn, repo_ref: str) -> dict | None:
+    repo_ref = repo_ref.strip()
+    exact = conn.execute(
+        "SELECT * FROM repos WHERE repo_path = ? OR name = ?",
+        (repo_ref, repo_ref),
+    ).fetchone()
+    if exact:
+        return dict(exact)
+    rows = conn.execute("SELECT * FROM repos ORDER BY repo_path").fetchall()
+    for row in rows:
+        payload = dict(row)
+        if Path(payload["repo_path"]).name == repo_ref:
+            return payload
+    as_path = Path(repo_ref).expanduser()
+    if as_path.exists() and as_path.is_dir():
+        resolved = str(as_path.resolve())
+        return {
+            "repo_path": resolved,
+            "name": Path(resolved).name,
+            "kind": None,
+            "status": "unregistered",
+            "third_party": 0,
+            "notes": None,
+            "created_at": None,
+            "updated_at": None,
+        }
+    workspace = WORKSPACE_ROOT
+    matches = []
+    for candidate in workspace.rglob(repo_ref):
+        if candidate.is_dir():
+            try:
+                candidate.relative_to(workspace)
+            except ValueError:
+                continue
+            if any(
+                part in {
+                    "vendor",
+                    "archive",
+                    ".git",
+                    "node_modules",
+                    "__pycache__",
+                    "build",
+                    "site",
+                    ".next",
+                    "dist",
+                    "out",
+                    "target",
+                }
+                for part in candidate.parts
+            ):
+                continue
+            matches.append(candidate.resolve())
+    if len(matches) == 1:
+        resolved = str(matches[0])
+        return {
+            "repo_path": resolved,
+            "name": Path(resolved).name,
+            "kind": None,
+            "status": "discovered",
+            "third_party": 0,
+            "notes": None,
+            "created_at": None,
+            "updated_at": None,
+        }
+    return None
+
+
+def infer_repo_from_cwd(conn, cwd: str | None = None) -> dict | None:
+    cwd_path = Path(cwd or os.getcwd()).expanduser().resolve()
+    rows = conn.execute("SELECT * FROM repos ORDER BY LENGTH(repo_path) DESC").fetchall()
+    for row in rows:
+        payload = dict(row)
+        repo_path = Path(payload["repo_path"])
+        try:
+            cwd_path.relative_to(repo_path)
+            return payload
+        except ValueError:
+            continue
+
+    workspace = WORKSPACE_ROOT.resolve()
+    try:
+        cwd_path.relative_to(workspace)
+    except ValueError:
+        return None
+
+    manifests = ("Makefile", "package.json", "Cargo.toml", "pyproject.toml", "compose.yml", "docker-compose.yml")
+    current = cwd_path
+    while True:
+        if any((current / name).exists() for name in manifests):
+            return {
+                "repo_path": str(current),
+                "name": current.name,
+                "kind": None,
+                "status": "discovered",
+                "third_party": 0,
+                "notes": None,
+                "created_at": None,
+                "updated_at": None,
+            }
+        if current == workspace:
+            break
+        if current.parent == current:
+            break
+        current = current.parent
+    return None
+
+
+def repo_names(conn) -> list[str]:
+    rows = conn.execute("SELECT name FROM repos ORDER BY name").fetchall()
+    return [row["name"] for row in rows if row["name"]]
+
+
+def _infer_repo_kind(repo_path: Path) -> tuple[str, bool]:
+    parts = set(repo_path.parts)
+    if {"vendor", "archive"} & parts:
+        return "third_party", True
+    if "products" in parts:
+        return "product", False
+    if "experiments" in parts:
+        return "embryo", False
+    if "infra" in parts:
+        return "infra", False
+    if "private" in parts:
+        return "private", False
+    if "doc" in parts or "docs" in parts:
+        return "documentation", False
+    return "repo", False
+
+
+def _candidate_category_root(root_path: Path, current: Path) -> tuple[str | None, Path]:
+    try:
+        relative = current.relative_to(root_path)
+    except ValueError:
+        return None, root_path
+    if not relative.parts:
+        return None, root_path
+    if relative.parts[0] in DISCOVERY_CATEGORY_ROOTS:
+        return relative.parts[0], root_path / relative.parts[0]
+    return None, root_path
+
+
+def _looks_like_repo_boundary(root_path: Path, current: Path, dirnames: list[str], filenames: list[str]) -> bool:
+    if ".git" in dirnames or ".git" in filenames:
+        return True
+    if any(part in {".claude", "worktrees"} for part in current.parts):
+        return False
+    category, anchor = _candidate_category_root(root_path, current)
+    if "AGENTS.md" in filenames and (category is not None or current != root_path):
+        return True
+    if not any(name in filenames for name in DISCOVERY_MANIFESTS):
+        return False
+    try:
+        relative_to_anchor = current.relative_to(anchor)
+    except ValueError:
+        return False
+    max_depth = 2 if category is None else 3
+    if category in {"products", "experiments", "private"}:
+        max_depth = 4
+    return len(relative_to_anchor.parts) <= max_depth
+
+
+def discover_repos(conn, *, root: str = str(WORKSPACE_ROOT), scan: bool = True) -> dict:
+    root_path = Path(root).expanduser().resolve()
+    discovered: list[dict] = []
+    seen: set[str] = set()
+    scanned = 0
+    repo_roots: list[Path] = []
+    for current_root, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = [name for name in dirnames if name not in DISCOVERY_EXCLUDED_DIRS]
+        current = Path(current_root)
+        if any(_is_within(current, existing) for existing in repo_roots):
+            dirnames[:] = [name for name in dirnames if (current / name / ".git").exists()]
+            continue
+        if not _looks_like_repo_boundary(root_path, current, dirnames, filenames):
+            continue
+        repo_path = str(current.resolve())
+        if repo_path in seen:
+            continue
+        seen.add(repo_path)
+        kind, third_party = _infer_repo_kind(current)
+        info = register_repo(
+            conn,
+            repo_path=repo_path,
+            name=current.name,
+            kind=kind,
+            status="active",
+            third_party=third_party,
+            notes=f"discovered by frog under {root_path}",
+        )
+        repo_roots.append(current.resolve())
+        if scan:
+            scan_result = repo_scan(conn, repo_path)
+            if scan_result.get("ok", True):
+                scanned += 1
+        discovered.append(info["repo"])
+    record_event(
+        conn,
+        kind="repo.discovered",
+        summary=f"discovered {len(discovered)} repos under {root_path}",
+        payload={"root": str(root_path), "repo_count": len(discovered), "scanned": scanned},
+    )
+    conn.commit()
+    return {
+        "ok": True,
+        "root": str(root_path),
+        "repos": sorted(discovered, key=lambda item: (item["name"], item["repo_path"])),
+        "counts": {"discovered": len(discovered), "scanned": scanned},
+    }
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return path != root
+    except ValueError:
+        return False
+
+
+def repo_info(conn, repo_ref: str) -> dict:
+    repo = resolve_repo(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    task_count = conn.execute(
+        "SELECT COUNT(*) AS count FROM tasks WHERE repo_path = ?",
+        (repo["repo_path"],),
+    ).fetchone()["count"]
+    active_lock_count = conn.execute(
+        "SELECT COUNT(*) AS count FROM locks WHERE repo_path = ? AND status = 'active'",
+        (repo["repo_path"],),
+    ).fetchone()["count"]
+    target_count = 0
+    artifact_count = 0
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'repo_targets'"
+    ).fetchone():
+        target_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM repo_targets WHERE repo_path = ?",
+            (repo["repo_path"],),
+        ).fetchone()["count"]
+        artifact_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM repo_artifacts WHERE repo_path = ?",
+            (repo["repo_path"],),
+        ).fetchone()["count"]
+    return {
+        "ok": True,
+        "repo": repo,
+        "counts": {
+            "tasks": task_count,
+            "active_locks": active_lock_count,
+            "targets": target_count,
+            "artifacts": artifact_count,
+        },
+    }
+
+
+def upsert_file(
+    conn,
+    *,
+    file_path: str,
+    repo_path: str | None,
+    file_type: str | None,
+    source_of_truth: str | None,
+    notes: str | None,
+) -> dict:
+    now = utc_now_iso()
+    file_path = str(Path(file_path).expanduser().resolve())
+    if repo_path:
+        repo_path = str(Path(repo_path).expanduser().resolve())
+    conn.execute(
+        """
+        INSERT INTO files(file_path, repo_path, file_type, source_of_truth, notes, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(file_path) DO UPDATE SET
+            repo_path = excluded.repo_path,
+            file_type = excluded.file_type,
+            source_of_truth = excluded.source_of_truth,
+            notes = excluded.notes,
+            updated_at = excluded.updated_at
+        """,
+        (file_path, repo_path, file_type, source_of_truth, notes, now, now),
+    )
+    record_event(
+        conn,
+        kind="file.upserted",
+        summary=f"classified file {Path(file_path).name}",
+        repo_path=repo_path,
+        payload={"file_path": file_path, "file_type": file_type},
+    )
+    conn.commit()
+    return file_info(conn, file_path)
+
+
+def file_list(conn, *, repo_ref: str | None, file_type: str | None) -> dict:
+    clauses = []
+    params = []
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repo_path = repo["repo_path"]
+        clauses.append("repo_path = ?")
+        params.append(repo_path)
+    if file_type:
+        clauses.append("file_type = ?")
+        params.append(file_type)
+    query = "SELECT * FROM files"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY file_path"
+    rows = conn.execute(query, tuple(params)).fetchall()
+    return {"ok": True, "repo_path": repo_path, "files": dicts(rows)}
+
+
+def file_info(conn, file_path: str) -> dict:
+    file_path = str(Path(file_path).expanduser().resolve())
+    row = conn.execute("SELECT * FROM files WHERE file_path = ?", (file_path,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"file not found: {file_path}"}
+    return {"ok": True, "file": dict(row)}
+
+
+def create_task(
+    conn,
+    *,
+    slug: str,
+    repo_ref: str | None,
+    title: str,
+    why: str | None,
+    what_text: str | None,
+    roi_note: str | None,
+    priority: str,
+    workflow_status: str,
+    git_status: str,
+    assigned_agent: str | None,
+    delegation_current: str | None,
+    delegation_other: str | None,
+    parent_task_slug: str | None,
+) -> dict:
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repo_path = repo["repo_path"]
+    now = utc_now_iso()
+    if assigned_agent:
+        ensure_agent(conn, assigned_agent)
+    conn.execute(
+        """
+        INSERT INTO tasks(
+            slug, repo_path, title, why, what_text, roi_note, priority,
+            workflow_status, git_status, assigned_agent,
+            delegation_current, delegation_other, parent_task_slug,
+            created_at, updated_at, status_confidence_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            slug,
+            repo_path,
+            title,
+            why,
+            what_text,
+            roi_note,
+            priority,
+            workflow_status,
+            git_status,
+            assigned_agent,
+            delegation_current,
+            delegation_other,
+            parent_task_slug,
+            now,
+            now,
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO task_status_history(task_slug, workflow_status, git_status, note, changed_at)
+        VALUES(?, ?, ?, ?, ?)
+        """,
+        (slug, workflow_status, git_status, "task created", now),
+    )
+    if assigned_agent:
+        conn.execute(
+            """
+            INSERT INTO task_assignments(task_slug, agent_name, assigned_at, active, notes)
+            VALUES(?, ?, ?, 1, ?)
+            """,
+            (slug, assigned_agent, now, "initial assignment"),
+        )
+    record_event(
+        conn,
+        kind="task.created",
+        summary=f"created task {slug}",
+        repo_path=repo_path,
+        task_slug=slug,
+        actor=assigned_agent,
+        payload={"priority": priority, "workflow_status": workflow_status},
+    )
+    conn.commit()
+    return task_info(conn, slug)
+
+
+def task_list(
+    conn,
+    *,
+    repo_ref: str | None,
+    workflow_status: str | None,
+    assigned_agent: str | None,
+) -> dict:
+    clauses = []
+    params = []
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repo_path = repo["repo_path"]
+        clauses.append("repo_path = ?")
+        params.append(repo_path)
+    if workflow_status:
+        clauses.append("workflow_status = ?")
+        params.append(workflow_status)
+    if assigned_agent:
+        clauses.append("assigned_agent = ?")
+        params.append(assigned_agent)
+    query = "SELECT * FROM tasks"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY priority, updated_at DESC, slug"
+    rows = conn.execute(query, tuple(params)).fetchall()
+    return {"ok": True, "repo_path": repo_path, "tasks": dicts(rows)}
+
+
+def task_info(conn, slug: str) -> dict:
+    task = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
+    if not task:
+        return {"ok": False, "error": f"task not found: {slug}"}
+    return {
+        "ok": True,
+        "task": dict(task),
+        "dependencies": dicts(
+            conn.execute(
+                "SELECT * FROM task_dependencies WHERE task_slug = ? ORDER BY depends_on_slug",
+                (slug,),
+            ).fetchall()
+        ),
+        "conflicts": dicts(
+            conn.execute(
+                "SELECT * FROM task_conflicts WHERE task_slug = ? ORDER BY conflicts_with_slug",
+                (slug,),
+            ).fetchall()
+        ),
+        "tags": [
+            row["tag"]
+            for row in conn.execute(
+                "SELECT tag FROM task_tags WHERE task_slug = ? ORDER BY tag",
+                (slug,),
+            ).fetchall()
+        ],
+        "history": dicts(
+            conn.execute(
+                "SELECT * FROM task_status_history WHERE task_slug = ? ORDER BY changed_at",
+                (slug,),
+            ).fetchall()
+        ),
+        "assignments": dicts(
+            conn.execute(
+                "SELECT * FROM task_assignments WHERE task_slug = ? ORDER BY assigned_at",
+                (slug,),
+            ).fetchall()
+        ),
+    }
+
+
+def task_set_status(
+    conn,
+    *,
+    slug: str,
+    workflow_status: str | None,
+    git_status: str | None,
+    note: str | None,
+) -> dict:
+    row = conn.execute(
+        "SELECT workflow_status, git_status, repo_path, assigned_agent FROM tasks WHERE slug = ?",
+        (slug,),
+    ).fetchone()
+    if not row:
+        return {"ok": False, "error": f"task not found: {slug}"}
+    now = utc_now_iso()
+    workflow_status = workflow_status or row["workflow_status"]
+    git_status = git_status or row["git_status"]
+    conn.execute(
+        """
+        UPDATE tasks
+        SET workflow_status = ?, git_status = ?, updated_at = ?, status_confidence_at = ?
+        WHERE slug = ?
+        """,
+        (workflow_status, git_status, now, now, slug),
+    )
+    conn.execute(
+        """
+        INSERT INTO task_status_history(task_slug, workflow_status, git_status, note, changed_at)
+        VALUES(?, ?, ?, ?, ?)
+        """,
+        (slug, workflow_status, git_status, note, now),
+    )
+    record_event(
+        conn,
+        kind="task.status",
+        summary=f"updated task {slug} status",
+        repo_path=row["repo_path"],
+        task_slug=slug,
+        actor=row["assigned_agent"],
+        payload={"workflow_status": workflow_status, "git_status": git_status, "note": note},
+    )
+    conn.commit()
+    return task_info(conn, slug)
+
+
+def task_add_dependency(conn, slug: str, depends_on_slug: str, relation: str) -> dict:
+    now = utc_now_iso()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO task_dependencies(task_slug, depends_on_slug, relation, created_at)
+        VALUES(?, ?, ?, ?)
+        """,
+        (slug, depends_on_slug, relation, now),
+    )
+    record_event(
+        conn,
+        kind="task.dependency",
+        summary=f"{slug} now depends on {depends_on_slug}",
+        task_slug=slug,
+        payload={"depends_on_slug": depends_on_slug, "relation": relation},
+    )
+    conn.commit()
+    return task_info(conn, slug)
+
+
+def task_add_conflict(conn, slug: str, conflicts_with_slug: str, reason: str | None) -> dict:
+    now = utc_now_iso()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO task_conflicts(task_slug, conflicts_with_slug, reason, created_at)
+        VALUES(?, ?, ?, ?)
+        """,
+        (slug, conflicts_with_slug, reason, now),
+    )
+    record_event(
+        conn,
+        kind="task.conflict",
+        summary=f"{slug} conflicts with {conflicts_with_slug}",
+        task_slug=slug,
+        payload={"conflicts_with_slug": conflicts_with_slug, "reason": reason},
+    )
+    conn.commit()
+    return task_info(conn, slug)
+
+
+def task_add_tags(conn, slug: str, tags: list[str]) -> dict:
+    now = utc_now_iso()
+    for tag in sorted({tag for tag in tags if tag}):
+        conn.execute(
+            "INSERT OR IGNORE INTO task_tags(task_slug, tag, created_at) VALUES(?, ?, ?)",
+            (slug, tag, now),
+        )
+    record_event(
+        conn,
+        kind="task.tag",
+        summary=f"tagged task {slug}",
+        task_slug=slug,
+        payload={"tags": sorted({tag for tag in tags if tag})},
+    )
+    conn.commit()
+    return task_info(conn, slug)
+
+
+def task_assign(conn, slug: str, agent_name: str, notes: str | None) -> dict:
+    row = conn.execute("SELECT repo_path FROM tasks WHERE slug = ?", (slug,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"task not found: {slug}"}
+    ensure_agent(conn, agent_name)
+    now = utc_now_iso()
+    conn.execute("UPDATE task_assignments SET active = 0 WHERE task_slug = ?", (slug,))
+    conn.execute(
+        "UPDATE tasks SET assigned_agent = ?, updated_at = ? WHERE slug = ?",
+        (agent_name, now, slug),
+    )
+    conn.execute(
+        """
+        INSERT INTO task_assignments(task_slug, agent_name, assigned_at, active, notes)
+        VALUES(?, ?, ?, 1, ?)
+        """,
+        (slug, agent_name, now, notes),
+    )
+    record_event(
+        conn,
+        kind="task.assigned",
+        summary=f"assigned task {slug} to {agent_name}",
+        repo_path=row["repo_path"],
+        task_slug=slug,
+        actor=agent_name,
+        payload={"notes": notes},
+    )
+    conn.commit()
+    return task_info(conn, slug)
+
+
+def _normalise_files(file_paths: list[str] | None) -> list[str]:
+    paths = []
+    for path in file_paths or []:
+        if not path:
+            continue
+        paths.append(str(Path(path).expanduser().resolve()))
+    return sorted(set(paths))
+
+
+def _mark_stale_locks(conn) -> None:
+    rows = conn.execute(
+        "SELECT id, updated_at, lease_seconds FROM locks WHERE status = 'active'"
+    ).fetchall()
+    now = utc_now()
+    stale = []
+    for row in rows:
+        updated = parse_iso(row["updated_at"])
+        if row["lease_seconds"] and (now - updated).total_seconds() > row["lease_seconds"]:
+            stale.append(row["id"])
+    for lock_id in stale:
+        conn.execute("UPDATE locks SET status = 'stale' WHERE id = ?", (lock_id,))
+        record_event(
+            conn,
+            kind="lock.stale",
+            summary=f"marked lock {lock_id} stale",
+            payload={"lock_id": lock_id},
+        )
+    if stale:
+        conn.commit()
+
+
+def _lock_rows(conn, include_inactive: bool, repo_path: str | None = None) -> list[dict]:
+    _mark_stale_locks(conn)
+    clauses = []
+    params = []
+    query = "SELECT * FROM locks"
+    if not include_inactive:
+        clauses.append("status = 'active'")
+    if repo_path:
+        clauses.append("repo_path = ?")
+        params.append(repo_path)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY started_at"
+    rows = []
+    for row in conn.execute(query, tuple(params)).fetchall():
+        payload = dict(row)
+        payload["file_paths"] = json.loads(payload.pop("file_paths_json"))
+        rows.append(payload)
+    return rows
+
+
+def _locks_conflict(candidate: dict, lock: dict) -> bool:
+    if candidate["repo_path"] and lock["repo_path"] and candidate["repo_path"] != lock["repo_path"]:
+        return False
+    if candidate["scope_key"] == lock["scope_key"]:
+        return True
+    current_files = set(candidate["file_paths"])
+    other_files = set(lock["file_paths"])
+    if not current_files or not other_files:
+        return bool(candidate["repo_path"]) and candidate["repo_path"] == lock["repo_path"]
+    return bool(current_files & other_files)
+
+
+def lock_check(conn, *, scope_key: str, repo_ref: str | None, files: list[str] | None) -> dict:
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        repo_path = repo["repo_path"] if repo else repo_ref
+        if repo and repo["repo_path"]:
+            repo_path = repo["repo_path"]
+        elif repo_ref.startswith("/"):
+            repo_path = str(Path(repo_ref).expanduser().resolve())
+    candidate = {"scope_key": scope_key, "repo_path": repo_path, "file_paths": _normalise_files(files)}
+    conflicts = [lock for lock in _lock_rows(conn, include_inactive=False) if _locks_conflict(candidate, lock)]
+    return {"ok": True, "scope_key": scope_key, "repo_path": repo_path, "conflicts": conflicts}
+
+
+def lock_acquire(
+    conn,
+    *,
+    scope_key: str,
+    repo_ref: str | None,
+    lock_kind: str,
+    files: list[str] | None,
+    agent: str,
+    pid: int | None,
+    reason: str | None,
+    lease_seconds: int,
+    eta_minutes: int | None,
+    force: bool,
+) -> dict:
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        repo_path = repo["repo_path"] if repo else str(Path(repo_ref).expanduser().resolve())
+    files = _normalise_files(files)
+    conflicts = lock_check(conn, scope_key=scope_key, repo_ref=repo_path, files=files)["conflicts"]
+    if conflicts and not force:
+        return {"ok": False, "error": "conflicting active lock exists", "conflicts": conflicts}
+    now = utc_now_iso()
+    eta_finish_at = None
+    if eta_minutes is not None:
+        eta_finish_at = (utc_now() + timedelta(minutes=eta_minutes)).isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT INTO locks(
+            scope_key, repo_path, lock_kind, file_paths_json, agent_name, pid, host, reason,
+            status, lease_seconds, started_at, updated_at, eta_finish_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+        """,
+        (
+            scope_key,
+            repo_path,
+            lock_kind,
+            json.dumps(files),
+            agent,
+            pid if pid is not None else os.getpid(),
+            socket.gethostname(),
+            reason,
+            lease_seconds,
+            now,
+            now,
+            eta_finish_at,
+        ),
+    )
+    lock_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    record_event(
+        conn,
+        kind="lock.acquired",
+        summary=f"acquired {lock_kind} lock {scope_key}",
+        repo_path=repo_path,
+        actor=agent,
+        payload={"lock_id": lock_id, "files": files},
+    )
+    conn.commit()
+    return lock_info(conn, lock_id)
+
+
+def lock_renew(conn, lock_id: int, eta_minutes: int | None) -> dict:
+    row = conn.execute("SELECT * FROM locks WHERE id = ?", (lock_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"lock not found: {lock_id}"}
+    eta_finish_at = row["eta_finish_at"]
+    if eta_minutes is not None:
+        eta_finish_at = (utc_now() + timedelta(minutes=eta_minutes)).isoformat(timespec="seconds")
+    conn.execute(
+        "UPDATE locks SET updated_at = ?, eta_finish_at = ? WHERE id = ?",
+        (utc_now_iso(), eta_finish_at, lock_id),
+    )
+    record_event(
+        conn,
+        kind="lock.renewed",
+        summary=f"renewed lock {lock_id}",
+        repo_path=row["repo_path"],
+        actor=row["agent_name"],
+        payload={"lock_id": lock_id, "eta_finish_at": eta_finish_at},
+    )
+    conn.commit()
+    return lock_info(conn, lock_id)
+
+
+def lock_release(conn, lock_id: int, *, force: bool) -> dict:
+    row = conn.execute("SELECT * FROM locks WHERE id = ?", (lock_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"lock not found: {lock_id}"}
+    if row["status"] != "active" and not force:
+        return {"ok": False, "error": f"lock is not active: {lock_id}"}
+    now = utc_now_iso()
+    conn.execute(
+        "UPDATE locks SET status = 'released', released_at = ?, updated_at = ? WHERE id = ?",
+        (now, now, lock_id),
+    )
+    record_event(
+        conn,
+        kind="lock.released",
+        summary=f"released lock {lock_id}",
+        repo_path=row["repo_path"],
+        actor=row["agent_name"],
+        payload={"lock_id": lock_id, "forced": force},
+    )
+    conn.commit()
+    return lock_info(conn, lock_id)
+
+
+def lock_list(conn, *, include_inactive: bool, repo_ref: str | None) -> dict:
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        repo_path = repo["repo_path"] if repo else str(Path(repo_ref).expanduser().resolve())
+    return {"ok": True, "locks": _lock_rows(conn, include_inactive=include_inactive, repo_path=repo_path)}
+
+
+def lock_info(conn, lock_id: int) -> dict:
+    _mark_stale_locks(conn)
+    row = conn.execute("SELECT * FROM locks WHERE id = ?", (lock_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"lock not found: {lock_id}"}
+    payload = dict(row)
+    payload["file_paths"] = json.loads(payload.pop("file_paths_json"))
+    return {"ok": True, "lock": payload}
+
+
+def status_summary(conn, *, repo_ref: str | None) -> dict:
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repo_path = repo["repo_path"]
+    params = []
+    repo_clause = ""
+    if repo_path:
+        repo_clause = " WHERE repo_path = ?"
+        params.append(repo_path)
+    tasks = conn.execute(
+        f"""
+        SELECT workflow_status, COUNT(*) AS count
+        FROM tasks
+        {repo_clause}
+        GROUP BY workflow_status
+        ORDER BY workflow_status
+        """,
+        tuple(params),
+    ).fetchall()
+    active_locks = conn.execute(
+        "SELECT COUNT(*) AS count FROM locks WHERE status = 'active'"
+        + (" AND repo_path = ?" if repo_path else ""),
+        tuple([repo_path] if repo_path else []),
+    ).fetchone()["count"]
+    return {
+        "ok": True,
+        "repo_path": repo_path,
+        "counts": {
+            "repos": conn.execute("SELECT COUNT(*) AS count FROM repos WHERE third_party = 0").fetchone()["count"],
+            "files": conn.execute("SELECT COUNT(*) AS count FROM files").fetchone()["count"],
+            "tasks": sum(row["count"] for row in tasks),
+            "active_locks": active_locks,
+        },
+        "tasks_by_workflow_status": dicts(tasks),
+    }
+
+
+def ps_summary(conn, *, repo_ref: str | None) -> dict:
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repo_path = repo["repo_path"]
+    task_query = """
+        SELECT *
+        FROM tasks
+        WHERE workflow_status NOT IN ('done')
+    """
+    task_params = []
+    lock_query = "SELECT * FROM locks WHERE status = 'active'"
+    lock_params = []
+    if repo_path:
+        task_query += " AND repo_path = ?"
+        task_params.append(repo_path)
+        lock_query += " AND repo_path = ?"
+        lock_params.append(repo_path)
+    task_query += " ORDER BY priority, updated_at DESC, slug"
+    lock_query += " ORDER BY started_at"
+    tasks = dicts(conn.execute(task_query, tuple(task_params)).fetchall())
+    locks = []
+    for row in conn.execute(lock_query, tuple(lock_params)).fetchall():
+        payload = dict(row)
+        payload["file_paths"] = json.loads(payload.pop("file_paths_json"))
+        locks.append(payload)
+    recent = log_tail(conn, limit=8, repo_ref=repo_ref)
+    return {
+        "ok": True,
+        "repo_path": repo_path,
+        "active_tasks": tasks,
+        "active_locks": locks,
+        "recent_events": recent["events"],
+    }
+
+
+def log_tail(conn, *, limit: int, repo_ref: str | None) -> dict:
+    repo_path = None
+    params = []
+    query = "SELECT * FROM event_log"
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repo_path = repo["repo_path"]
+        query += " WHERE repo_path = ?"
+        params.append(repo_path)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, tuple(params)).fetchall()
+    events = []
+    for row in rows:
+        payload = dict(row)
+        payload["payload"] = json.loads(payload.pop("payload_json"))
+        events.append(payload)
+    events.reverse()
+    return {"ok": True, "repo_path": repo_path, "events": events}
+
+
+def log_since(conn, *, after_id: int, repo_ref: str | None) -> dict:
+    repo_path = None
+    params = [after_id]
+    query = "SELECT * FROM event_log WHERE id > ?"
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repo_path = repo["repo_path"]
+        query += " AND repo_path = ?"
+        params.append(repo_path)
+    query += " ORDER BY id"
+    rows = conn.execute(query, tuple(params)).fetchall()
+    events = []
+    for row in rows:
+        payload = dict(row)
+        payload["payload"] = json.loads(payload.pop("payload_json"))
+        events.append(payload)
+    return {"ok": True, "repo_path": repo_path, "events": events}
+
+
+KNOWN_ARTIFACT_DIRS = ("dist", "build", ".next", "out", "target")
+SOURCE_EXTENSIONS = {
+    ".py",
+    ".rs",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".json",
+    ".toml",
+    ".yml",
+    ".yaml",
+    ".md",
+    ".html",
+    ".css",
+    ".scss",
+    ".sh",
+}
+
+UNIT_KIND_BY_SOURCE = {
+    "makefile": "make",
+    "package_json": "node",
+    "cargo_toml": "rust",
+    "pyproject": "python",
+    "compose": "compose",
+}
+
+
+def _repo_required(conn, repo_ref: str) -> dict | None:
+    repo = resolve_repo(conn, repo_ref)
+    if not repo:
+        return None
+    if not conn.execute("SELECT 1 FROM repos WHERE repo_path = ?", (repo["repo_path"],)).fetchone():
+        register_repo(
+            conn,
+            repo_path=repo["repo_path"],
+            name=repo.get("name"),
+            kind=repo.get("kind"),
+            status="active",
+            third_party=bool(repo.get("third_party", 0)),
+            notes=repo.get("notes"),
+        )
+        repo = resolve_repo(conn, repo["repo_path"])
+    return repo
+
+
+def _manifest_candidates(repo_path: Path) -> list[tuple[str, Path]]:
+    candidates: list[tuple[str, Path]] = []
+    names = [
+        ("makefile", "Makefile"),
+        ("package_json", "package.json"),
+        ("cargo_toml", "Cargo.toml"),
+        ("pyproject", "pyproject.toml"),
+        ("compose", "docker-compose.yml"),
+        ("compose", "compose.yml"),
+        ("compose", "docker-compose.yaml"),
+        ("compose", "compose.yaml"),
+    ]
+    for kind, name in names:
+        for path in [repo_path / name, *repo_path.glob(f"*/{name}")]:
+            if path.exists():
+                candidates.append((kind, path))
+    return sorted({(kind, path.resolve()) for kind, path in candidates}, key=lambda item: str(item[1]))
+
+
+def _upsert_unit(
+    conn,
+    *,
+    repo_path: str,
+    unit_path: str,
+    rel_path: str,
+    kind: str,
+    discovery_source: str,
+) -> None:
+    now = utc_now_iso()
+    name = Path(unit_path).name if rel_path != "." else "."
+    conn.execute(
+        """
+        INSERT INTO units(unit_path, repo_path, name, rel_path, kind, status, discovery_source, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, 'active', ?, ?, ?)
+        ON CONFLICT(unit_path) DO UPDATE SET
+            repo_path = excluded.repo_path,
+            name = excluded.name,
+            rel_path = excluded.rel_path,
+            kind = excluded.kind,
+            discovery_source = excluded.discovery_source,
+            updated_at = excluded.updated_at
+        """,
+        (unit_path, repo_path, name, rel_path, kind, discovery_source, now, now),
+    )
+
+
+def unit_discover(conn, *, repo_ref: str | None = None, all_repos: bool = False) -> dict:
+    repos: list[dict]
+    if all_repos:
+        repos = repo_list(conn, include_third_party=True)["repos"]
+    else:
+        if not repo_ref:
+            inferred = infer_repo_from_cwd(conn)
+            if not inferred:
+                return {"ok": False, "error": "no repo specified and cwd is not inside a known repo"}
+            repo_ref = inferred["repo_path"]
+        repo = _repo_required(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repos = [repo]
+
+    discovered: list[dict] = []
+    for repo in repos:
+        repo_root = Path(repo["repo_path"])
+        conn.execute("DELETE FROM units WHERE repo_path = ?", (repo["repo_path"],))
+        by_dir: dict[Path, set[str]] = {}
+        for source_kind, path in _manifest_candidates(repo_root):
+            by_dir.setdefault(path.parent.resolve(), set()).add(source_kind)
+        for workdir, source_kinds in sorted(by_dir.items(), key=lambda item: str(item[0])):
+            rel_path = "."
+            if workdir != repo_root:
+                rel_path = workdir.relative_to(repo_root).as_posix()
+            if any(part in DISCOVERY_EXCLUDED_DIRS or part == ".claude" for part in workdir.parts):
+                continue
+            if workdir != repo_root and ".git" in workdir.parts:
+                continue
+            kind = "+".join(sorted(UNIT_KIND_BY_SOURCE.get(kind, kind) for kind in source_kinds))
+            _upsert_unit(
+                conn,
+                repo_path=repo["repo_path"],
+                unit_path=str(workdir),
+                rel_path=rel_path,
+                kind=kind,
+                discovery_source="manifest",
+            )
+        repo_units = unit_list(conn, repo_ref=repo["repo_path"])["units"]
+        discovered.extend(repo_units)
+        record_event(
+            conn,
+            kind="unit.discovered",
+            summary=f"discovered {len(repo_units)} units in {repo['name']}",
+            repo_path=repo["repo_path"],
+            payload={"unit_count": len(repo_units)},
+        )
+    conn.commit()
+    return {"ok": True, "units": discovered}
+
+
+def unit_list(conn, *, repo_ref: str | None) -> dict:
+    clauses = []
+    params: list[str] = []
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repo_path = repo["repo_path"]
+        clauses.append("repo_path = ?")
+        params.append(repo_path)
+    query = "SELECT * FROM units"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY repo_path, rel_path"
+    rows = dicts(conn.execute(query, tuple(params)).fetchall())
+    for row in rows:
+        row.update(path_metadata(row["unit_path"]))
+        row.update(path_activity(row["unit_path"]))
+    return {"ok": True, "repo_path": repo_path, "units": rows}
+
+
+def _insert_target(
+    conn,
+    *,
+    repo_path: str,
+    target_kind: str,
+    name: str,
+    command: str,
+    workdir: str,
+    runner: str,
+    source: str,
+    confidence: float,
+    artifact_paths: list[str] | None = None,
+    notes: str | None = None,
+    needs_lock: bool = False,
+    lock_kind: str | None = None,
+    destructive: bool = False,
+    network_required: bool = False,
+) -> None:
+    now = utc_now_iso()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO repo_targets(
+            repo_path, target_kind, name, command, workdir, runner, source,
+            confidence, aggregate, needs_lock, lock_kind, destructive,
+            network_required, artifact_paths_json, notes, created_at, updated_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            repo_path,
+            target_kind,
+            name,
+            command,
+            workdir,
+            runner,
+            source,
+            confidence,
+            int(needs_lock),
+            lock_kind,
+            int(destructive),
+            int(network_required),
+            json.dumps(sorted(set(artifact_paths or []))),
+            notes,
+            now,
+            now,
+        ),
+    )
+    for artifact_path in sorted(set(artifact_paths or [])):
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO repo_artifacts(
+                repo_path, artifact_name, path_hint, source, target_kind, target_name, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                repo_path,
+                f"{target_kind}:{name}",
+                artifact_path,
+                source,
+                target_kind,
+                name,
+                now,
+                now,
+            ),
+        )
+
+
+def _record_detection_source(conn, *, repo_path: str, source_kind: str, source_path: Path, payload: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO repo_detection_sources(repo_path, source_kind, source_path, scanned_at, payload_json)
+        VALUES(?, ?, ?, ?, ?)
+        """,
+        (repo_path, source_kind, str(source_path), utc_now_iso(), json.dumps(payload, sort_keys=True)),
+    )
+
+
+def _make_target_name(repo_root: Path, workdir: Path, label: str) -> str:
+    if workdir == repo_root:
+        return label
+    rel = workdir.relative_to(repo_root).as_posix().replace("/", ":")
+    return f"{rel}:{label}"
+
+
+def _detect_from_makefile(conn, repo_root: Path, path: Path) -> None:
+    text = path.read_text(errors="ignore")
+    targets = sorted(
+        {
+            match.group(1)
+            for match in re.finditer(r"^([A-Za-z0-9_.-]+)\s*:", text, flags=re.MULTILINE)
+            if not match.group(1).startswith(".")
+        }
+    )
+    _record_detection_source(
+        conn,
+        repo_path=str(repo_root),
+        source_kind="makefile",
+        source_path=path,
+        payload={"targets": targets},
+    )
+    interesting = {
+        "build": "build",
+        "clean": "clean",
+        "test": "test",
+        "lint": "lint",
+        "check": "check",
+        "verify": "verify",
+        "deploy": "deploy",
+    }
+    for target, kind in interesting.items():
+        if target in targets:
+            artifact_paths = []
+            if target == "build":
+                artifact_paths = [str(path.parent / entry) for entry in KNOWN_ARTIFACT_DIRS]
+            _insert_target(
+                conn,
+                repo_path=str(repo_root),
+                target_kind=kind,
+                name=_make_target_name(repo_root, path.parent, target),
+                command=f"make {target}",
+                workdir=str(path.parent),
+                runner="make",
+                source=str(path),
+                confidence=0.98,
+                artifact_paths=artifact_paths,
+            )
+
+
+def _detect_from_package_json(conn, repo_root: Path, path: Path) -> None:
+    payload = json.loads(path.read_text())
+    scripts = payload.get("scripts", {})
+    _record_detection_source(
+        conn,
+        repo_path=str(repo_root),
+        source_kind="package_json",
+        source_path=path,
+        payload={"scripts": scripts},
+    )
+    script_map = {
+        "build": "build",
+        "clean": "clean",
+        "test": "test",
+        "lint": "lint",
+        "check": "check",
+        "verify": "verify",
+        "deploy": "deploy",
+        "dev": "dev",
+        "start": "start",
+        "types": "build",
+        "typecheck": "check",
+    }
+    for script_name, command_kind in script_map.items():
+        if script_name not in scripts:
+            continue
+        artifact_paths = []
+        if command_kind == "build":
+            artifact_paths = [str(path.parent / entry) for entry in ("dist", "build", ".next", "out")]
+        _insert_target(
+            conn,
+            repo_path=str(repo_root),
+            target_kind=command_kind,
+            name=_make_target_name(repo_root, path.parent, script_name),
+            command=f"npm run {script_name}",
+            workdir=str(path.parent),
+            runner="npm",
+            source=str(path),
+            confidence=0.95 if script_name in {"build", "clean", "test", "lint", "deploy"} else 0.72,
+            artifact_paths=artifact_paths,
+            network_required=script_name in {"deploy", "dev"},
+        )
+
+
+def _detect_from_cargo_toml(conn, repo_root: Path, path: Path) -> None:
+    payload = tomllib.loads(path.read_text())
+    _record_detection_source(
+        conn,
+        repo_path=str(repo_root),
+        source_kind="cargo_toml",
+        source_path=path,
+        payload={"keys": sorted(payload.keys())},
+    )
+    workdir = path.parent
+    label = "cargo" if workdir == repo_root else workdir.name
+    artifact_paths = [str(workdir / "target")]
+    specs = [
+        ("build", "cargo build", 0.96, artifact_paths, False),
+        ("clean", "cargo clean", 0.96, artifact_paths, True),
+        ("test", "cargo test", 0.96, [], False),
+        ("lint", "cargo fmt --all --check", 0.85, [], False),
+        ("check", "cargo check", 0.93, [], False),
+        ("verify", "cargo test", 0.7, [], False),
+    ]
+    for kind, command, confidence, artifacts, destructive in specs:
+        _insert_target(
+            conn,
+            repo_path=str(repo_root),
+            target_kind=kind,
+            name=_make_target_name(repo_root, workdir, label),
+            command=command,
+            workdir=str(workdir),
+            runner="cargo",
+            source=str(path),
+            confidence=confidence,
+            artifact_paths=artifacts,
+            destructive=destructive,
+        )
+
+
+def _detect_from_pyproject(conn, repo_root: Path, path: Path) -> None:
+    payload = tomllib.loads(path.read_text())
+    _record_detection_source(
+        conn,
+        repo_path=str(repo_root),
+        source_kind="pyproject",
+        source_path=path,
+        payload={"keys": sorted(payload.keys())},
+    )
+    tool = payload.get("tool", {})
+    deps = payload.get("dependency-groups", {})
+    if "pytest" in json.dumps(deps) or "pytest" in json.dumps(tool):
+        _insert_target(
+            conn,
+            repo_path=str(repo_root),
+            target_kind="test",
+            name=_make_target_name(repo_root, path.parent, "pytest"),
+            command="uv run pytest",
+            workdir=str(path.parent),
+            runner="uv",
+            source=str(path),
+            confidence=0.78,
+        )
+    _insert_target(
+        conn,
+        repo_path=str(repo_root),
+        target_kind="check",
+        name=_make_target_name(repo_root, path.parent, "compileall"),
+        command="python3 -m compileall .",
+        workdir=str(path.parent),
+        runner="python",
+        source=str(path),
+        confidence=0.65,
+    )
+
+
+def _detect_from_compose(conn, repo_root: Path, path: Path) -> None:
+    _record_detection_source(
+        conn,
+        repo_path=str(repo_root),
+        source_kind="compose",
+        source_path=path,
+        payload={"file": path.name},
+    )
+    _insert_target(
+        conn,
+        repo_path=str(repo_root),
+        target_kind="build",
+        name=_make_target_name(repo_root, path.parent, path.stem),
+        command=f"docker compose -f {path.name} build",
+        workdir=str(path.parent),
+        runner="docker-compose",
+        source=str(path),
+        confidence=0.88,
+        needs_lock=True,
+        lock_kind="build",
+    )
+
+
+def repo_scan(conn, repo_ref: str) -> dict:
+    repo = _repo_required(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    repo_root = Path(repo["repo_path"])
+    conn.execute("DELETE FROM repo_targets WHERE repo_path = ?", (repo["repo_path"],))
+    conn.execute("DELETE FROM repo_artifacts WHERE repo_path = ?", (repo["repo_path"],))
+    conn.execute("DELETE FROM repo_detection_sources WHERE repo_path = ?", (repo["repo_path"],))
+    for kind, path in _manifest_candidates(repo_root):
+        if kind == "makefile":
+            _detect_from_makefile(conn, repo_root, path)
+        elif kind == "package_json":
+            _detect_from_package_json(conn, repo_root, path)
+        elif kind == "cargo_toml":
+            _detect_from_cargo_toml(conn, repo_root, path)
+        elif kind == "pyproject":
+            _detect_from_pyproject(conn, repo_root, path)
+        elif kind == "compose":
+            _detect_from_compose(conn, repo_root, path)
+    record_event(
+        conn,
+        kind="repo.scanned",
+        summary=f"scanned repo {repo['name']}",
+        repo_path=repo["repo_path"],
+        payload={"sources": len(_manifest_candidates(repo_root))},
+    )
+    conn.commit()
+    return repo_targets(conn, repo_ref)
+
+
+def repo_targets(conn, repo_ref: str) -> dict:
+    repo = resolve_repo(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    rows = conn.execute(
+        "SELECT * FROM repo_targets WHERE repo_path = ? ORDER BY target_kind, confidence DESC, name",
+        (repo["repo_path"],),
+    ).fetchall()
+    targets = []
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        payload = dict(row)
+        payload["artifact_paths"] = json.loads(payload.pop("artifact_paths_json"))
+        targets.append(payload)
+        grouped.setdefault(payload["target_kind"], []).append(payload)
+    aggregates = []
+    for kind, items in sorted(grouped.items()):
+        aggregates.append(
+            {
+                "repo_path": repo["repo_path"],
+                "target_kind": kind,
+                "name": kind,
+                "command": None,
+                "workdir": repo["repo_path"],
+                "runner": "aggregate",
+                "source": "frog-scan",
+                "confidence": max(item["confidence"] for item in items),
+                "aggregate": 1,
+                "artifact_paths": sorted(
+                    {artifact for item in items for artifact in item["artifact_paths"]}
+                ),
+                "children": [item["name"] for item in items],
+            }
+        )
+    return {"ok": True, "repo": repo, "targets": [*aggregates, *targets]}
+
+
+def _source_latest_mtime(workdir: Path) -> float:
+    latest = 0.0
+    for path in workdir.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in {"node_modules", ".git", "__pycache__", "dist", "build", ".next", "out", "target"} for part in path.parts):
+            continue
+        if path.suffix and path.suffix not in SOURCE_EXTENSIONS:
+            continue
+        try:
+            latest = max(latest, path.stat().st_mtime)
+        except OSError:
+            pass
+    return latest
+
+
+def repo_artifacts(conn, repo_ref: str) -> dict:
+    repo = resolve_repo(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    rows = conn.execute(
+        "SELECT * FROM repo_artifacts WHERE repo_path = ? ORDER BY artifact_name, path_hint",
+        (repo["repo_path"],),
+    ).fetchall()
+    artifacts = []
+    for row in rows:
+        payload = dict(row)
+        artifact_path = Path(payload["path_hint"])
+        payload["exists"] = artifact_path.exists()
+        if artifact_path.exists():
+            try:
+                payload["mtime"] = artifact_path.stat().st_mtime
+            except OSError:
+                payload["mtime"] = None
+        artifacts.append(payload)
+    return {"ok": True, "repo": repo, "artifacts": artifacts}
+
+
+def repo_artifacts_stale(conn, repo_ref: str) -> dict:
+    repo = resolve_repo(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    all_artifacts = repo_artifacts(conn, repo_ref)
+    if not all_artifacts["ok"]:
+        return all_artifacts
+    latest_source = _source_latest_mtime(Path(repo["repo_path"]))
+    stale = []
+    for artifact in all_artifacts["artifacts"]:
+        artifact_path = Path(artifact["path_hint"])
+        exists = artifact_path.exists()
+        artifact["stale"] = (not exists) or (
+            exists and artifact.get("mtime") is not None and artifact["mtime"] < latest_source
+        )
+        if artifact["stale"]:
+            stale.append(artifact)
+    return {"ok": True, "repo": repo, "artifacts": stale, "source_latest_mtime": latest_source}
+
+
+def _targets_for_kind(conn, repo_path: str, target_kind: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT * FROM repo_targets
+        WHERE repo_path = ? AND target_kind = ?
+        ORDER BY confidence DESC, workdir, name
+        """,
+        (repo_path, target_kind),
+    ).fetchall()
+    targets = []
+    for row in rows:
+        payload = dict(row)
+        payload["artifact_paths"] = json.loads(payload.pop("artifact_paths_json"))
+        targets.append(payload)
+    return targets
+
+
+def repo_run(conn, repo_ref: str, target_kind: str) -> dict:
+    repo = _repo_required(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    if not conn.execute(
+        "SELECT 1 FROM repo_targets WHERE repo_path = ? LIMIT 1", (repo["repo_path"],)
+    ).fetchone():
+        repo_scan(conn, repo_ref)
+    targets = _targets_for_kind(conn, repo["repo_path"], target_kind)
+    if not targets:
+        return {
+            "ok": False,
+            "error": f"no {target_kind} targets detected for {repo['name']}",
+            "repo": repo,
+        }
+    results = []
+    ok = True
+    for target in targets:
+        proc = subprocess.run(
+            target["command"],
+            cwd=target["workdir"],
+            shell=True,
+            text=True,
+            capture_output=True,
+        )
+        result = {
+            "name": target["name"],
+            "target_kind": target_kind,
+            "command": target["command"],
+            "workdir": target["workdir"],
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+        results.append(result)
+        record_event(
+            conn,
+            kind=f"repo.run.{target_kind}",
+            summary=f"ran {target_kind} target {target['name']}",
+            repo_path=repo["repo_path"],
+            payload={
+                "command": target["command"],
+                "workdir": target["workdir"],
+                "returncode": proc.returncode,
+            },
+        )
