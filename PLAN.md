@@ -49,5 +49,5 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
 - [x] Causality: `frog log why <task-slug>` + `frog log blame <file>`.
 
 ## Phase Z - surface sync
-- [ ] Update completion (bash+fish), help epilog, README,
+- [x] Update completion (bash+fish), help epilog, README,
       /data/src/AGENTS.md, MCP tool list. Final `unittest` green.

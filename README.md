@@ -60,3 +60,28 @@ for remote SSH-backed workspaces.
 - The service layer is structured so it can later back an HTTP API.
 - The database stores coordination metadata, not full architecture or product
   docs.
+
+## Multi-agent coordination (evolution)
+
+frog's differentiator is the coordination/scheduling/forensics layer:
+
+- `frog lock audit [--repo R] [--agent N]` — flag working-tree changes
+  not covered by your active lock (advisory → *noticed*).
+- `frog lock reap` / `frog lock list --status {active,stale,released,all}`.
+- `frog repo affected [--since REF]` / `frog repo build --affected`
+  (input-fingerprinted `target_runs` cache: unchanged targets are skipped).
+- `frog repo dep add DEPENDENT DEPENDENCY` — declared cross-repo edges;
+  upstream changes fan out to dependents.
+- `frog task next [--agent N]` — highest-ROI unblocked slice (deps,
+  conflicts, locks, ownership aware). The scheduler an issue tracker isn't.
+- `frog log why SLUG` / `frog log blame FILE` — causality/forensics.
+- `frog sync pull WS` / `frog sync list` — read-only event mirror of
+  another workspace (single-writer-per-DB; safe cross-box visibility).
+- `connect()` enforces WAL + local-FS-only AGENTS.db (network-FS sqlite
+  refused; use `--workspace` which RPCs over SSH).
+- Runner delegation: a declared Taskfile/justfile/mise outranks
+  re-derived make/npm targets — frog orchestrates, the runner builds.
+- Opt-in `hooks/pretooluse-lock-guard.sh` bridges locks to the harness.
+
+See `PLAN.md` for the phased rollout; `tests/` is a stdlib unittest
+suite (`python3 -m unittest discover -s tests`).

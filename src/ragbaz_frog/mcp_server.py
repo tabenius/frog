@@ -140,6 +140,46 @@ def _tool_specs() -> list[dict]:
             },
         },
         {
+            "name": "frog_task_next",
+            "description": "Highest-ROI unblocked task slice an agent can safely take now (deps/conflicts/locks/ownership aware).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "agent": {"type": "string"},
+                    "repo_ref": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["agent"],
+            },
+        },
+        {
+            "name": "frog_lock_audit",
+            "description": "Flag working-tree changes not covered by an active lock held by the acting agent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "repo_ref": {"type": "string"},
+                    "agent": {"type": "string"},
+                },
+                "required": ["agent"],
+            },
+        },
+        {
+            "name": "frog_repo_affected",
+            "description": "Targets affected by working-tree / since-REF changes (+ declared downstream repos).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "repo_ref": {"type": "string"},
+                    "since": {"type": "string"},
+                },
+                "required": ["repo_ref"],
+            },
+        },
+        {
             "name": "frog_workspace_list",
             "description": "List configured frog workspaces.",
             "inputSchema": {"type": "object", "properties": {}},
@@ -229,6 +269,25 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
                 conn,
                 limit=int(arguments.get("limit", 20)),
                 repo_ref=arguments.get("repo_ref"),
+            )
+        if tool_name == "frog_task_next":
+            return store.task_next(
+                conn,
+                agent=arguments.get("agent", "unknown"),
+                repo_ref=arguments.get("repo_ref"),
+                limit=int(arguments.get("limit", 1)),
+            )
+        if tool_name == "frog_lock_audit":
+            return store.lock_audit(
+                conn,
+                repo_ref=arguments.get("repo_ref"),
+                agent=arguments.get("agent", "unknown"),
+            )
+        if tool_name == "frog_repo_affected":
+            return store.repo_affected(
+                conn,
+                arguments["repo_ref"],
+                since=arguments.get("since"),
             )
         if tool_name == "frog_workspace_list":
             return frog_config.list_workspaces()
