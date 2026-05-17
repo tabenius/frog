@@ -51,3 +51,31 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
 ## Phase Z - surface sync
 - [x] Update completion (bash+fish), help epilog, README,
       /data/src/AGENTS.md, MCP tool list. Final `unittest` green.
+
+---
+
+# Phase II - consolidation (identity, workflow, proof, board)
+
+- [ ] II-1 Agent identity: store.current_agent()/current_session()
+      (env FROG_AGENT/FROG_SESSION, else $USER + host:pid);
+      `frog agent whoami|register`; thread identity defaults into
+      lock/task/audit/scheduler instead of bare $USER.
+- [ ] II-2 Workflow composition: `frog task claim <slug>` (assign + lock +
+      in_progress + event, atomic) and `frog task finish <slug>`
+      (affected build/test gate -> done + release + event), reporting
+      newly-unblocked dependents.
+- [ ] II-3 Concurrency stress test: N processes hammering
+      lock_acquire / task_claim -> no double-grant, no deadlock.
+- [ ] II-4 Remote seam: injectable dispatch so sync/workspace paths are
+      testable without SSH; tests.
+- [ ] II-5 `frog db gc [--older-than D] [--keep N]`: prune event_log /
+      event_mirror / target_runs, WAL checkpoint + VACUUM.
+- [ ] II-6 `frog doctor`: health over locks/tasks/events/DB size
+      (stale locks, deps-on-done-but-blocked data bugs, mirror lag).
+- [ ] II-7 Packaging: pyproject.toml + console_scripts (frog, frog-mcp),
+      pinned Python floor; bin/ shims kept.
+- [ ] II-8 A3 decision: with identity, lock guard enforces only against
+      a *different* agent's active lock; still opt-in but now meaningful.
+- [ ] II-9 Capstone: `frog board` realtime colored lifecycle board over
+      event_log (enters / assigned / status / claimed / finished + which
+      dependents unlock), + design writeup.
