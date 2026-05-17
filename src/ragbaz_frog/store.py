@@ -68,9 +68,64 @@ def parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+class RemoteDbError(RuntimeError):
+    """Raised when the AGENTS.db path is on a non-local filesystem."""
+
+
+def _fs_type(path: Path) -> str | None:
+    """Best-effort filesystem type for the nearest existing ancestor of
+    `path`, parsed from /proc/mounts. Returns None if undeterminable."""
+    try:
+        mounts = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return None
+    target = path
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    try:
+        target = target.resolve()
+    except OSError:
+        pass
+    best = None
+    best_len = -1
+    for line in mounts:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mnt, fstype = parts[1], parts[2]
+        try:
+            mp = Path(mnt)
+        except ValueError:
+            continue
+        try:
+            target.relative_to(mp)
+        except ValueError:
+            continue
+        if len(str(mp)) > best_len:
+            best, best_len = fstype, len(str(mp))
+    return best
+
+
+_REMOTE_FS = {"nfs", "nfs4", "fuse.sshfs", "cifs", "smbfs", "fuse.rclone"}
+
+
+def _guard_local_db(path: Path) -> None:
+    if os.environ.get("FROG_ALLOW_REMOTE_DB") == "1":
+        return
+    fstype = _fs_type(path)
+    if fstype in _REMOTE_FS:
+        raise RemoteDbError(
+            f"AGENTS.db at {path} is on a {fstype} (non-local) filesystem. "
+            "SQLite coordination over a network FS is unsafe. Use a named "
+            "workspace instead -- `frog --workspace NAME ...` RPCs over SSH "
+            "to the box that owns that DB. (Override: FROG_ALLOW_REMOTE_DB=1.)"
+        )
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _guard_local_db(path)
     conn = sqlite3.connect(path, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

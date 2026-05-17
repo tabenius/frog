@@ -12,6 +12,14 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
 - [x] Test harness: stdlib `unittest` under `tests/`, zero new deps,
       `python3 -m unittest discover -s tests` green.
 
+## Phase C - multi-writer hardening
+- [x] C2: `connect()` guard refuses a `--db` on a non-local filesystem
+      (nfs/fuse.sshfs) -> point at `--workspace` (which RPCs) instead.
+      Makes "DB is local to its host" an enforced invariant.
+- [ ] C3: `frog sync pull <workspace>` streams remote events since the
+      last cursor into a read-only `event_mirror` (single-writer-per-DB,
+      many-reader-via-replay). migration `006_event_mirror.sql`.
+
 ## Phase A - locks: advisory -> noticed
 - [x] A1 `frog lock audit [--repo R]`: git-dirty files not covered by an
       active lock held by the current/declared agent -> `lock.audit.uncovered`
