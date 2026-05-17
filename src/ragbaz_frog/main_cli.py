@@ -131,7 +131,7 @@ def _completion_script(shell: str) -> str:
       fi
       ;;
     unit) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "discover list" -- "$cur") ) ;;
-    task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list info status dependency conflict tag assign" -- "$cur") ) ;;
+    task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list next info status dependency conflict tag assign" -- "$cur") ) ;;
     lock) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "check acquire renew release list info" -- "$cur") ) ;;
     file) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "upsert list info" -- "$cur") ) ;;
     log) COMPREPLY=( $(compgen -W "--follow --limit --repo -f" -- "$cur") ) ;;
@@ -153,7 +153,7 @@ complete -c frog -n '__fish_seen_subcommand_from workspace' -a 'add list use'
 complete -c frog -n '__fish_seen_subcommand_from repo' -a '{repo_subs}'
 complete -c frog -n '__fish_seen_subcommand_from {" ".join(sorted(REPO_ACTIONS))} info' -a '{repo_names}'
 complete -c frog -n '__fish_seen_subcommand_from unit' -a 'discover list'
-complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list info status dependency conflict tag assign'
+complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list next info status dependency conflict tag assign'
 complete -c frog -n '__fish_seen_subcommand_from lock' -a 'check acquire renew release list info'
 complete -c frog -n '__fish_seen_subcommand_from file' -a 'upsert list info'
 complete -c frog -n '__fish_seen_subcommand_from log' -a '--follow --limit --repo -f'
@@ -278,6 +278,16 @@ def _emit(payload: dict, as_json: bool) -> int:
                 print(f"- {item}")
         else:
             print("no obvious issues")
+        return 0
+    if "eligible" in payload and "considered" in payload:
+        print(f"agent {payload['agent']}: {payload['eligible']} eligible "
+              f"of {payload['considered']} considered")
+        for tk in payload["tasks"]:
+            print(f"  -> {tk['slug']}  {tk['priority']}  {tk['title']}")
+        if not payload["tasks"]:
+            print("  (nothing unblocked)")
+        for s in payload.get("skipped", []):
+            print(f"  skip {s['slug']}: {s['reason']}")
         return 0
     if "tasks" in payload:
         for task in payload["tasks"]:
@@ -878,6 +888,11 @@ def build_parser() -> argparse.ArgumentParser:
     task_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     task_list.add_argument("--workflow-status")
     task_list.add_argument("--assigned-agent")
+    task_next = task_sub.add_parser(
+        "next", help="Highest-ROI unblocked slice you can safely take now")
+    task_next.add_argument("--agent", help="Acting agent (default $USER)")
+    task_next.add_argument("--repo", dest="repo_ref", metavar="REPO")
+    task_next.add_argument("--limit", type=int, default=1)
     task_info = task_sub.add_parser("info", help="Show one task")
     task_info.add_argument("slug")
     task_status = task_sub.add_parser("status", help="Update or show task status")
@@ -1175,6 +1190,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if args.task_command == "list":
                 return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=args.workflow_status, assigned_agent=args.assigned_agent), args.json)
+            if args.task_command == "next":
+                agent = args.agent or os.environ.get("USER", "unknown")
+                return _emit(
+                    store.task_next(conn, agent=agent,
+                                    repo_ref=args.repo_ref, limit=args.limit),
+                    args.json,
+                )
             if args.task_command == "info":
                 return _emit(store.task_info(conn, args.slug), args.json)
             if args.task_command == "status":

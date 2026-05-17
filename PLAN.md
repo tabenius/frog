@@ -43,7 +43,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
 ## Phase "do it better" - lean into the niche
 - [x] Runner delegation: detect Taskfile/justfile/mise/moon, emit
       delegating targets (high confidence, `runner` recorded).
-- [ ] Agent scheduler: `frog task next --agent X` = highest-ROI unblocked
+- [x] Agent scheduler: `frog task next --agent X` = highest-ROI unblocked
       slice (deps satisfied, no active conflict, repo not locked by another
       agent, priority-ordered).
 - [ ] Causality: `frog log why <task-slug>` + `frog log blame <file>`.

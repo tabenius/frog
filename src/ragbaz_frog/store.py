@@ -935,6 +935,118 @@ def task_list(
     return {"ok": True, "repo_path": repo_path, "tasks": dicts(rows)}
 
 
+_WF_DONE = {"done", "cancelled", "abandoned", "archived"}
+_WF_BLOCKED = {"blocked"}
+_WF_INPROG = {"in_progress", "in-progress", "doing", "wip", "active",
+              "review", "started"}
+
+
+def _priority_rank(p: str | None) -> int:
+    if p and len(p) >= 2 and p[0] in "pP" and p[1:].isdigit():
+        return int(p[1:])
+    return 9
+
+
+def _task_is_inprogress(conn, slug: str) -> bool:
+    row = conn.execute(
+        "SELECT workflow_status FROM tasks WHERE slug = ?", (slug,)
+    ).fetchone()
+    if row and (row["workflow_status"] or "").lower() in _WF_INPROG:
+        return True
+    a = conn.execute(
+        "SELECT 1 FROM task_assignments WHERE task_slug = ? AND active = 1 LIMIT 1",
+        (slug,),
+    ).fetchone()
+    return bool(a)
+
+
+def task_next(conn, *, agent: str, repo_ref: str | None = None,
+              limit: int = 1) -> dict:
+    """Highest-ROI unblocked slice `agent` can safely take now:
+      - not done/blocked, git not done
+      - every depends_on dependency is done
+      - no conflicting task is currently in progress
+      - the task's repo is not locked by another agent
+      - not already owned by a different agent
+    Ordered by priority then age."""
+    repo_path = None
+    if repo_ref:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        repo_path = repo["repo_path"]
+
+    rows = conn.execute("SELECT * FROM tasks").fetchall()
+    active_locks = _lock_rows(conn, include_inactive=False)
+    locked_repos_by_other = {
+        lk["repo_path"] for lk in active_locks
+        if lk["repo_path"] and lk["agent_name"] != agent
+    }
+
+    eligible, skipped = [], []
+    for r in rows:
+        task = dict(r)
+        wf = (task["workflow_status"] or "").lower()
+        if repo_path and task["repo_path"] != repo_path:
+            continue
+        if wf in _WF_DONE:
+            continue
+        reason = None
+        if wf in _WF_BLOCKED or (task["git_status"] or "") == "done":
+            reason = f"status {wf or task['git_status']}"
+        if reason is None:
+            unmet = []
+            for d in conn.execute(
+                "SELECT depends_on_slug FROM task_dependencies "
+                "WHERE task_slug = ? AND relation = 'depends_on'",
+                (task["slug"],),
+            ):
+                dep = conn.execute(
+                    "SELECT workflow_status FROM tasks WHERE slug = ?",
+                    (d["depends_on_slug"],),
+                ).fetchone()
+                if not dep or (dep["workflow_status"] or "").lower() not in _WF_DONE:
+                    unmet.append(d["depends_on_slug"])
+            if unmet:
+                reason = "deps not done: " + ", ".join(unmet)
+        if reason is None:
+            conflicting = []
+            for c in conn.execute(
+                "SELECT conflicts_with_slug AS o FROM task_conflicts WHERE task_slug = ? "
+                "UNION SELECT task_slug AS o FROM task_conflicts WHERE conflicts_with_slug = ?",
+                (task["slug"], task["slug"]),
+            ):
+                if _task_is_inprogress(conn, c["o"]):
+                    conflicting.append(c["o"])
+            if conflicting:
+                reason = "conflicts in progress: " + ", ".join(conflicting)
+        if reason is None and task["repo_path"] in locked_repos_by_other:
+            reason = "repo locked by another agent"
+        if reason is None:
+            owner = task["assigned_agent"]
+            if owner and owner != agent:
+                reason = f"owned by {owner}"
+        if reason is None:
+            other = conn.execute(
+                "SELECT agent_name FROM task_assignments WHERE task_slug = ? "
+                "AND active = 1 AND agent_name != ? LIMIT 1",
+                (task["slug"], agent),
+            ).fetchone()
+            if other:
+                reason = f"owned by {other['agent_name']}"
+        if reason is None:
+            eligible.append(task)
+        else:
+            skipped.append({"slug": task["slug"], "reason": reason})
+
+    eligible.sort(key=lambda x: (_priority_rank(x["priority"]),
+                                 x["created_at"], x["slug"]))
+    chosen = eligible[: max(1, limit)]
+    return {"ok": True, "agent": agent, "tasks": chosen,
+            "considered": len(rows), "eligible": len(eligible),
+            "skipped": skipped[:20]}
+
+
 def task_info(conn, slug: str) -> dict:
     task = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
     if not task:
