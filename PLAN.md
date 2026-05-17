@@ -19,7 +19,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
 - [x] A2 lease reaping made first-class: `frog lock reap`, `lock list
       --status active|stale|expired|all`, expose `_mark_stale_locks` as an
       explicit op + `lock.expired` distinct from `lock.stale`.
-- [ ] A3 hook bridge: `PreToolUse(Edit|Write)` hook running
+- [x] A3 hook bridge: `PreToolUse(Edit|Write)` hook running
       `frog lock check --file <path> --agent <me>`; warn/block on a
       conflicting active lock held by another agent. Opt-in, harness-only.
 
