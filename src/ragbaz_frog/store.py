@@ -2141,7 +2141,113 @@ def _cached_success(conn, repo_path: str, target: dict, input_hash: str) -> bool
     return bool(row) and row["returncode"] == 0
 
 
-def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True) -> dict:
+def _changed_files(repo_path: str, since: str | None) -> list[str]:
+    """Absolute paths changed in the repo. With `since`: diff since that ref.
+    Without: working-tree changes vs HEAD + untracked files."""
+    out: set[str] = set()
+    try:
+        if since:
+            d = subprocess.run(
+                ["git", "-C", repo_path, "diff", "--name-only", since, "--", "."],
+                text=True, capture_output=True,
+            )
+            for rel in d.stdout.splitlines():
+                if rel.strip():
+                    out.add(str((Path(repo_path) / rel.strip()).resolve()))
+        else:
+            for fp in _git_dirty_files(repo_path):
+                out.add(fp)
+    except OSError:
+        pass
+    return sorted(out)
+
+
+def _targets_for_files(conn, repo_path: str, files: list[str]) -> list[dict]:
+    """Targets whose workdir is an ancestor of any changed file. If a change
+    is outside every target workdir (e.g. repo-root config), all targets are
+    considered affected -- the safe over-approximation."""
+    rows = conn.execute(
+        "SELECT * FROM repo_targets WHERE repo_path = ? ORDER BY target_kind, name",
+        (repo_path,),
+    ).fetchall()
+    targets = []
+    for row in rows:
+        payload = dict(row)
+        payload["artifact_paths"] = json.loads(payload.pop("artifact_paths_json"))
+        targets.append(payload)
+    if not targets:
+        return []
+    if not files:
+        return []  # nothing changed -> nothing affected
+    affected = []
+    unmatched = list(files)
+    for tgt in targets:
+        wd = str(Path(tgt["workdir"]).resolve())
+        hit = False
+        for f in files:
+            try:
+                Path(f).resolve().relative_to(wd)
+                hit = True
+                if f in unmatched:
+                    unmatched.remove(f)
+            except ValueError:
+                continue
+        if hit:
+            affected.append(tgt)
+    if unmatched:
+        # changes not under any target workdir -> can't prove unaffected
+        return targets
+    return affected
+
+
+def repo_diff(conn, repo_ref: str, *, stat_only: bool = False,
+              include_tasks: bool = False, include_impact: bool = False) -> dict:
+    repo = _repo_required(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    rp = repo["repo_path"]
+    args = ["git", "-C", rp, "diff", "--stat" if stat_only else "--patch", "HEAD", "--", "."]
+    try:
+        proc = subprocess.run(args, text=True, capture_output=True)
+        diff = proc.stdout if proc.returncode == 0 else ""
+    except OSError:
+        diff = ""
+    out = {"ok": True, "repo": repo, "diff": diff}
+    if include_tasks:
+        out["tasks"] = task_list(
+            conn, repo_ref=rp, workflow_status=None, assigned_agent=None
+        ).get("tasks", [])
+    if include_impact:
+        out["impacted_targets"] = _targets_for_files(
+            conn, rp, _changed_files(rp, None)
+        )
+    return out
+
+
+def repo_affected(conn, repo_ref: str, *, since: str | None = None,
+                  target_kind: str | None = None) -> dict:
+    repo = _repo_required(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    rp = repo["repo_path"]
+    if not conn.execute(
+        "SELECT 1 FROM repo_targets WHERE repo_path = ? LIMIT 1", (rp,)
+    ).fetchone():
+        repo_scan(conn, repo_ref)
+    changed = _changed_files(rp, since)
+    affected = _targets_for_files(conn, rp, changed)
+    if target_kind:
+        affected = [t for t in affected if t["target_kind"] == target_kind]
+    return {
+        "ok": True,
+        "repo": repo,
+        "since": since,
+        "changed_files": changed,
+        "affected": affected,
+    }
+
+
+def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, only_targets: set | None = None) -> dict:
     repo = _repo_required(conn, repo_ref)
     if not repo:
         return {"ok": False, "error": f"repo not found: {repo_ref}"}
@@ -2158,6 +2264,11 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True) -
         }
     results = []
     ok = True
+    if only_targets is not None:
+        targets = [t for t in targets if t["name"] in only_targets]
+        if not targets:
+            return {"ok": True, "repo": repo, "results": [],
+                    "message": "no affected targets for this kind"}
     for target in targets:
         target = dict(target)
         target["target_kind"] = target_kind

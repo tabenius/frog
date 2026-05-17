@@ -242,6 +242,15 @@ def _emit(payload: dict, as_json: bool) -> int:
             if result["stderr"].strip():
                 print(result["stderr"].rstrip(), file=sys.stderr)
         return 0 if payload.get("ok", True) else 1
+    if "affected" in payload and "changed_files" in payload:
+        repo = payload.get("repo", {})
+        rn = repo.get("name", "?") if isinstance(repo, dict) else "?"
+        print(f"{rn}: {len(payload['changed_files'])} changed file(s), "
+              f"{len(payload['affected'])} affected target(s)"
+              + (f" since {payload['since']}" if payload.get("since") else ""))
+        for tgt in payload["affected"]:
+            print(f"  {tgt['target_kind']}  {tgt['name']}  {tgt['workdir']}")
+        return 0
     if "diff" in payload:
         if payload.get("diff"):
             print(payload["diff"].rstrip())
@@ -769,6 +778,12 @@ def build_parser() -> argparse.ArgumentParser:
     repo_task_inline_sub = repo_task_inline.add_subparsers(dest="repo_task_inline_command", required=True)
     repo_task_inline_list = repo_task_inline_sub.add_parser("list", help="List tasks for one repo")
     repo_task_inline_list.add_argument("--repo", dest="repo_ref", metavar="REPO", required=True)
+    repo_affected = repo_sub.add_parser(
+        "affected", help="List targets affected by working-tree / since-REF changes")
+    repo_affected.add_argument("repo_ref", nargs="?",
+                               help="Repo name or path; defaults to cwd repo")
+    repo_affected.add_argument("--since", help="Diff since this git ref "
+                               "(default: working-tree changes vs HEAD)")
     _runnable = {"build", "clean", "test", "lint", "check", "verify"}
     for command_name in sorted(REPO_ACTIONS):
         cmd = repo_sub.add_parser(command_name, help=REPO_ACTION_HELP[command_name])
@@ -777,6 +792,14 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument(
                 "--no-cache", dest="no_cache", action="store_true",
                 help="Ignore the target_runs cache; always run",
+            )
+            cmd.add_argument(
+                "--affected", dest="affected", action="store_true",
+                help="Only run targets affected by changed files",
+            )
+            cmd.add_argument(
+                "--since", dest="since",
+                help="With --affected: diff since this git ref",
             )
         if command_name == "diff":
             cmd.add_argument("--stat", action="store_true")
@@ -929,8 +952,18 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
         return store.repo_diff(conn, repo_ref, stat_only=args.stat, include_tasks=args.tasks, include_impact=args.impact)
     if action == "status":
         return store.status_summary(conn, repo_ref=repo_ref)
+    if action == "affected":
+        return store.repo_affected(conn, repo_ref, since=getattr(args, "since", None))
     use_cache = not getattr(args, "no_cache", False)
-    return store.repo_run(conn, repo_ref, action, use_cache=use_cache)
+    only = None
+    if getattr(args, "affected", False):
+        aff = store.repo_affected(
+            conn, repo_ref, since=getattr(args, "since", None), target_kind=action
+        )
+        if not aff.get("ok"):
+            return aff
+        only = {t["name"] for t in aff["affected"]}
+    return store.repo_run(conn, repo_ref, action, use_cache=use_cache, only_targets=only)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1071,6 +1104,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.repo_info(conn, args.repo_ref), args.json)
             if args.repo_command == "task":
                 return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=None, assigned_agent=None), args.json)
+            if args.repo_command == "affected":
+                return _emit(store.repo_affected(conn, args.repo_ref, since=getattr(args, "since", None)), args.json)
             return _emit(_run_repo_action(conn, args.repo_ref, args.repo_command, args), args.json)
         if args.command == "unit":
             if args.unit_command == "discover":
