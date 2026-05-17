@@ -68,61 +68,6 @@ REPO_ACTION_HELP = {
 }
 
 
-def _preprocess(argv: list[str]) -> list[str]:
-    globals_front = []
-    remainder = []
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        if token == "--json":
-            globals_front.append(token)
-            i += 1
-            continue
-        if token == "--config" and i + 1 < len(argv):
-            globals_front.extend([token, argv[i + 1]])
-            i += 2
-            continue
-        if token == "--workspace" and i + 1 < len(argv):
-            globals_front.extend([token, argv[i + 1]])
-            i += 2
-            continue
-        if token == "--db" and i + 1 < len(argv):
-            globals_front.extend([token, argv[i + 1]])
-            i += 2
-            continue
-        remainder.append(token)
-        i += 1
-    argv = [*globals_front, *remainder]
-
-    if argv and not argv[0].startswith("-") and ":" in argv[0]:
-        workspace_name, repo_ref = argv[0].split(":", 1)
-        if workspace_name in _workspace_names():
-            argv = ["--workspace", workspace_name, repo_ref, *argv[1:]]
-
-    if len(argv) >= 2 and argv[0] == "init" and argv[1] not in {"migrate", "schema"}:
-        return ["repo-init", argv[1], *argv[2:]]
-
-    if len(argv) >= 2 and argv[0] == "log" and argv[1] == "tail":
-        return ["log", *argv[2:]]
-
-    if len(argv) >= 1 and argv[0] in REPO_ACTIONS:
-        return ["repo-op", argv[0], *argv[1:]]
-
-    if len(argv) >= 4 and argv[0] == "repo" and argv[1] not in {"list", "register", "info"}:
-        repo_ref = argv[1]
-        if argv[2] == "task":
-            return ["repo-task", argv[3], "--repo-ref", repo_ref, *argv[4:]]
-        if argv[2] in REPO_ACTIONS:
-            return ["repo-op", argv[2], "--repo-ref", repo_ref, *argv[3:]]
-
-    if len(argv) >= 2 and argv[0] not in TOP_LEVEL_COMMANDS:
-        if argv[1] == "task":
-            if len(argv) >= 3:
-                return ["repo-task", argv[2], "--repo-ref", argv[0], *argv[3:]]
-        if argv[1] in REPO_ACTIONS:
-            return ["repo-op", argv[1], "--repo-ref", argv[0], *argv[2:]]
-    return argv
-
 
 def _repo_name_words() -> str:
     try:
@@ -143,8 +88,8 @@ def _workspace_names() -> list[str]:
 
 
 def _completion_script(shell: str) -> str:
-    top = "init agent-instructions completion ps snapshot status log config mcp repo unit task lock file"
-    repo_ops = " ".join(sorted(REPO_ACTIONS))
+    top = "db new agent-instructions completion ps snapshot status log config mcp repo unit task lock file"
+    repo_subs = "list register discover sync info task " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
     if shell == "bash":
@@ -152,26 +97,17 @@ def _completion_script(shell: str) -> str:
   local cur
   _init_completion || return
   local top="{top}"
-  local repo_ops="{repo_ops}"
+  local repo_subs="{repo_subs}"
   local repo_names="{repo_names}"
-  local workspace_names="{workspace_names}"
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "$top $repo_names $workspace_names" -- "$cur") )
+    COMPREPLY=( $(compgen -W "$top" -- "$cur") )
     return
   fi
   case "${{COMP_WORDS[1]}}" in
     completion) COMPREPLY=( $(compgen -W "bash fish" -- "$cur") ) ;;
     ps|snapshot|status) COMPREPLY=() ;;
-    init)
-      if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "migrate schema" -- "$cur") )
-      else
-        COMPREPLY=( $(compgen -d -- "$cur") )
-      fi
-      ;;
-    agent-instructions)
-      COMPREPLY=( $(compgen -d -- "$cur") )
-      ;;
+    db) COMPREPLY=( $(compgen -W "migrate schema" -- "$cur") ) ;;
+    new|agent-instructions) COMPREPLY=( $(compgen -d -- "$cur") ) ;;
     config)
       if [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(compgen -W "info host workspace path" -- "$cur") )
@@ -180,61 +116,47 @@ def _completion_script(shell: str) -> str:
       elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "workspace" ]]; then
         COMPREPLY=( $(compgen -W "add list use" -- "$cur") )
       elif [[ $COMP_CWORD -eq 4 && "${{COMP_WORDS[2]}}" == "workspace" && "${{COMP_WORDS[3]}}" == "use" ]]; then
-        COMPREPLY=( $(compgen -W "$workspace_names" -- "$cur") )
+        COMPREPLY=( $(compgen -W "{workspace_names}" -- "$cur") )
+      elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "path" ]]; then
+        COMPREPLY=( $(compgen -W "bash fish" -- "$cur") )
       fi
       ;;
     mcp)
-      if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "serve tools" -- "$cur") )
-      fi
-      ;;
+      [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "serve tools" -- "$cur") ) ;;
     repo)
       if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "list register discover sync info task $repo_ops $repo_names" -- "$cur") )
-      elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" =~ ^(info|scan|detect|targets|doctor|artifacts|artifact-stale|build|clean|test|lint|check|verify|diff|status)$ ]]; then
+        COMPREPLY=( $(compgen -W "$repo_subs" -- "$cur") )
+      elif [[ $COMP_CWORD -eq 3 ]]; then
         COMPREPLY=( $(compgen -W "$repo_names" -- "$cur") )
       fi
       ;;
-    unit)
-      if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "discover list" -- "$cur") )
-      elif [[ $COMP_CWORD -ge 3 ]]; then
-        COMPREPLY=( $(compgen -W "$repo_names" -- "$cur") )
-      fi
-      ;;
-    task) COMPREPLY=( $(compgen -W "create list info status dependency conflict tag assign" -- "$cur") ) ;;
-    lock) COMPREPLY=( $(compgen -W "check acquire renew release list info" -- "$cur") ) ;;
-    file) COMPREPLY=( $(compgen -W "upsert list info" -- "$cur") ) ;;
-    log) COMPREPLY=( $(compgen -W "--follow --limit --repo-ref -f" -- "$cur") ) ;;
-    *)
-      if [[ $COMP_CWORD -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "$repo_names $workspace_names $top" -- "$cur") )
-      elif [[ "${{COMP_WORDS[1]}}" =~ ^($repo_names)$ ]]; then
-        COMPREPLY=( $(compgen -W "$repo_ops task" -- "$cur") )
-      fi
-      ;;
+    unit) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "discover list" -- "$cur") ) ;;
+    task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list info status dependency conflict tag assign" -- "$cur") ) ;;
+    lock) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "check acquire renew release list info" -- "$cur") ) ;;
+    file) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "upsert list info" -- "$cur") ) ;;
+    log) COMPREPLY=( $(compgen -W "--follow --limit --repo -f" -- "$cur") ) ;;
   esac
 }}
 complete -F _frog_complete frog
 """
     if shell == "fish":
         return f"""complete -c frog -f
-complete -c frog -n '__fish_use_subcommand' -a '{top} {repo_names} {workspace_names}'
+complete -c frog -n '__fish_use_subcommand' -a '{top}'
 complete -c frog -n '__fish_seen_subcommand_from completion' -a 'bash fish'
-complete -c frog -n '__fish_seen_subcommand_from init' -a 'migrate schema'
-complete -c frog -n '__fish_seen_subcommand_from init; and not __fish_seen_subcommand_from migrate schema' -a '(__fish_complete_directories)'
-complete -c frog -n '__fish_seen_subcommand_from agent-instructions' -a '(__fish_complete_directories)'
+complete -c frog -n '__fish_seen_subcommand_from db' -a 'migrate schema'
+complete -c frog -n '__fish_seen_subcommand_from new agent-instructions' -a '(__fish_complete_directories)'
 complete -c frog -n '__fish_seen_subcommand_from config' -a 'info host workspace path'
+complete -c frog -n '__fish_seen_subcommand_from path' -a 'bash fish'
 complete -c frog -n '__fish_seen_subcommand_from mcp' -a 'serve tools'
 complete -c frog -n '__fish_seen_subcommand_from host' -a 'add list'
 complete -c frog -n '__fish_seen_subcommand_from workspace' -a 'add list use'
-complete -c frog -n '__fish_seen_subcommand_from repo' -a 'list register discover sync info task {repo_ops} {repo_names}'
+complete -c frog -n '__fish_seen_subcommand_from repo' -a '{repo_subs}'
+complete -c frog -n '__fish_seen_subcommand_from {" ".join(sorted(REPO_ACTIONS))} info' -a '{repo_names}'
 complete -c frog -n '__fish_seen_subcommand_from unit' -a 'discover list'
 complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list info status dependency conflict tag assign'
 complete -c frog -n '__fish_seen_subcommand_from lock' -a 'check acquire renew release list info'
 complete -c frog -n '__fish_seen_subcommand_from file' -a 'upsert list info'
-complete -c frog -n '__fish_seen_subcommand_from log' -a '--follow --limit --repo-ref -f'
-complete -c frog -n 'not __fish_seen_subcommand_from {top}' -a '{repo_names} {workspace_names}'
+complete -c frog -n '__fish_seen_subcommand_from log' -a '--follow --limit --repo -f'
 """
     raise ValueError(f"unsupported shell: {shell}")
 
@@ -565,7 +487,11 @@ def _workspace_for_args(args, conn) -> dict | None:
         return frog_config.resolve_workspace(workspace_name, getattr(args, "config", None))
     if args.command in {"completion", "config", "agent-instructions"}:
         return None
-    if args.command == "repo-op" and not getattr(args, "repo_ref", None):
+    if (
+        args.command == "repo"
+        and getattr(args, "repo_command", None) in REPO_ACTIONS
+        and not getattr(args, "repo_ref", None)
+    ):
         inferred = store.infer_repo_from_cwd(conn)
         if inferred:
             return None
@@ -629,32 +555,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="RAGBAZ workspace coordination CLI",
         epilog=(
+            "Grammar:  frog <command> <subcommand> [args]   (strict; no positional guessing)\n\n"
             "JSON:\n"
             "  Most operational commands support --json.\n"
-            "  Exceptions: --help stays text, and 'frog mcp serve' speaks MCP over stdio.\n"
-            "  'frog completion ...' returns the script text by default, or a JSON object with --json.\n\n"
-            "Repo usage model:\n"
-            "  1. Prefer repo names: frog mailstack build\n"
-            "  2. If cwd is inside a repo, omit the repo: frog build\n"
-            "  3. Use a named workspace for another box: frog --workspace konsonans-src repo list\n"
-            "  4. Use a filesystem path only as a fallback escape hatch.\n\n"
+            "  Exceptions: --help stays text; 'frog mcp serve' speaks MCP over stdio.\n"
+            "  'frog completion ...' returns the script text, or JSON with --json.\n\n"
+            "Repo addressing:\n"
+            "  1. Explicit:        frog repo build mailstack\n"
+            "  2. Cwd repo:        frog repo build           (repo arg omitted)\n"
+            "  3. Another box:     frog --workspace konsonans-src repo list\n"
+            "  (No bare 'frog mailstack build' or 'frog build' shorthand any more.)\n\n"
             "Examples:\n"
             "  frog repo list\n"
             "  frog repo list -l\n"
             "  frog repo list --json | jq '.repos[] | {name, path: .repo_path, dirty}'\n"
-            "  frog detcordon targets\n"
-            "  frog konsonans-src:mailstack build\n"
-            "  frog build              # when cwd is inside a known repo\n"
-            "  frog unit discover --repo-ref detcordon\n"
-            "  frog unit list -l --repo-ref detcordon\n"
-            "  frog config workspace list --json | jq '.workspaces[] | {name, root, current: .is_current}'\n"
-            "  frog status --json | jq '.counts'\n"
-            "  frog log --limit 5 --json | jq '.events[] | {created_at, kind, summary}'\n"
+            "  frog repo targets detcordon\n"
+            "  frog repo build mailstack\n"
+            "  frog repo build                 # when cwd is inside a known repo\n"
+            "  frog repo task list --repo detcordon\n"
+            "  frog unit discover --repo detcordon\n"
+            "  frog unit list -l --repo detcordon\n"
+            "  frog status --json | jq '.counts'        # now reachable (was shadowed)\n"
+            "  frog log --limit 5 --json | jq '.events[]'\n"
+            "  frog log --follow\n"
+            "  frog config workspace list --json | jq '.workspaces[]'\n"
             "  frog completion fish --json | jq -r '.script'\n"
             "  frog mcp tools --json | jq '.tools[].name'\n"
-            "  frog log --follow\n"
-            "  frog init my-new-idea   # defaults under /data/src/experiments\n"
-            "  frog init ~/sandbox/x   # explicit path outside /data/src"
+            "  frog db migrate\n"
+            "  frog new my-new-idea            # defaults under /data/src/experiments\n"
+            "  frog new ~/sandbox/x            # explicit path"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -665,27 +594,37 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{init,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file}",
+        metavar="{db,new,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file}",
     )
 
-    init = sub.add_parser(
-        "init",
-        help="Initialize the shared DB schema or create a new repo/draft path",
+    db_cmd = sub.add_parser(
+        "db",
+        help="Initialize or inspect the shared AGENTS.db schema",
         description=(
-            "Initialize AGENTS.db schema or bootstrap a repo path.\n"
-            "Use 'frog init migrate' for DB migrations.\n"
-            "Use 'frog init NAME' or 'frog init /path/to/repo' to create a repo scaffold."
+            "AGENTS.db schema operations.\n"
+            "  frog db migrate   # apply pending migrations\n"
+            "  frog db schema    # show applied migrations\n"
+            "To scaffold a new repo/draft path, use 'frog new NAME'."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    init_sub = init.add_subparsers(dest="init_command", required=True)
-    init_sub.add_parser("migrate", help="Apply pending AGENTS.db migrations")
-    init_sub.add_parser("schema", help="Show applied AGENTS.db migrations")
+    db_sub = db_cmd.add_subparsers(dest="init_command", required=True)
+    db_sub.add_parser("migrate", help="Apply pending AGENTS.db migrations")
+    db_sub.add_parser("schema", help="Show applied AGENTS.db migrations")
 
-    repo_init = sub.add_parser("repo-init", help=argparse.SUPPRESS)
-    repo_init.add_argument("path_or_name")
-    repo_init.add_argument("--kind")
-    repo_init.add_argument("--notes")
+    new_cmd = sub.add_parser(
+        "new",
+        help="Scaffold a new repo/draft path",
+        description=(
+            "Create a new repo/draft scaffold.\n"
+            "  frog new my-idea       # defaults under /data/src/experiments\n"
+            "  frog new ~/sandbox/x   # explicit path"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    new_cmd.add_argument("path_or_name")
+    new_cmd.add_argument("--kind")
+    new_cmd.add_argument("--notes")
 
     agent_instructions = sub.add_parser(
         "agent-instructions",
@@ -702,7 +641,7 @@ def build_parser() -> argparse.ArgumentParser:
         "ps",
         help="Show active tasks, active locks, and recent frog activity",
     )
-    ps.add_argument("--repo-ref")
+    ps.add_argument("--repo", dest="repo_ref", metavar="REPO")
 
     completion = sub.add_parser(
         "completion",
@@ -714,7 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="Show workspace or repo-scoped task and lock summary",
     )
-    status.add_argument("--repo-ref")
+    status.add_argument("--repo", dest="repo_ref", metavar="REPO")
 
     log = sub.add_parser(
         "log",
@@ -726,7 +665,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawTextHelpFormatter,
     )
     log.add_argument("--limit", type=int, default=20, help="Number of recent events to show initially")
-    log.add_argument("--repo-ref", help="Limit events to one repo by name or path")
+    log.add_argument("--repo", dest="repo_ref", metavar="REPO", help="Limit events to one repo by name or path")
     log.add_argument("-f", "--follow", action="store_true", help="Follow new events live")
 
     config_cmd = sub.add_parser(
@@ -773,10 +712,15 @@ def build_parser() -> argparse.ArgumentParser:
         "repo",
         help="Repo registry, target discovery, and repo-level actions",
         description=(
-            "Repo commands.\n"
-            "Use names like 'frog repo info mailstack' or shorthand like 'frog mailstack build'.\n"
-            "'discover' walks a root path, registers repos in AGENTS.db, and can scan them.\n"
-            "'scan' detects repo targets from manifests inside one repo. 'detect' is just an alias for 'scan'."
+            "Repo registry + per-repo actions. Strict grammar:\n"
+            "  frog repo <subcommand> [REPO]\n"
+            "  REPO is optional for action subcommands; defaults to the cwd repo.\n"
+            "    frog repo info mailstack\n"
+            "    frog repo build mailstack\n"
+            "    frog repo build              # cwd repo\n"
+            "  'discover' walks a root, registers repos in AGENTS.db, can scan them.\n"
+            "  'scan' detects targets from manifests in one repo; 'detect' aliases 'scan';\n"
+            "  'sync' aliases 'discover'."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -808,7 +752,7 @@ def build_parser() -> argparse.ArgumentParser:
     repo_task_inline = repo_sub.add_parser("task", help="Repo-scoped task commands")
     repo_task_inline_sub = repo_task_inline.add_subparsers(dest="repo_task_inline_command", required=True)
     repo_task_inline_list = repo_task_inline_sub.add_parser("list", help="List tasks for one repo")
-    repo_task_inline_list.add_argument("--repo-ref", required=True)
+    repo_task_inline_list.add_argument("--repo", dest="repo_ref", metavar="REPO", required=True)
     for command_name in sorted(REPO_ACTIONS):
         cmd = repo_sub.add_parser(command_name, help=REPO_ACTION_HELP[command_name])
         cmd.add_argument("repo_ref", nargs="?", help="Repo name or path; defaults to cwd repo when omitted")
@@ -817,28 +761,16 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--tasks", action="store_true")
             cmd.add_argument("--impact", action="store_true")
 
-    repo_task = sub.add_parser("repo-task", help=argparse.SUPPRESS)
-    repo_task_sub = repo_task.add_subparsers(dest="repo_task_command", required=True)
-    repo_task_list = repo_task_sub.add_parser("list", help="List tasks for one repo")
-    repo_task_list.add_argument("--repo-ref", required=True)
-
-    repo_op = sub.add_parser("repo-op", help=argparse.SUPPRESS)
-    repo_op.add_argument("repo_action", choices=sorted(REPO_ACTIONS))
-    repo_op.add_argument("--repo-ref")
-    repo_op.add_argument("--stat", action="store_true")
-    repo_op.add_argument("--tasks", action="store_true")
-    repo_op.add_argument("--impact", action="store_true")
-
     unit = sub.add_parser(
         "unit",
         help="Discover and inspect nested buildable units inside repos",
     )
     unit_sub = unit.add_subparsers(dest="unit_command", required=True)
     unit_discover = unit_sub.add_parser("discover", help="Discover units in one repo or all repos")
-    unit_discover.add_argument("--repo-ref")
+    unit_discover.add_argument("--repo", dest="repo_ref", metavar="REPO")
     unit_discover.add_argument("--all-repos", action="store_true")
     unit_list = unit_sub.add_parser("list", help="List units in one repo or across all repos")
-    unit_list.add_argument("--repo-ref")
+    unit_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     unit_list_view = unit_list.add_mutually_exclusive_group()
     unit_list_view.add_argument("-1", dest="one", action="store_true", help="One unit per line with activity fields")
     unit_list_view.add_argument("-l", dest="long", action="store_true", help="Long unit listing with activity")
@@ -850,7 +782,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_sub = task.add_subparsers(dest="task_command", required=True)
     task_create = task_sub.add_parser("create", help="Create a task slice")
     task_create.add_argument("--slug", required=True)
-    task_create.add_argument("--repo-ref")
+    task_create.add_argument("--repo", dest="repo_ref", metavar="REPO")
     task_create.add_argument("--title", required=True)
     task_create.add_argument("--why")
     task_create.add_argument("--what")
@@ -863,7 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_create.add_argument("--delegation-other")
     task_create.add_argument("--parent-task-slug")
     task_list = task_sub.add_parser("list", help="List tasks")
-    task_list.add_argument("--repo-ref")
+    task_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     task_list.add_argument("--workflow-status")
     task_list.add_argument("--assigned-agent")
     task_info = task_sub.add_parser("info", help="Show one task")
@@ -896,11 +828,11 @@ def build_parser() -> argparse.ArgumentParser:
     lock_sub = lock.add_subparsers(dest="lock_command", required=True)
     lock_check = lock_sub.add_parser("check", help="Check whether a lock would conflict")
     lock_check.add_argument("--scope-key", required=True)
-    lock_check.add_argument("--repo-ref")
+    lock_check.add_argument("--repo", dest="repo_ref", metavar="REPO")
     lock_check.add_argument("--file", action="append", default=[])
     lock_acquire = lock_sub.add_parser("acquire", help="Acquire a coordination lock")
     lock_acquire.add_argument("--scope-key", required=True)
-    lock_acquire.add_argument("--repo-ref")
+    lock_acquire.add_argument("--repo", dest="repo_ref", metavar="REPO")
     lock_acquire.add_argument("--lock-kind", required=True)
     lock_acquire.add_argument("--file", action="append", default=[])
     lock_acquire.add_argument("--agent", required=True)
@@ -915,7 +847,7 @@ def build_parser() -> argparse.ArgumentParser:
     lock_release = lock_sub.add_parser("release", help="Release a coordination lock")
     lock_release.add_argument("lock_id", type=int)
     lock_list = lock_sub.add_parser("list", help="List locks")
-    lock_list.add_argument("--repo-ref")
+    lock_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     lock_list.add_argument("--include-inactive", action="store_true")
     lock_info = lock_sub.add_parser("info", help="Show one lock")
     lock_info.add_argument("lock_id", type=int)
@@ -927,16 +859,15 @@ def build_parser() -> argparse.ArgumentParser:
     file_sub = file_cmd.add_subparsers(dest="file_command", required=True)
     file_upsert = file_sub.add_parser("upsert", help="Register or update one file")
     file_upsert.add_argument("file_path")
-    file_upsert.add_argument("--repo-ref")
+    file_upsert.add_argument("--repo", dest="repo_ref", metavar="REPO")
     file_upsert.add_argument("--file-type")
     file_upsert.add_argument("--source-of-truth")
     file_upsert.add_argument("--notes")
     file_list = file_sub.add_parser("list", help="List files")
-    file_list.add_argument("--repo-ref")
+    file_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     file_list.add_argument("--file-type")
     file_info = file_sub.add_parser("info", help="Show one file")
     file_info.add_argument("file_path")
-    _hide_subcommands(parser, {"repo-init", "repo-task", "repo-op"})
     return parser
 
 
@@ -967,7 +898,7 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = _preprocess(list(sys.argv[1:] if argv is None else argv))
+    argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -1039,7 +970,7 @@ def main(argv: list[str] | None = None) -> int:
             return _follow_log(conn, repo_ref=args.repo_ref, limit=args.limit)
         finally:
             conn.close()
-    if args.command == "init":
+    if args.command == "db":
         workspace = frog_config.resolve_workspace(args.workspace, args.config)
         if workspace and workspace["host"].get("transport") != "local":
             return _emit(_dispatch_workspace(workspace, argv), args.json)
@@ -1060,7 +991,7 @@ def main(argv: list[str] | None = None) -> int:
             conn.close()
             conn = store.connect(args.db)
         _record_command(conn, argv)
-        if args.command == "repo-init":
+        if args.command == "new":
             return _emit(
                 store.init_repo(conn, args.path_or_name, kind=args.kind, notes=args.notes),
                 args.json,
@@ -1105,10 +1036,6 @@ def main(argv: list[str] | None = None) -> int:
             if args.repo_command == "task":
                 return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=None, assigned_agent=None), args.json)
             return _emit(_run_repo_action(conn, args.repo_ref, args.repo_command, args), args.json)
-        if args.command == "repo-task":
-            return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=None, assigned_agent=None), args.json)
-        if args.command == "repo-op":
-            return _emit(_run_repo_action(conn, args.repo_ref, args.repo_action, args), args.json)
         if args.command == "unit":
             if args.unit_command == "discover":
                 return _emit(store.unit_discover(conn, repo_ref=args.repo_ref, all_repos=args.all_repos), args.json)

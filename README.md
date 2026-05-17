@@ -16,22 +16,30 @@ On first run, `frog` bootstraps a local config at
 `~/.config/ragbaz-frog/frog.json` with a default local workspace root inferred
 from the installed tree.
 
-## Current command surface
+## Command surface
 
-- `frog init migrate`
-- `frog completion bash`
-- `frog completion fish`
-- `frog log tail`
-- `frog repo list`
+Strict grammar: `frog <command> <subcommand> [args]`. No positional
+guessing — there is no bare `frog <repo> <action>` or `frog <action>`
+shorthand. A repo is always addressed under `frog repo …`.
+
+- `frog db migrate` / `frog db schema` — AGENTS.db schema (was `frog init …`)
+- `frog new NAME` — scaffold a repo/draft (was the overloaded `frog init NAME`)
+- `frog repo list` / `frog repo list -l`
 - `frog repo info REPO`
-- `frog repo REPO task list`
-- `frog task create ...`
-- `frog lock acquire ...`
-- `frog status`
-- `frog config info`
-- `frog config path fish`
-- `frog mcp tools`
-- `frog mcp serve`
+- `frog repo build [REPO]` (and `test|lint|clean|check|verify|diff|status|scan|targets|doctor|artifacts|artifact-stale`; REPO defaults to the cwd repo)
+- `frog repo task list --repo REPO`
+- `frog repo discover [--root PATH]` (`sync` is an alias; `detect` aliases `scan`)
+- `frog task create …` / `frog task list [--repo REPO]`
+- `frog lock acquire …`
+- `frog status` — workspace summary (now reachable; previously shadowed by the repo `status` action)
+- `frog log` / `frog log --follow` (there is no `frog log tail`)
+- `frog unit discover [--repo REPO]` / `frog unit list`
+- `frog config info` / `frog config path fish`
+- `frog completion bash` / `frog completion fish`
+- `frog mcp tools` / `frog mcp serve`
+
+Every `--repo-ref` flag is now spelled `--repo`. Use `--workspace NAME`
+(not a `workspace:repo` first token) to target another box.
 
 ## MCP
 
