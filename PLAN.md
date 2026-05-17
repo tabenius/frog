@@ -60,7 +60,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       (env FROG_AGENT/FROG_SESSION, else $USER + host:pid);
       `frog agent whoami|register`; thread identity defaults into
       lock/task/audit/scheduler instead of bare $USER.
-- [ ] II-2 Workflow composition: `frog task claim <slug>` (assign + lock +
+- [x] II-2 Workflow composition: `frog task claim <slug>` (assign + lock +
       in_progress + event, atomic) and `frog task finish <slug>`
       (affected build/test gate -> done + release + event), reporting
       newly-unblocked dependents.

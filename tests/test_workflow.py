@@ -1,0 +1,63 @@
+import unittest
+from _util import fresh_db
+from ragbaz_frog import store
+
+
+def mk(conn, slug, repo=None):
+    store.create_task(conn, slug=slug, repo_ref=repo, title=slug, why=None,
+                      what_text=None, roi_note=None, priority="p2",
+                      workflow_status="idea", git_status="not_started",
+                      assigned_agent=None, delegation_current=None,
+                      delegation_other=None, parent_task_slug=None)
+
+
+class Workflow(unittest.TestCase):
+    def setUp(self):
+        self.conn = store.connect(fresh_db())
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_claim_assigns_locks_and_marks_in_progress(self):
+        mk(self.conn, "t")
+        r = store.task_claim(self.conn, slug="t", agent="claude")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["task"]["assigned_agent"], "claude")
+        self.assertEqual(r["task"]["workflow_status"], "in_progress")
+        locks = store.lock_list(self.conn, include_inactive=False, repo_ref=None)
+        self.assertTrue(any(l["scope_key"] == "task:t" for l in locks["locks"]))
+
+    def test_claim_blocked_when_owned_by_other(self):
+        mk(self.conn, "t")
+        store.task_claim(self.conn, slug="t", agent="codex")
+        r = store.task_claim(self.conn, slug="t", agent="claude")
+        self.assertFalse(r["ok"])
+        self.assertIn("codex", r["error"])
+
+    def test_finish_no_verify_flips_and_reports_unblock(self):
+        mk(self.conn, "base")
+        mk(self.conn, "dep")
+        store.task_add_dependency(self.conn, "dep", "base", "depends_on")
+        store.task_claim(self.conn, slug="base", agent="claude")
+        r = store.task_finish(self.conn, slug="base", agent="claude",
+                              verify=False)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["task"]["workflow_status"], "done")
+        self.assertEqual(r["unblocked"], ["dep"])
+        # lock released
+        active = store.lock_list(self.conn, include_inactive=False, repo_ref=None)
+        self.assertFalse(any(l["scope_key"] == "task:base"
+                             for l in active["locks"]))
+
+    def test_finish_not_unblocked_if_other_dep_pending(self):
+        mk(self.conn, "a"); mk(self.conn, "b"); mk(self.conn, "c")
+        store.task_add_dependency(self.conn, "c", "a", "depends_on")
+        store.task_add_dependency(self.conn, "c", "b", "depends_on")
+        store.task_finish(self.conn, slug="a", agent="x", verify=False)
+        # b still pending -> c not unblocked yet
+        r = store.task_finish(self.conn, slug="b", agent="x", verify=False)
+        self.assertEqual(r["unblocked"], ["c"])
+
+
+if __name__ == "__main__":
+    unittest.main()

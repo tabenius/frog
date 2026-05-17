@@ -1097,6 +1097,140 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
             "skipped": skipped[:20]}
 
 
+def _task_file_paths(conn, slug: str) -> list[str]:
+    return [r["file_path"] for r in conn.execute(
+        "SELECT file_path FROM task_files WHERE task_slug = ?", (slug,)
+    ).fetchall()]
+
+
+def _newly_unblocked(conn, finished_slug: str) -> list[str]:
+    """Tasks that depend_on `finished_slug` and now have ALL their
+    depends_on dependencies done (and are not themselves done)."""
+    out = []
+    deps = conn.execute(
+        "SELECT task_slug FROM task_dependencies "
+        "WHERE depends_on_slug = ? AND relation = 'depends_on'",
+        (finished_slug,),
+    ).fetchall()
+    for d in deps:
+        ts = d["task_slug"]
+        trow = conn.execute(
+            "SELECT workflow_status FROM tasks WHERE slug = ?", (ts,)
+        ).fetchone()
+        if not trow or (trow["workflow_status"] or "").lower() in _WF_DONE:
+            continue
+        unmet = False
+        for e in conn.execute(
+            "SELECT depends_on_slug FROM task_dependencies "
+            "WHERE task_slug = ? AND relation = 'depends_on'", (ts,)
+        ):
+            dep = conn.execute(
+                "SELECT workflow_status FROM tasks WHERE slug = ?",
+                (e["depends_on_slug"],),
+            ).fetchone()
+            if not dep or (dep["workflow_status"] or "").lower() not in _WF_DONE:
+                unmet = True
+                break
+        if not unmet:
+            out.append(ts)
+    return sorted(set(out))
+
+
+def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
+               scope_key: str | None = None, force: bool = False) -> dict:
+    """Atomic-ish: take ownership + the scoped lock + mark in_progress."""
+    row = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"task not found: {slug}"}
+    task = dict(row)
+    if (task["workflow_status"] or "").lower() in _WF_DONE:
+        return {"ok": False, "error": f"task {slug} is already {task['workflow_status']}"}
+    owner = task["assigned_agent"]
+    if owner and owner != agent and not force:
+        return {"ok": False, "error": f"task {slug} is owned by {owner}"}
+    scope = scope_key or f"task:{slug}"
+    files = _task_file_paths(conn, slug)
+    lk = lock_acquire(
+        conn, scope_key=scope, repo_ref=task["repo_path"],
+        lock_kind=lock_kind, files=files, agent=agent, pid=None,
+        reason=f"claim {slug}", lease_seconds=1800, eta_minutes=None,
+        force=force,
+    )
+    if not lk.get("ok", True):
+        return {"ok": False, "error": "could not lock task scope",
+                "lock": lk}
+    conn.execute("UPDATE tasks SET assigned_agent = ?, updated_at = ? WHERE slug = ?",
+                 (agent, utc_now_iso(), slug))
+    task_assign(conn, slug, agent, f"claimed by {agent}")
+    task_set_status(conn, slug=slug, workflow_status="in_progress",
+                    git_status=None, note=f"claimed by {agent}")
+    record_event(conn, kind="task.claimed",
+                 summary=f"{agent} claimed {slug}", repo_path=task["repo_path"],
+                 task_slug=slug, actor=agent,
+                 payload={"lock": lk.get("lock", {}).get("id")})
+    conn.commit()
+    return {"ok": True, "task": dict(conn.execute(
+        "SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()),
+        "lock": lk.get("lock")}
+
+
+def task_finish(conn, *, slug: str, agent: str, verify: bool = True) -> dict:
+    """Verify (affected build+test) -> done + release locks + report which
+    dependents this unblocks."""
+    row = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"task not found: {slug}"}
+    task = dict(row)
+    verification = None
+    if verify and task["repo_path"]:
+        aff = repo_affected(conn, task["repo_path"])
+        results = []
+        failed = False
+        if aff.get("ok"):
+            for kind in ("build", "test"):
+                names = {x["name"] for x in aff["affected"]
+                         if x["target_kind"] == kind}
+                if not names:
+                    continue
+                rr = repo_run(conn, task["repo_path"], kind,
+                              only_targets=names)
+                results.append({"kind": kind, "ok": rr.get("ok", True),
+                                 "results": rr.get("results", [])})
+                if not rr.get("ok", True):
+                    failed = True
+        verification = {"ran": bool(results), "failed": failed,
+                        "detail": results}
+        if failed:
+            return {"ok": False, "error": "verification failed; status not flipped",
+                    "task": task, "verification": verification}
+    task_set_status(conn, slug=slug, workflow_status="done",
+                    git_status="done", note=f"finished by {agent}")
+    released = []
+    for lkr in _lock_rows(conn, include_inactive=False,
+                          repo_path=task["repo_path"]):
+        if lkr["agent_name"] == agent and (
+            lkr["scope_key"] == f"task:{slug}"
+        ):
+            lock_release(conn, lkr["id"], force=True)
+            released.append(lkr["id"])
+    unblocked = _newly_unblocked(conn, slug)
+    record_event(conn, kind="task.finished",
+                 summary=f"{agent} finished {slug}",
+                 repo_path=task["repo_path"], task_slug=slug, actor=agent,
+                 payload={"unblocked": unblocked, "released_locks": released})
+    for ub in unblocked:
+        record_event(conn, kind="task.unblocked",
+                     summary=f"{ub} unblocked by {slug}",
+                     task_slug=ub, actor=agent,
+                     payload={"by": slug})
+    conn.commit()
+    return {"ok": True,
+            "task": dict(conn.execute("SELECT * FROM tasks WHERE slug = ?",
+                                       (slug,)).fetchone()),
+            "verification": verification, "released_locks": released,
+            "unblocked": unblocked}
+
+
 def task_info(conn, slug: str) -> dict:
     task = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
     if not task:

@@ -131,7 +131,7 @@ def _completion_script(shell: str) -> str:
       fi
       ;;
     unit) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "discover list" -- "$cur") ) ;;
-    task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list next info status dependency conflict tag assign" -- "$cur") ) ;;
+    task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list next claim finish info status dependency conflict tag assign" -- "$cur") ) ;;
     lock) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "check acquire renew release list info" -- "$cur") ) ;;
     file) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "upsert list info" -- "$cur") ) ;;
     log) COMPREPLY=( $(compgen -W "why blame --follow --limit --repo -f" -- "$cur") ) ;;
@@ -153,7 +153,7 @@ complete -c frog -n '__fish_seen_subcommand_from workspace' -a 'add list use'
 complete -c frog -n '__fish_seen_subcommand_from repo' -a '{repo_subs}'
 complete -c frog -n '__fish_seen_subcommand_from {" ".join(sorted(REPO_ACTIONS))} info' -a '{repo_names}'
 complete -c frog -n '__fish_seen_subcommand_from unit' -a 'discover list'
-complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list next info status dependency conflict tag assign'
+complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list next claim finish info status dependency conflict tag assign'
 complete -c frog -n '__fish_seen_subcommand_from lock' -a 'check acquire renew release list info'
 complete -c frog -n '__fish_seen_subcommand_from file' -a 'upsert list info'
 complete -c frog -n '__fish_seen_subcommand_from log' -a 'why blame --follow --limit --repo -f'
@@ -278,6 +278,19 @@ def _emit(payload: dict, as_json: bool) -> int:
                 print(f"- {item}")
         else:
             print("no obvious issues")
+        return 0
+    if "unblocked" in payload and "task" in payload and "verification" in payload:
+        tk = payload["task"]
+        print(f"finished {tk['slug']}  ({tk['workflow_status']})")
+        v = payload.get("verification")
+        if v and v.get("ran"):
+            print(f"  verify: {'FAILED' if v['failed'] else 'passed'}")
+        if payload.get("released_locks"):
+            print(f"  released locks: {payload['released_locks']}")
+        if payload["unblocked"]:
+            print("  unblocked: " + ", ".join(payload["unblocked"]))
+        else:
+            print("  unblocked: (none)")
         return 0
     if "eligible" in payload and "considered" in payload:
         print(f"agent {payload['agent']}: {payload['eligible']} eligible "
@@ -921,6 +934,15 @@ def build_parser() -> argparse.ArgumentParser:
     task_next.add_argument("--agent", help="Acting agent (default $USER)")
     task_next.add_argument("--repo", dest="repo_ref", metavar="REPO")
     task_next.add_argument("--limit", type=int, default=1)
+    task_claim = task_sub.add_parser("claim", help="Take ownership + lock + mark in_progress")
+    task_claim.add_argument("slug")
+    task_claim.add_argument("--agent")
+    task_claim.add_argument("--lock-kind", default="edit")
+    task_claim.add_argument("--force", action="store_true")
+    task_finish = task_sub.add_parser("finish", help="Verify (affected build/test) -> done + release + report unblocks")
+    task_finish.add_argument("slug")
+    task_finish.add_argument("--agent")
+    task_finish.add_argument("--no-verify", dest="no_verify", action="store_true")
     task_info = task_sub.add_parser("info", help="Show one task")
     task_info.add_argument("slug")
     task_status = task_sub.add_parser("status", help="Update or show task status")
@@ -1223,6 +1245,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if args.task_command == "list":
                 return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=args.workflow_status, assigned_agent=args.assigned_agent), args.json)
+            if args.task_command == "claim":
+                return _emit(store.task_claim(conn, slug=args.slug,
+                    agent=(args.agent or store.current_agent()),
+                    lock_kind=args.lock_kind, force=args.force), args.json)
+            if args.task_command == "finish":
+                return _emit(store.task_finish(conn, slug=args.slug,
+                    agent=(args.agent or store.current_agent()),
+                    verify=not args.no_verify), args.json)
             if args.task_command == "next":
                 agent = args.agent or store.current_agent()
                 return _emit(
