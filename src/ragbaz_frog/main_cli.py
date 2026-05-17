@@ -242,6 +242,11 @@ def _emit(payload: dict, as_json: bool) -> int:
             if result["stderr"].strip():
                 print(result["stderr"].rstrip(), file=sys.stderr)
         return 0 if payload.get("ok", True) else 1
+    if "deps" in payload:
+        for d in payload["deps"]:
+            print(f"{d['dependent_repo_path']}  ->  {d['dependency_repo_path']}"
+                  + (f"  ({d['note']})" if d.get("note") else ""))
+        return 0
     if "affected" in payload and "changed_files" in payload:
         repo = payload.get("repo", {})
         rn = repo.get("name", "?") if isinstance(repo, dict) else "?"
@@ -250,6 +255,9 @@ def _emit(payload: dict, as_json: bool) -> int:
               + (f" since {payload['since']}" if payload.get("since") else ""))
         for tgt in payload["affected"]:
             print(f"  {tgt['target_kind']}  {tgt['name']}  {tgt['workdir']}")
+        for ds in payload.get("downstream", []):
+            dn = ds["repo"]["name"] if isinstance(ds.get("repo"), dict) else "?"
+            print(f"  downstream {dn}: {len(ds['targets'])} target(s)")
         return 0
     if "diff" in payload:
         if payload.get("diff"):
@@ -778,6 +786,15 @@ def build_parser() -> argparse.ArgumentParser:
     repo_task_inline_sub = repo_task_inline.add_subparsers(dest="repo_task_inline_command", required=True)
     repo_task_inline_list = repo_task_inline_sub.add_parser("list", help="List tasks for one repo")
     repo_task_inline_list.add_argument("--repo", dest="repo_ref", metavar="REPO", required=True)
+    repo_dep = repo_sub.add_parser("dep", help="Declared cross-repo dependency edges")
+    repo_dep_sub = repo_dep.add_subparsers(dest="repo_dep_command", required=True)
+    rd_add = repo_dep_sub.add_parser("add", help="Declare: DEPENDENT depends on DEPENDENCY")
+    rd_add.add_argument("dependent")
+    rd_add.add_argument("dependency")
+    rd_add.add_argument("--note")
+    rd_list = repo_dep_sub.add_parser("list", help="List dependency edges")
+    rd_list.add_argument("repo_ref", nargs="?", help="Filter to one repo")
+
     repo_affected = repo_sub.add_parser(
         "affected", help="List targets affected by working-tree / since-REF changes")
     repo_affected.add_argument("repo_ref", nargs="?",
@@ -1104,6 +1121,11 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.repo_info(conn, args.repo_ref), args.json)
             if args.repo_command == "task":
                 return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=None, assigned_agent=None), args.json)
+            if args.repo_command == "dep":
+                if args.repo_dep_command == "add":
+                    return _emit(store.repo_dep_add(conn, args.dependent, args.dependency, args.note), args.json)
+                if args.repo_dep_command == "list":
+                    return _emit(store.repo_dep_list(conn, args.repo_ref), args.json)
             if args.repo_command == "affected":
                 return _emit(store.repo_affected(conn, args.repo_ref, since=getattr(args, "since", None)), args.json)
             return _emit(_run_repo_action(conn, args.repo_ref, args.repo_command, args), args.json)

@@ -29,7 +29,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
 - [x] B2 implement the missing `store.repo_diff` (referenced by
       `frog repo diff`, currently an AttributeError), then
       `frog repo affected [--since REF]` and `frog repo build --affected`.
-- [ ] B3 migration `005_repo_deps.sql` (declared edges) +
+- [x] B3 migration `005_repo_deps.sql` (declared edges) +
       `frog repo dep add A B` + `affected` fan-out across declared deps.
 
 ## Phase "do it better" - lean into the niche

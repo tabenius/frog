@@ -2200,6 +2200,58 @@ def _targets_for_files(conn, repo_path: str, files: list[str]) -> list[dict]:
     return affected
 
 
+def repo_dep_add(conn, dependent_ref: str, dependency_ref: str,
+                  note: str | None = None) -> dict:
+    dep = _repo_required(conn, dependent_ref)
+    on = _repo_required(conn, dependency_ref)
+    if not dep:
+        return {"ok": False, "error": f"repo not found: {dependent_ref}"}
+    if not on:
+        return {"ok": False, "error": f"repo not found: {dependency_ref}"}
+    if dep["repo_path"] == on["repo_path"]:
+        return {"ok": False, "error": "a repo cannot depend on itself"}
+    conn.execute(
+        """INSERT OR REPLACE INTO repo_deps(dependent_repo_path,
+           dependency_repo_path, note, created_at) VALUES(?,?,?,?)""",
+        (dep["repo_path"], on["repo_path"], note, utc_now_iso()),
+    )
+    record_event(
+        conn, kind="repo.dep.added",
+        summary=f"{dep['name']} depends on {on['name']}",
+        repo_path=dep["repo_path"],
+        payload={"dependency": on["repo_path"], "note": note},
+    )
+    conn.commit()
+    return {"ok": True, "message": f"{dep['name']} -> {on['name']}",
+            "dependent": dep["repo_path"], "dependency": on["repo_path"]}
+
+
+def repo_dep_list(conn, repo_ref: str | None = None) -> dict:
+    if repo_ref:
+        repo = _repo_required(conn, repo_ref)
+        if not repo:
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        rows = conn.execute(
+            """SELECT * FROM repo_deps
+               WHERE dependent_repo_path = ? OR dependency_repo_path = ?
+               ORDER BY dependent_repo_path""",
+            (repo["repo_path"], repo["repo_path"]),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM repo_deps ORDER BY dependent_repo_path"
+        ).fetchall()
+    return {"ok": True, "deps": [dict(r) for r in rows]}
+
+
+def _dependents_of(conn, dependency_repo_path: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT dependent_repo_path FROM repo_deps WHERE dependency_repo_path = ?",
+        (dependency_repo_path,),
+    ).fetchall()
+    return [r["dependent_repo_path"] for r in rows]
+
+
 def repo_diff(conn, repo_ref: str, *, stat_only: bool = False,
               include_tasks: bool = False, include_impact: bool = False) -> dict:
     repo = _repo_required(conn, repo_ref)
@@ -2238,13 +2290,26 @@ def repo_affected(conn, repo_ref: str, *, since: str | None = None,
     affected = _targets_for_files(conn, rp, changed)
     if target_kind:
         affected = [t for t in affected if t["target_kind"] == target_kind]
-    return {
+    result = {
         "ok": True,
         "repo": repo,
         "since": since,
         "changed_files": changed,
         "affected": affected,
     }
+    if changed:
+        downstream = []
+        for dep_path in _dependents_of(conn, rp):
+            drepo = resolve_repo(conn, dep_path)
+            if not drepo:
+                continue
+            dtargets = _targets_for_files(conn, dep_path, ["__upstream_changed__"])
+            if target_kind:
+                dtargets = [t for t in dtargets if t["target_kind"] == target_kind]
+            downstream.append({"repo": drepo, "targets": dtargets})
+        if downstream:
+            result["downstream"] = downstream
+    return result
 
 
 def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, only_targets: set | None = None) -> dict:
