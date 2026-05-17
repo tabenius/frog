@@ -88,7 +88,7 @@ def _workspace_names() -> list[str]:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent-instructions completion ps snapshot status log config mcp repo unit task lock file"
+    top = "db new agent agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -657,7 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -788,6 +788,14 @@ def build_parser() -> argparse.ArgumentParser:
     sync_list = sync_sub.add_parser("list", help="Show mirrored events")
     sync_list.add_argument("workspace", nargs="?")
     sync_list.add_argument("--limit", type=int, default=20)
+
+    agent_cmd = sub.add_parser("agent", help="Acting-agent identity")
+    agent_sub = agent_cmd.add_subparsers(dest="agent_command", required=True)
+    agent_sub.add_parser("whoami", help="Show the resolved acting agent + session")
+    ag_reg = agent_sub.add_parser("register", help="Register/update an agent")
+    ag_reg.add_argument("name", nargs="?", help="Defaults to the resolved agent")
+    ag_reg.add_argument("--kind")
+    ag_reg.add_argument("--notes")
 
     repo = sub.add_parser(
         "repo",
@@ -1216,7 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.task_command == "list":
                 return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=args.workflow_status, assigned_agent=args.assigned_agent), args.json)
             if args.task_command == "next":
-                agent = args.agent or os.environ.get("USER", "unknown")
+                agent = args.agent or store.current_agent()
                 return _emit(
                     store.task_next(conn, agent=agent,
                                     repo_ref=args.repo_ref, limit=args.limit),
@@ -1271,7 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.lock_command == "reap":
                 return _emit(store.lock_reap(conn), args.json)
             if args.lock_command == "audit":
-                agent = args.agent or os.environ.get("USER", "unknown")
+                agent = args.agent or store.current_agent()
                 return _emit(
                     store.lock_audit(conn, repo_ref=args.repo_ref, agent=agent),
                     args.json,
@@ -1321,6 +1329,11 @@ def main(argv: list[str] | None = None) -> int:
                     store.event_mirror_list(conn, workspace=args.workspace, limit=args.limit),
                     args.json,
                 )
+        if args.command == "agent":
+            if args.agent_command == "whoami":
+                return _emit(store.agent_whoami(conn), args.json)
+            if args.agent_command == "register":
+                return _emit(store.agent_register(conn, args.name, kind=args.kind, notes=args.notes), args.json)
         return _emit({"ok": False, "error": "unsupported command"}, args.json)
     finally:
         conn.close()

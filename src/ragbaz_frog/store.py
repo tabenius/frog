@@ -147,6 +147,56 @@ def dicts(rows) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def current_agent() -> str:
+    """Resolved acting-agent identity. FROG_AGENT lets a Claude/Codex
+    session declare itself distinctly even when many run as the same OS
+    user; falls back to $USER."""
+    return (os.environ.get("FROG_AGENT")
+            or os.environ.get("USER")
+            or "unknown").strip() or "unknown"
+
+
+def current_session() -> str:
+    """Stable-per-process session id so two sessions of the same agent are
+    distinguishable (FROG_SESSION, else host:pid)."""
+    return os.environ.get("FROG_SESSION") or f"{socket.gethostname()}:{os.getpid()}"
+
+
+def agent_whoami(conn) -> dict:
+    name = current_agent()
+    row = conn.execute("SELECT * FROM agents WHERE name = ?", (name,)).fetchone()
+    return {
+        "ok": True,
+        "agent": name,
+        "session": current_session(),
+        "registered": bool(row),
+        "kind": row["kind"] if row else None,
+    }
+
+
+def agent_register(conn, name: str | None = None, *, kind: str | None = None,
+                   notes: str | None = None) -> dict:
+    name = (name or current_agent()).strip()
+    if not name:
+        return {"ok": False, "error": "empty agent name"}
+    now = utc_now_iso()
+    conn.execute(
+        """INSERT INTO agents(name, kind, notes, created_at, updated_at)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(name) DO UPDATE SET
+             kind=COALESCE(excluded.kind, agents.kind),
+             notes=COALESCE(excluded.notes, agents.notes),
+             updated_at=excluded.updated_at""",
+        (name, kind, notes, now, now),
+    )
+    record_event(conn, kind="agent.registered",
+                 summary=f"registered agent {name}", actor=name,
+                 payload={"kind": kind, "session": current_session()})
+    conn.commit()
+    return {"ok": True, "message": f"registered agent {name}",
+            "agent": name, "kind": kind}
+
+
 def ensure_agent(conn, name: str) -> None:
     now = utc_now_iso()
     conn.execute(

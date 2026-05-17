@@ -56,7 +56,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
 
 # Phase II - consolidation (identity, workflow, proof, board)
 
-- [ ] II-1 Agent identity: store.current_agent()/current_session()
+- [x] II-1 Agent identity: store.current_agent()/current_session()
       (env FROG_AGENT/FROG_SESSION, else $USER + host:pid);
       `frog agent whoami|register`; thread identity defaults into
       lock/task/audit/scheduler instead of bare $USER.
