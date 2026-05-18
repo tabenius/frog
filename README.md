@@ -85,3 +85,18 @@ frog's differentiator is the coordination/scheduling/forensics layer:
 
 See `PLAN.md` for the phased rollout; `tests/` is a stdlib unittest
 suite (`python3 -m unittest discover -s tests`).
+
+### Phase II (consolidation)
+
+- `frog agent whoami|register` — first-class identity (FROG_AGENT) so
+  peers on the same OS user are distinct; flows into locks/tasks/audit.
+- `frog task claim <slug>` / `frog task finish <slug>` — composed
+  workflow: claim = assign+lock+in_progress; finish = affected
+  build/test gate → done + release + report unblocked dependents.
+- `frog db gc [--older-than D] [--keep N]` — prune event/target_runs +
+  VACUUM. `frog doctor` — self-diagnostic. `frog board [--once]` —
+  realtime colored lifecycle board over the event log.
+- Concurrency-safe: lock_acquire is atomic (BEGIN IMMEDIATE) — proven
+  by a multiprocessing stress test. `--db` now overrides the workspace
+  DB (was silently ignored). SSH path testable via an injectable seam.
+- `pip install -e .` (pyproject + console_scripts frog / frog-mcp).
