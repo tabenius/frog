@@ -96,6 +96,15 @@ class Board(unittest.TestCase):
         self.assertTrue(bl, f"expected a blocked line naming root1; got:\n{frame}")
         self.assertIn("\u26d3", frame)  # chain glyph present
 
+    def test_header_is_uppercase_with_ascii_frog(self):
+        mk(self.conn, "h")
+        frame = main_cli._board_frame(store.board_snapshot(self.conn),
+                                      color=False, width=100)
+        self.assertIn("TASK BOARD", frame)
+        self.assertNotIn("task board", frame)
+        self.assertTrue(any("oo" in l for l in frame.splitlines()[:6]),
+                        "ASCII frog should render under the header")
+
 if __name__ == "__main__":
     unittest.main()
 

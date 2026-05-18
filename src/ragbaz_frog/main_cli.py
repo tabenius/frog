@@ -670,6 +670,12 @@ def _dispatch_workspace(workspace: dict, argv: list[str]) -> dict:
     return payload
 
 
+_FROG_ART = [
+    "   @ . . @",
+    "  ( o   o )",
+    "  (  \u203f  )",
+    " ~~oo~~~oo~~",
+]
 _PRIO_COLOR = {"p0": "196", "p1": "208", "p2": "214", "p3": "245"}
 _COL_ORDER = [("idea", "IDEA", "39"), ("blocked", "BLOCKED", "203"),
               ("in_progress", "IN PROGRESS", "208"), ("done", "DONE", "78")]
@@ -695,8 +701,10 @@ def _board_frame(snap: dict, *, color: bool = True, changed: set | None = None,
             return s
         return s[: budget - 1] + "\u2026"
 
-    title = _c("RAGBAZ", "208", color) + _c("/frog", "39", color) + "  task board"
+    title = _c("RAGBAZ", "208", color) + _c("/frog", "39", color) + "  TASK BOARD"
     out.append(title)
+    for _ln in _FROG_ART:
+        out.append(_c(_ln, "78", color))
     out.append("")
     for key, label, code in _COL_ORDER:
         items = cols.get(key, [])
