@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -52,6 +53,21 @@ class RepoDiffAffected(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertEqual(len(r["changed_files"]), 1)
         self.assertTrue(len(r["affected"]) >= 1)
+
+    def test_missing_repo_ref_defaults_to_cwd_repo(self):
+        old = os.getcwd()
+        try:
+            os.chdir(self.repo)
+            explicit = store.repo_affected(self.conn, ".")
+            missing = store.repo_affected(self.conn, None)
+            empty = store.repo_affected(self.conn, "")
+        finally:
+            os.chdir(old)
+        self.assertTrue(explicit["ok"])
+        self.assertTrue(missing["ok"])
+        self.assertTrue(empty["ok"])
+        self.assertEqual(missing["repo"]["repo_path"], explicit["repo"]["repo_path"])
+        self.assertEqual(empty["repo"]["repo_path"], explicit["repo"]["repo_path"])
 
     def test_build_affected_runs_only_affected(self):
         # nothing changed -> --affected build runs nothing

@@ -949,8 +949,12 @@ def repo_key_info(conn, repo_ref: str, *, set_key: str | None = None,
                 "ORDER BY box", (key,)).fetchall())}
 
 
-def resolve_repo(conn, repo_ref: str) -> dict | None:
+def resolve_repo(conn, repo_ref: str | None) -> dict | None:
+    if repo_ref is None:
+        return None
     repo_ref = repo_ref.strip()
+    if not repo_ref:
+        return None
     exact = conn.execute(
         "SELECT * FROM repos WHERE repo_path = ? OR name = ?",
         (repo_ref, repo_ref),
@@ -2773,7 +2777,12 @@ def log_blame(conn, file_path: str) -> dict:
             "tasks": tasks, "locks": locks, "events": events}
 
 
-def _repo_required(conn, repo_ref: str) -> dict | None:
+def _repo_required(conn, repo_ref: str | None) -> dict | None:
+    if not repo_ref:
+        inferred = infer_repo_from_cwd(conn)
+        if not inferred:
+            return None
+        repo_ref = inferred["repo_path"]
     repo = resolve_repo(conn, repo_ref)
     if not repo:
         return None
