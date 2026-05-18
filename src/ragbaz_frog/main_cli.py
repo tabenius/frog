@@ -1240,7 +1240,11 @@ def build_parser() -> argparse.ArgumentParser:
     lock_acquire.add_argument("--lock-kind", required=True)
     lock_acquire.add_argument("--file", action="append", default=[])
     lock_acquire.add_argument("--agent", required=True)
-    lock_acquire.add_argument("--pid", type=int)
+    lock_acquire.add_argument(
+        "--pid",
+        type=int,
+        help="Explicit long-lived owner PID; omit for normal one-shot CLI claims",
+    )
     lock_acquire.add_argument("--reason")
     lock_acquire.add_argument("--lease-seconds", type=int, default=1800)
     lock_acquire.add_argument("--eta-minutes", type=int)

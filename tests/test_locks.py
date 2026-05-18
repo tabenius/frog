@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import unittest
+import socket
 from pathlib import Path
 
 from _util import fresh_db
@@ -111,6 +112,72 @@ class LockReap(unittest.TestCase):
             self.assertEqual(len(res["reaped"]), 1)
             row = conn.execute("SELECT status FROM locks").fetchone()
             self.assertEqual(row["status"], "stale")
+        finally:
+            conn.close()
+
+    def test_implicit_cli_pid_is_not_reaped_as_dead(self):
+        db = fresh_db()
+        conn = store.connect(db)
+        try:
+            store.lock_acquire(
+                conn, scope_key="implicit", repo_ref=None, lock_kind="x",
+                files=[], agent="a", pid=None, reason=None,
+                lease_seconds=3600, eta_minutes=None, force=False,
+            )
+            row = conn.execute("SELECT pid FROM locks").fetchone()
+            self.assertIsNone(row["pid"])
+            res = store.lock_reap(conn)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["reaped"], [])
+            row = conn.execute("SELECT status FROM locks").fetchone()
+            self.assertEqual(row["status"], "active")
+        finally:
+            conn.close()
+
+    def test_reap_reports_dead_same_host_pid(self):
+        db = fresh_db()
+        conn = store.connect(db)
+        try:
+            store.lock_acquire(
+                conn, scope_key="dead", repo_ref=None, lock_kind="x",
+                files=[], agent="a", pid=None, reason=None,
+                lease_seconds=3600, eta_minutes=None, force=False,
+            )
+            conn.execute("UPDATE locks SET pid = 99999999")
+            conn.commit()
+            res = store.lock_reap(conn)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["reaped"][0]["reason"], "dead_pid")
+            row = conn.execute("SELECT status FROM locks").fetchone()
+            self.assertEqual(row["status"], "stale")
+            event = conn.execute(
+                "SELECT kind, payload_json FROM event_log "
+                "WHERE kind='lock.dead_pid'"
+            ).fetchone()
+            self.assertIsNotNone(event)
+            self.assertIn('"reason": "dead_pid"', event["payload_json"])
+        finally:
+            conn.close()
+
+    def test_dead_pid_on_other_host_is_not_reaped(self):
+        db = fresh_db()
+        conn = store.connect(db)
+        try:
+            store.lock_acquire(
+                conn, scope_key="remote", repo_ref=None, lock_kind="x",
+                files=[], agent="a", pid=None, reason=None,
+                lease_seconds=3600, eta_minutes=None, force=False,
+            )
+            conn.execute(
+                "UPDATE locks SET host = ?, pid = 99999999",
+                (socket.gethostname() + "-other",),
+            )
+            conn.commit()
+            res = store.lock_reap(conn)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["reaped"], [])
+            row = conn.execute("SELECT status FROM locks").fetchone()
+            self.assertEqual(row["status"], "active")
         finally:
             conn.close()
 

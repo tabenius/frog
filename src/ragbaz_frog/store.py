@@ -2004,26 +2004,79 @@ def _normalise_files(file_paths: list[str] | None) -> list[str]:
     return sorted(set(paths))
 
 
-def _mark_stale_locks(conn) -> None:
+def _pid_is_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _stale_lock_reason(row, now: datetime) -> str | None:
+    updated = parse_iso(row["updated_at"])
+    if row["lease_seconds"] and (now - updated).total_seconds() > row["lease_seconds"]:
+        return "lease_expired"
+    # PID reaping is deliberately opt-in. Normal CLI/task claims store NULL
+    # because the frog command process exits immediately and is not the agent.
+    if row["host"] == socket.gethostname() and row["pid"] and not _pid_is_alive(row["pid"]):
+        return "dead_pid"
+    return None
+
+
+def _mark_stale_locks(conn) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, updated_at, lease_seconds FROM locks WHERE status = 'active'"
+        """
+        SELECT id, scope_key, repo_path, agent_name, pid, host, updated_at, lease_seconds
+        FROM locks WHERE status = 'active'
+        """
     ).fetchall()
     now = utc_now()
     stale = []
     for row in rows:
-        updated = parse_iso(row["updated_at"])
-        if row["lease_seconds"] and (now - updated).total_seconds() > row["lease_seconds"]:
-            stale.append(row["id"])
-    for lock_id in stale:
+        reason = _stale_lock_reason(row, now)
+        if reason:
+            stale.append({"id": row["id"], "reason": reason, "row": row})
+    for item in stale:
+        lock_id = item["id"]
+        row = item["row"]
+        reason = item["reason"]
+        event_kind = "lock.dead_pid" if reason == "dead_pid" else "lock.stale"
+        summary = (
+            f"marked lock {lock_id} stale: dead pid {row['pid']}"
+            if reason == "dead_pid"
+            else f"marked lock {lock_id} stale"
+        )
         conn.execute("UPDATE locks SET status = 'stale' WHERE id = ?", (lock_id,))
         record_event(
             conn,
-            kind="lock.stale",
-            summary=f"marked lock {lock_id} stale",
-            payload={"lock_id": lock_id},
+            kind=event_kind,
+            summary=summary,
+            repo_path=row["repo_path"],
+            actor=row["agent_name"],
+            payload={
+                "lock_id": lock_id,
+                "reason": reason,
+                "pid": row["pid"],
+                "host": row["host"],
+                "scope_key": row["scope_key"],
+            },
         )
     if stale:
         conn.commit()
+    return [
+        {
+            "id": item["id"],
+            "scope_key": item["row"]["scope_key"],
+            "agent_name": item["row"]["agent_name"],
+            "repo_path": item["row"]["repo_path"],
+            "reason": item["reason"],
+        }
+        for item in stale
+    ]
 
 
 def _lock_rows(
@@ -2201,7 +2254,7 @@ def lock_acquire(
                 json.dumps(files),
                 json.dumps(rel_files),
                 agent,
-                pid if pid is not None else os.getpid(),
+                pid,
                 socket.gethostname(),
                 reason,
                 lease_seconds,
@@ -2297,14 +2350,16 @@ def lock_reap(conn) -> dict:
         row["id"]
         for row in conn.execute("SELECT id FROM locks WHERE status = 'stale'")
     }
-    _mark_stale_locks(conn)
+    marked = _mark_stale_locks(conn)
     after_rows = conn.execute(
         "SELECT id, scope_key, agent_name, repo_path FROM locks WHERE status = 'stale'"
     ).fetchall()
-    newly = [dict(r) for r in after_rows if r["id"] not in before]
+    reasons = {item["id"]: item["reason"] for item in marked}
+    newly = [dict(r) | {"reason": reasons.get(r["id"], "stale")}
+             for r in after_rows if r["id"] not in before]
     return {
         "ok": True,
-        "message": f"reaped {len(newly)} expired lock(s)",
+        "message": f"reaped {len(newly)} stale lock(s)",
         "reaped": newly,
     }
 
