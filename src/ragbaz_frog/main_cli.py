@@ -88,7 +88,7 @@ def _workspace_names() -> list[str]:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent doctor agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    top = "db new agent doctor board agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -641,6 +641,75 @@ def _dispatch_workspace(workspace: dict, argv: list[str]) -> dict:
     return payload
 
 
+_PRIO_COLOR = {"p0": "196", "p1": "208", "p2": "214", "p3": "245"}
+_COL_ORDER = [("idea", "IDEA", "39"), ("blocked", "BLOCKED", "203"),
+              ("in_progress", "IN PROGRESS", "208"), ("done", "DONE", "78")]
+
+
+def _c(s: str, code: str, color: bool) -> str:
+    return f"\033[38;5;{code}m{s}\033[0m" if color else s
+
+
+def _board_frame(snap: dict, *, color: bool = True, changed: set | None = None) -> str:
+    changed = changed or set()
+    cols = snap["columns"]
+    out = []
+    title = _c("RAGBAZ", "208", color) + _c("/frog", "39", color) + "  task board"
+    out.append(title)
+    out.append("")
+    for key, label, code in _COL_ORDER:
+        items = cols.get(key, [])
+        head = _c(f"{label} ({len(items)})", code, color)
+        out.append(head)
+        if not items:
+            out.append("  " + _c("·", "240", color))
+        for tk in items:
+            pc = _PRIO_COLOR.get((tk["priority"] or "p3").lower(), "245")
+            badge = _c(tk["priority"] or "p?", pc, color)
+            mark = ""
+            if tk["slug"] in snap.get("ready", []):
+                mark += _c(" ★", "220", color)        # ready
+            if tk.get("assigned_agent"):
+                mark += _c(f" ◆{tk['assigned_agent']}", "39", color)
+            if tk.get("unmet_deps"):
+                mark += _c(f" ⛓{len(tk['unmet_deps'])}", "203", color)
+            flash = _c("▸ ", "220", color) if tk["slug"] in changed else "  "
+            title_txt = (tk["title"] or "")[:46]
+            out.append(f"{flash}{badge} {tk['slug']}  {title_txt}{mark}")
+        out.append("")
+    out.append(_c("recent", "245", color))
+    for ev in snap.get("recent", [])[-10:]:
+        k = ev["kind"]
+        kc = "220" if k == "task.unblocked" else (
+            "78" if k == "task.finished" else (
+            "39" if k == "task.claimed" else "245"))
+        out.append(f"  {ev['created_at'][11:19]}  {_c(k, kc, color)}  {ev['summary']}")
+    return "\n".join(out)
+
+
+def _run_board(conn, *, once: bool, interval: float) -> int:
+    import time as _t
+    color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    prev_col = {}
+    try:
+        while True:
+            snap = store.board_snapshot(conn)
+            cur_col = {tk["slug"]: key
+                       for key, _l, _c2 in _COL_ORDER
+                       for tk in snap["columns"].get(key, [])}
+            changed = {s for s, c in cur_col.items() if prev_col.get(s) != c and s in prev_col}
+            prev_col = cur_col
+            frame = _board_frame(snap, color=color, changed=changed)
+            if once:
+                print(frame)
+                return 0
+            sys.stdout.write("\033[2J\033[H" + frame + "\n")
+            sys.stdout.flush()
+            _t.sleep(interval)
+    except KeyboardInterrupt:
+        return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="RAGBAZ workspace coordination CLI",
@@ -684,7 +753,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,doctor,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,doctor,board,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -733,6 +802,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rotate /data/backups/src.last to src.prev and rsync /data/src to src.last",
     )
     sub.add_parser("doctor", help="Self-diagnostic over locks/tasks/events/DB")
+    board_cmd = sub.add_parser("board", help="Realtime colored task lifecycle board")
+    board_cmd.add_argument("--once", action="store_true", help="Print one frame and exit")
+    board_cmd.add_argument("--interval", type=float, default=2.0, help="Refresh seconds")
     ps = sub.add_parser(
         "ps",
         help="Show active tasks, active locks, and recent frog activity",
@@ -1197,6 +1269,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "doctor":
             return _emit(store.doctor(conn, args.db), args.json)
+        if args.command == "board":
+            if args.json:
+                return _emit(store.board_snapshot(conn), True)
+            return _run_board(conn, once=args.once, interval=args.interval)
         if args.command == "snapshot":
             return _emit(store.snapshot_workspace(conn), args.json)
         if args.command == "ps":

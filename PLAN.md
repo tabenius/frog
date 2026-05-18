@@ -76,6 +76,6 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       pinned Python floor; bin/ shims kept.
 - [x] II-8 A3 decision: with identity, lock guard enforces only against
       a *different* agent's active lock; still opt-in but now meaningful.
-- [ ] II-9 Capstone: `frog board` realtime colored lifecycle board over
+- [x] II-9 Capstone: `frog board` realtime colored lifecycle board over
       event_log (enters / assigned / status / claimed / finished + which
       dependents unlock), + design writeup.

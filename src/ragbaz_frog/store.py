@@ -2114,6 +2114,55 @@ UNIT_KIND_BY_SOURCE = {
 }
 
 
+def board_snapshot(conn, *, recent_limit: int = 14) -> dict:
+    """Pure snapshot for the live board: tasks bucketed by lifecycle
+    column, the ready set (all deps done, not started), and the recent
+    event tail (incl. task.unblocked transitions)."""
+    cols = {"idea": [], "blocked": [], "in_progress": [], "done": []}
+    ready = []
+    for r in conn.execute(
+        "SELECT slug,title,priority,workflow_status,assigned_agent,repo_path "
+        "FROM tasks ORDER BY priority, slug"
+    ):
+        task = dict(r)
+        wf = (task["workflow_status"] or "").lower()
+        unmet = []
+        for d in conn.execute(
+            "SELECT depends_on_slug FROM task_dependencies "
+            "WHERE task_slug=? AND relation='depends_on'", (task["slug"],)
+        ):
+            dd = conn.execute(
+                "SELECT workflow_status FROM tasks WHERE slug=?",
+                (d["depends_on_slug"],)
+            ).fetchone()
+            if not dd or (dd["workflow_status"] or "").lower() not in _WF_DONE:
+                unmet.append(d["depends_on_slug"])
+        task["unmet_deps"] = unmet
+        if wf in _WF_DONE:
+            col = "done"
+        elif wf in _WF_INPROG:
+            col = "in_progress"
+        elif wf in _WF_BLOCKED or unmet:
+            col = "blocked"
+        else:
+            col = "idea"
+        cols[col].append(task)
+        if col == "idea" and not unmet:
+            ready.append(task["slug"])
+    recent = dicts(conn.execute(
+        "SELECT id,created_at,kind,summary,task_slug,actor FROM event_log "
+        "WHERE kind LIKE 'task.%' OR kind LIKE 'lock.%' "
+        "ORDER BY id DESC LIMIT ?", (recent_limit,)
+    ).fetchall())
+    recent.reverse()
+    return {"ok": True, "columns": cols, "ready": ready,
+            "recent": recent,
+            "counts": {k: len(v) for k, v in cols.items()},
+            "max_event_id": conn.execute(
+                "SELECT COALESCE(MAX(id),0) m FROM event_log"
+            ).fetchone()["m"]}
+
+
 def log_why(conn, slug: str) -> dict:
     """Causality for a task: its event timeline + status history +
     assignments. Reconstructs 'what happened to this slice and when'."""
