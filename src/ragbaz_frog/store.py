@@ -1429,7 +1429,7 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
       - not done/blocked, git not done
       - every depends_on dependency is done
       - no conflicting task is currently in progress
-      - the task's repo is not locked by another agent
+      - the task's lock/file scope is not locked by another agent
       - not already owned by a different agent
     Ordered by priority then age."""
     repo_path = None
@@ -1441,10 +1441,6 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
 
     rows = conn.execute("SELECT * FROM tasks").fetchall()
     active_locks = _lock_rows(conn, include_inactive=False)
-    locked_repos_by_other = {
-        lk["repo_path"] for lk in active_locks
-        if lk["repo_path"] and lk["agent_name"] != agent
-    }
 
     eligible, skipped = [], []
     for r in rows:
@@ -1483,8 +1479,6 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
                     conflicting.append(c["o"])
             if conflicting:
                 reason = "conflicts in progress: " + ", ".join(conflicting)
-        if reason is None and task["repo_path"] in locked_repos_by_other:
-            reason = "repo locked by another agent"
         if reason is None:
             owner = task["assigned_agent"]
             if owner and owner != agent:
@@ -1497,6 +1491,16 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
             ).fetchone()
             if other:
                 reason = f"owned by {other['agent_name']}"
+        if reason is None:
+            conflicts = [
+                lk for lk in active_locks
+                if lk["agent_name"] != agent and _locks_conflict(
+                    _task_lock_candidate(conn, task), lk
+                )
+            ]
+            if conflicts:
+                scopes = ", ".join(sorted({lk["scope_key"] for lk in conflicts}))
+                reason = "lock conflict: " + scopes
         if reason is None:
             eligible.append(task)
         else:
@@ -1514,6 +1518,27 @@ def _task_file_paths(conn, slug: str) -> list[str]:
     return [r["file_path"] for r in conn.execute(
         "SELECT file_path FROM task_files WHERE task_slug = ?", (slug,)
     ).fetchall()]
+
+
+def _repo_key_for_path(conn, repo_path: str | None) -> str | None:
+    if not repo_path:
+        return None
+    row = conn.execute(
+        "SELECT repo_key FROM repos WHERE repo_path = ?", (repo_path,)
+    ).fetchone()
+    return row["repo_key"] if row else None
+
+
+def _task_lock_candidate(conn, task: dict) -> dict:
+    files = _normalise_files(_task_file_paths(conn, task["slug"]))
+    repo_path = task.get("repo_path")
+    return {
+        "scope_key": f"task:{task['slug']}",
+        "repo_path": repo_path,
+        "file_paths": files,
+        "repo_key": _repo_key_for_path(conn, repo_path),
+        "rel_files": _rel_files(repo_path, files),
+    }
 
 
 def _newly_unblocked(conn, finished_slug: str) -> list[str]:
@@ -1975,6 +2000,8 @@ def _rel_files(repo_path: str | None, files: list[str]) -> list[str]:
 def _locks_conflict(candidate: dict, lock: dict) -> bool:
     if candidate["scope_key"] == lock["scope_key"]:
         return True
+    if _is_task_scope_only(candidate) or _is_task_scope_only(lock):
+        return False
     # Cross-box clause FIRST: same logical repo (repo_key) makes a lock
     # meaningful even when the absolute path / box differs. This must be
     # evaluated before the repo_path-mismatch shortcut below, which would
@@ -1995,6 +2022,14 @@ def _locks_conflict(candidate: dict, lock: dict) -> bool:
     if not current_files or not other_files:
         return bool(candidate["repo_path"]) and candidate["repo_path"] == lock["repo_path"]
     return bool(current_files & other_files)
+
+
+def _is_task_scope_only(lock: dict) -> bool:
+    return (
+        str(lock.get("scope_key") or "").startswith("task:")
+        and not (lock.get("file_paths") or [])
+        and not (lock.get("rel_files") or [])
+    )
 
 
 def lock_check(conn, *, scope_key: str, repo_ref: str | None, files: list[str] | None) -> dict:
@@ -2244,9 +2279,12 @@ def lock_audit(conn, *, repo_ref: str | None, agent: str) -> dict:
         lk
         for lk in _lock_rows(conn, include_inactive=False, repo_path=repo_path)
     ]
-    # whole-repo coverage: an active lock on this repo with no explicit files
+    # Explicit no-file locks cover the whole repo. A no-file task:<slug> lock is
+    # only task ownership; it does not cover unrelated dirty files.
     repo_holders = {
-        lk["agent_name"] for lk in active if not lk["file_paths"]
+        lk["agent_name"]
+        for lk in active
+        if not lk["file_paths"] and not _is_task_scope_only(lk)
     }
     file_holders: dict[str, set[str]] = {}
     for lk in active:

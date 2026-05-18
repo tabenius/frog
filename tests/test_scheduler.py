@@ -19,6 +19,14 @@ class Scheduler(unittest.TestCase):
                           delegation_current=None, delegation_other=None,
                           parent_task_slug=None)
 
+    def _mk_repo_task(self, slug, repo, prio="p3", wf="idea"):
+        store.create_task(self.conn, slug=slug, repo_ref=repo, title=slug,
+                          why=None, what_text=None, roi_note=None,
+                          priority=prio, workflow_status=wf,
+                          git_status="not_started", assigned_agent=None,
+                          delegation_current=None, delegation_other=None,
+                          parent_task_slug=None)
+
     def test_priority_order_and_done_excluded(self):
         self._mk("low", "p3")
         self._mk("hi", "p0")
@@ -56,6 +64,19 @@ class Scheduler(unittest.TestCase):
         # the owner can still take it
         r2 = store.task_next(self.conn, agent="codex", limit=5)
         self.assertIn("x", [t["slug"] for t in r2["tasks"]])
+
+    def test_task_scope_lock_does_not_block_other_repo_tasks(self):
+        repo = "/tmp/frog-scheduler-repo"
+        store.register_repo(self.conn, repo_path=repo, name="frog", kind=None,
+                            status="active", third_party=False, notes=None)
+        self._mk_repo_task("gh-sync", repo, "p0")
+        self._mk_repo_task("scheduler-fix", repo, "p1")
+        store.task_claim(self.conn, slug="gh-sync", agent="claude")
+
+        r = store.task_next(self.conn, agent="codex", repo_ref=repo, limit=5)
+        self.assertIn("scheduler-fix", [t["slug"] for t in r["tasks"]])
+        skipped = {s["slug"]: s["reason"] for s in r["skipped"]}
+        self.assertEqual(skipped.get("gh-sync"), "owned by claude")
 
 
 if __name__ == "__main__":

@@ -68,6 +68,28 @@ class LockAudit(unittest.TestCase):
         self.assertEqual(res["findings"][0]["kind"], "conflict")
         self.assertIn("codex", res["findings"][0]["holders"])
 
+    def test_task_scope_only_lock_does_not_cover_dirty_files(self):
+        (Path(self.repo) / "a.txt").write_text("changed\n")
+        store.lock_acquire(
+            self.conn, scope_key="task:gh-sync", repo_ref=self.repo,
+            lock_kind="edit", files=[], agent="codex", pid=None,
+            reason=None, lease_seconds=1800, eta_minutes=None, force=False,
+        )
+        res = store.lock_audit(self.conn, repo_ref=self.repo, agent="claude")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["findings"][0]["kind"], "uncovered")
+
+    def test_explicit_repo_lock_still_conflicts_with_file_work(self):
+        f = str(Path(self.repo) / "a.txt")
+        store.lock_acquire(
+            self.conn, scope_key="repo:freeze", repo_ref=self.repo,
+            lock_kind="edit", files=[], agent="codex", pid=None,
+            reason=None, lease_seconds=1800, eta_minutes=None, force=False,
+        )
+        chk = store.lock_check(
+            self.conn, scope_key="edit-a", repo_ref=self.repo, files=[f])
+        self.assertTrue(chk["conflicts"])
+
 
 class LockReap(unittest.TestCase):
     def test_reap_reports_expired_lease(self):
