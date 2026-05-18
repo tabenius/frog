@@ -1454,6 +1454,71 @@ def import_todo(conn, path: str) -> dict:
     return res
 
 
+def _task_checkbox(tk: dict) -> str:
+    done = (tk.get("workflow_status") or "").lower() in _WF_DONE
+    box = "x" if done else " "
+    pr = tk.get("priority") or "p?"
+    title = tk.get("title") or tk["slug"]
+    return f"- [{box}] {tk['slug']} — {title} ({pr})"
+
+
+def export_tasks_markdown(conn, *, repo_ref: str | None = None,
+                          workflow_status: str | None = None,
+                          tree: bool = False) -> dict:
+    """In-scope tasks as a markdown checkbox list (done -> [x]).
+    tree=True nests dependents under their dependencies, drawing the
+    branch connectors to the LEFT of the checkbox."""
+    listing = task_list(conn, repo_ref=repo_ref,
+                        workflow_status=workflow_status, assigned_agent=None)
+    if not listing.get("ok", True):
+        return listing
+    tasks = listing["tasks"]
+    by_slug = {t["slug"]: t for t in tasks}
+    in_scope = set(by_slug)
+
+    if not tree:
+        lines = [_task_checkbox(t) for t in tasks]
+        return {"ok": True, "count": len(lines),
+                "markdown": "\n".join(lines)}
+
+    # dependency forest restricted to in-scope tasks
+    deps: dict[str, list[str]] = {s: [] for s in in_scope}    # s depends_on X
+    children: dict[str, list[str]] = {s: [] for s in in_scope}
+    for r in conn.execute(
+        "SELECT task_slug, depends_on_slug FROM task_dependencies "
+        "WHERE relation = 'depends_on'"
+    ):
+        a, b = r["task_slug"], r["depends_on_slug"]
+        if a in in_scope and b in in_scope:
+            deps[a].append(b)
+            children[b].append(a)
+    roots = sorted(s for s in in_scope if not deps[s])
+    # tasks whose deps are all out-of-scope also act as roots
+    for s in sorted(in_scope):
+        if s not in roots and all(d not in in_scope for d in deps[s]):
+            roots.append(s)
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def render(slug: str, depth: int) -> None:
+        if slug in seen:
+            return
+        seen.add(slug)
+        connector = ("  " * (depth - 1) + "└─ ") if depth else ""
+        out.append(connector + _task_checkbox(by_slug[slug]))
+        for ch in sorted(children.get(slug, [])):
+            render(ch, depth + 1)
+
+    for r in roots:
+        render(r, 0)
+    # any task not reachable (cycle / orphan) still gets listed
+    for s in sorted(in_scope):
+        if s not in seen:
+            render(s, 0)
+    return {"ok": True, "count": len(out), "markdown": "\n".join(out)}
+
+
 def create_task(
     conn,
     *,

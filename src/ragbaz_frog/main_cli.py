@@ -314,7 +314,7 @@ def _registered_file_words() -> str:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent doctor board tui whereis setup provider gh import agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    top = "db new agent doctor board tui whereis setup provider gh import export agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -1521,7 +1521,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,gh,import,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,gh,import,export,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -1583,6 +1583,16 @@ def build_parser() -> argparse.ArgumentParser:
     setup_cmd.add_argument("--dir", dest="setup_dir", help="Target dir (default cwd)")
     setup_cmd.add_argument("--dry-run", dest="setup_dry", action="store_true")
     setup_cmd.add_argument("--force", action="store_true", help="Overwrite CLAUDE.md/AGENTS.md")
+    exp = sub.add_parser("export", help="Export tasks (markdown checkboxes)")
+    exp_sub = exp.add_subparsers(dest="export_command", required=True)
+    et = exp_sub.add_parser("todo", help="Emit in-scope tasks as a markdown checkbox list")
+    et.add_argument("--repo", dest="repo_ref", metavar="REPO",
+                    help="Scope to a repo ('.' = cwd repo; omit = all tasks)")
+    et.add_argument("--status", dest="workflow_status",
+                    help="Filter by workflow status")
+    et.add_argument("--tree", action="store_true",
+                    help="Nest dependents under dependencies (connectors left of the box)")
+    et.add_argument("--out", help="Write to FILE (default: stdout)")
     imp = sub.add_parser("import", help="Import external task sources")
     imp_sub = imp.add_subparsers(dest="import_command", required=True)
     it = imp_sub.add_parser("todo", help="Import a markdown checkbox file as tasks")
@@ -2176,6 +2186,24 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(store.setup_agent(conn, args.agent,
                 target_dir=args.setup_dir, dry_run=args.setup_dry,
                 force=args.force), args.json)
+        if args.command == "export":
+            if args.export_command == "todo":
+                ref = args.repo_ref
+                if ref == ".":
+                    inf = store.infer_repo_from_cwd(conn)
+                    ref = inf["repo_path"] if inf else None
+                res = store.export_tasks_markdown(
+                    conn, repo_ref=ref,
+                    workflow_status=args.workflow_status, tree=args.tree)
+                if res.get("ok") and not args.json:
+                    md = res["markdown"]
+                    if args.out:
+                        Path(args.out).write_text(md + "\n")
+                        print(f"wrote {res['count']} task(s) to {args.out}")
+                    else:
+                        print(md)
+                    return 0
+                return _emit(res, args.json)
         if args.command == "import":
             if args.import_command == "todo":
                 return _emit(store.import_todo(conn, args.file), args.json)
