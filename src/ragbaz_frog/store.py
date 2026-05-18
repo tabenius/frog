@@ -3181,6 +3181,19 @@ def _detect_from_pyproject(conn, repo_root: Path, path: Path) -> None:
         source=str(path),
         confidence=0.65,
     )
+    if "build-system" in payload or "project" in payload:
+        _insert_target(
+            conn,
+            repo_path=str(repo_root),
+            target_kind="package",
+            name=_make_target_name(repo_root, path.parent, "python-build"),
+            command="uv build",
+            workdir=str(path.parent),
+            runner="python",
+            source=str(path),
+            confidence=0.8,
+            artifact_paths=[str(path.parent / "dist")],
+        )
 
 
 def _detect_from_compose(conn, repo_root: Path, path: Path) -> None:
@@ -3597,6 +3610,18 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
         repo_scan(conn, repo_ref)
     targets = _targets_for_kind(conn, repo["repo_path"], target_kind)
     if not targets:
+        if target_kind == "build":
+            return {
+                "ok": True,
+                "status": "not_applicable",
+                "target_kind": target_kind,
+                "message": (
+                    f"build: not applicable for {repo['name']}; "
+                    "no build target is configured"
+                ),
+                "repo": repo,
+                "results": [],
+            }
         return {
             "ok": False,
             "error": f"no {target_kind} targets detected for {repo['name']}",

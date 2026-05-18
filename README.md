@@ -26,7 +26,7 @@ shorthand. A repo is always addressed under `frog repo …`.
 - `frog new NAME` — scaffold a repo/draft (was the overloaded `frog init NAME`)
 - `frog repo list` / `frog repo list -l`
 - `frog repo info REPO`
-- `frog repo build [REPO]` (and `test|lint|clean|check|verify|diff|status|scan|targets|doctor|artifacts|artifact-stale`; REPO defaults to the cwd repo)
+- `frog repo build [REPO]` (and `package|dist|test|lint|clean|check|verify|diff|status|scan|targets|doctor|artifacts|artifact-stale`; REPO defaults to the cwd repo)
 - `frog repo task list --repo REPO`
 - `frog repo discover [--root PATH]` (`sync` is an alias; `detect` aliases `scan`)
 - `frog task create …` / `frog task list [--repo REPO]`

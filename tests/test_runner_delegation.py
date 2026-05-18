@@ -69,6 +69,21 @@ class RunnerDelegation(unittest.TestCase):
         self.assertIn("mise run build", cmds)
         self.assertIn("mise run ci", cmds)
 
+    def test_pyproject_detects_package_not_build(self):
+        repo = _repo({
+            "pyproject.toml": (
+                "[build-system]\nrequires=['setuptools>=68']\n"
+                "build-backend='setuptools.build_meta'\n"
+                "[project]\nname='demo'\nversion='0.1.0'\n"
+            )
+        })
+        ts = self._scan(repo)
+        kinds = {t["target_kind"] for t in ts}
+        package = [t for t in ts if t["target_kind"] == "package"]
+        self.assertIn("check", kinds)
+        self.assertNotIn("build", kinds)
+        self.assertEqual(package[0]["command"], "uv build")
+
 
 if __name__ == "__main__":
     unittest.main()

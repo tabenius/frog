@@ -35,6 +35,8 @@ TOP_LEVEL_COMMANDS = {
 }
 REPO_ACTIONS = {
     "build",
+    "package",
+    "dist",
     "clean",
     "test",
     "lint",
@@ -52,6 +54,8 @@ REPO_ACTIONS = {
 
 REPO_ACTION_HELP = {
     "build": "Run detected build targets for a repo.",
+    "package": "Run detected packaging targets for a repo.",
+    "dist": "Alias for package.",
     "clean": "Run detected clean targets for a repo.",
     "test": "Run detected test targets for a repo.",
     "lint": "Run detected lint targets for a repo.",
@@ -1074,7 +1078,7 @@ def build_parser() -> argparse.ArgumentParser:
     repo_sub = repo.add_subparsers(
         dest="repo_command",
         required=True,
-        metavar="{list,register,discover,sync,info,task,artifact-stale,artifacts,build,check,clean,detect,diff,doctor,lint,scan,status,targets,test,verify}",
+        metavar="{list,register,discover,sync,info,task,artifact-stale,artifacts,build,check,clean,detect,diff,dist,doctor,lint,package,scan,status,targets,test,verify}",
     )
     repo_list = repo_sub.add_parser("list", help="List registered repos")
     repo_list.add_argument("--include-third-party", action="store_true")
@@ -1121,7 +1125,7 @@ def build_parser() -> argparse.ArgumentParser:
                                help="Repo name or path; defaults to cwd repo")
     repo_affected.add_argument("--since", help="Diff since this git ref "
                                "(default: working-tree changes vs HEAD)")
-    _runnable = {"build", "clean", "test", "lint", "check", "verify"}
+    _runnable = {"build", "clean", "test", "lint", "check", "verify", "package", "dist"}
     for command_name in sorted(REPO_ACTIONS):
         cmd = repo_sub.add_parser(command_name, help=REPO_ACTION_HELP[command_name])
         cmd.add_argument("repo_ref", nargs="?", help="Repo name or path; defaults to cwd repo when omitted")
@@ -1310,15 +1314,16 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
     if action == "affected":
         return store.repo_affected(conn, repo_ref, since=getattr(args, "since", None))
     use_cache = not getattr(args, "no_cache", False)
+    run_action = "package" if action == "dist" else action
     only = None
     if getattr(args, "affected", False):
         aff = store.repo_affected(
-            conn, repo_ref, since=getattr(args, "since", None), target_kind=action
+            conn, repo_ref, since=getattr(args, "since", None), target_kind=run_action
         )
         if not aff.get("ok"):
             return aff
         only = {t["name"] for t in aff["affected"]}
-    return store.repo_run(conn, repo_ref, action, use_cache=use_cache, only_targets=only)
+    return store.repo_run(conn, repo_ref, run_action, use_cache=use_cache, only_targets=only)
 
 
 def main(argv: list[str] | None = None) -> int:

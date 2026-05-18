@@ -18,6 +18,20 @@ def _repo_with_target(cmd: str) -> str:
     return d
 
 
+def _python_repo() -> str:
+    d = tempfile.mkdtemp(prefix="frog-pyrepo-")
+    subprocess.run(["git", "-C", d, "init", "-q"], check=True)
+    (Path(d) / "pyproject.toml").write_text(
+        "[build-system]\nrequires=['setuptools>=68']\n"
+        "build-backend='setuptools.build_meta'\n"
+        "[project]\nname='demo'\nversion='0.1.0'\n"
+    )
+    subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", d, "-c", "user.email=t@t", "-c",
+                     "user.name=t", "commit", "-q", "-m", "i"], check=True)
+    return d
+
+
 class TargetCache(unittest.TestCase):
     def setUp(self):
         self.db = fresh_db()
@@ -60,6 +74,15 @@ class TargetCache(unittest.TestCase):
         r2 = store.repo_run(self.conn, bad, "build")
         self.assertEqual(r2["results"][0]["status"], "ran",
                          "a failed run must not be cached as success")
+
+    def test_python_repo_without_build_is_not_applicable(self):
+        pyrepo = _python_repo()
+        store.register_repo(self.conn, repo_path=pyrepo, name="py", kind=None,
+                            status="active", third_party=False, notes=None)
+        r = store.repo_run(self.conn, pyrepo, "build")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["status"], "not_applicable")
+        self.assertEqual(r["results"], [])
 
 
 if __name__ == "__main__":
