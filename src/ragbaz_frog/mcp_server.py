@@ -508,6 +508,69 @@ def _tool_result(payload: dict) -> dict:
     }
 
 
+_SRC_ROOT = "/data/src"
+
+
+def _resource_specs() -> list[dict]:
+    return [
+        {"uri": "frog://board", "name": "frog board snapshot",
+         "description": "Live task lifecycle columns + ready set + recent events.",
+         "mimeType": "application/json"},
+        {"uri": "frog://events", "name": "frog event tail",
+         "description": "Recent task/lock coordination events.",
+         "mimeType": "application/json"},
+        {"uri": "frog://agents-md", "name": "AGENTS.md",
+         "description": "Workspace agent instructions.",
+         "mimeType": "text/markdown"},
+        {"uri": "frog://agents-coop", "name": "agents-coop.md",
+         "description": "Shared agent worklog.",
+         "mimeType": "text/markdown"},
+    ]
+
+
+def _read_resource(uri: str, *, db_path: str | None = None) -> dict:
+    db_path = db_path or DEFAULT_DB_PATH
+    if uri == "frog://board":
+        snap = _with_conn(db_path, lambda c: store.board_snapshot(c))
+        return {"mimeType": "application/json",
+                "text": json.dumps(snap, indent=2)}
+    if uri == "frog://events":
+        ev = _with_conn(db_path, lambda c: store.log_tail(c, limit=30, repo_ref=None))
+        return {"mimeType": "application/json",
+                "text": json.dumps(ev, indent=2)}
+    if uri in ("frog://agents-md", "frog://agents-coop"):
+        fn = "AGENTS.md" if uri.endswith("agents-md") else "agents-coop.md"
+        fp = Path(_SRC_ROOT) / fn
+        return {"mimeType": "text/markdown",
+                "text": fp.read_text() if fp.is_file() else f"({fn} not present)"}
+    raise KeyError(uri)
+
+
+def _prompt_specs() -> list[dict]:
+    return [{
+        "name": "coordinate-before-edit",
+        "description": "Frog coordination discipline before touching a repo.",
+        "arguments": [{"name": "agent", "description": "Acting agent",
+                       "required": False}],
+    }]
+
+
+def _get_prompt(name: str, arguments: dict) -> dict:
+    if name != "coordinate-before-edit":
+        raise KeyError(name)
+    agent = (arguments or {}).get("agent", "${FROG_AGENT:-$USER}")
+    text = (
+        "Before editing this frog-coordinated tree:\n"
+        f"1. `frog board` then `frog task next --agent {agent}`.\n"
+        f"2. `frog task claim <slug> --agent {agent}` (assigns + locks).\n"
+        "3. `frog lock check --file <path>` before touching shared files.\n"
+        f"4. When done: `frog task finish <slug> --agent {agent}`.\n"
+        "Read the frog://board and frog://agents-md resources for context."
+    )
+    return {"messages": [{"role": "user",
+            "content": {"type": "text", "text": text}}]}
+
+
 def serve(*, config_path: str | None = None) -> int:
     while True:
         message = _read_message()
@@ -520,7 +583,7 @@ def serve(*, config_path: str | None = None) -> int:
                     message.get("id"),
                     {
                         "protocolVersion": _negotiate_protocol_version(message),
-                        "capabilities": {"tools": {"listChanged": False}},
+                        "capabilities": {"tools": {"listChanged": False}, "resources": {"listChanged": False}, "prompts": {"listChanged": False}},
                         "serverInfo": SERVER_INFO,
                     },
                 )
@@ -540,6 +603,31 @@ def serve(*, config_path: str | None = None) -> int:
             arguments = params.get("arguments") or {}
             result = call_tool(name, arguments, config_path=config_path)
             _write_message(_response(message.get("id"), _tool_result(result)))
+            continue
+        if method == "resources/list":
+            _write_message(_response(message.get("id"), {"resources": _resource_specs()}))
+            continue
+        if method == "resources/read":
+            uri = (message.get("params") or {}).get("uri", "")
+            try:
+                body = _read_resource(uri)
+                _write_message(_response(message.get("id"),
+                    {"contents": [{"uri": uri, **body}]}))
+            except KeyError:
+                _write_message(_response(message["id"],
+                    error={"code": -32602, "message": f"unknown resource: {uri}"}))
+            continue
+        if method == "prompts/list":
+            _write_message(_response(message.get("id"), {"prompts": _prompt_specs()}))
+            continue
+        if method == "prompts/get":
+            params = message.get("params") or {}
+            try:
+                _write_message(_response(message.get("id"),
+                    _get_prompt(params.get("name"), params.get("arguments") or {})))
+            except KeyError:
+                _write_message(_response(message["id"],
+                    error={"code": -32602, "message": "unknown prompt"}))
             continue
         if method == "exit":
             return 0
