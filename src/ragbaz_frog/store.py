@@ -317,6 +317,130 @@ Use the shared coordination system:
 """
 
 
+_FROG_BIN = "/data/src/ragbaz-frog/bin/frog"
+_FROG_MCP = "/data/src/ragbaz-frog/bin/frog-mcp"
+
+
+def _agent_md(agent: str) -> str:
+    return f"""# Agent instructions ({agent})
+
+This tree is coordinated by **frog** (`{_FROG_BIN}`, DB `/data/src/AGENTS.db`).
+
+Before editing:
+- `frog board` -- see lifecycle + what's blocked on what
+- `frog task next --agent {agent}` -- highest-ROI unblocked slice
+- `frog task claim <slug> --agent {agent}` -- take it (assigns + locks)
+- `frog lock check --file <path>` -- is someone else on this file?
+
+When done:
+- `frog task finish <slug> --agent {agent}` -- verify + release + unblock
+
+Set `FROG_AGENT` so your edits/locks are attributed distinctly.
+"""
+
+
+def _claude_settings_fragment() -> dict:
+    return {
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "Edit|Write",
+                "hooks": [{"type": "command",
+                           "command": "/data/src/ragbaz-frog/hooks/pretooluse-lock-guard.sh"}],
+            }],
+            "SessionStart": [{
+                "hooks": [{"type": "command",
+                           "command": f"{_FROG_BIN} board --once; {_FROG_BIN} task next --agent ${{FROG_AGENT:-$USER}}"}],
+            }],
+        }
+    }
+
+
+def _mcp_json_fragment() -> dict:
+    return {"mcpServers": {"frog": {"command": _FROG_MCP, "args": []}}}
+
+
+def _merge_hooks(existing: dict, frag: dict) -> dict:
+    out = json.loads(json.dumps(existing)) if existing else {}
+    hooks = out.setdefault("hooks", {})
+    for event, entries in frag["hooks"].items():
+        bucket = hooks.setdefault(event, [])
+        for e in entries:
+            cmds = {h["command"] for grp in bucket for h in grp.get("hooks", [])}
+            new_cmds = {h["command"] for h in e["hooks"]}
+            if not (new_cmds & cmds):
+                bucket.append(e)
+    return out
+
+
+def setup_agent(conn, agent: str, *, target_dir: str | None,
+                dry_run: bool = False, force: bool = False) -> dict:
+    """Generate the config a Claude/Codex user otherwise hand-rolls.
+    Idempotent; --dry-run plans without writing."""
+    agent = agent.lower()
+    if agent not in {"claude", "codex"}:
+        return {"ok": False, "error": "agent must be 'claude' or 'codex'"}
+    base = Path(target_dir).expanduser().resolve() if target_dir else Path.cwd()
+    if not base.is_dir():
+        return {"ok": False, "error": f"not a directory: {base}"}
+    actions = []
+
+    def plan(path: Path, kind: str, write):
+        rel = str(path)
+        if path.exists() and not force and kind == "create":
+            actions.append({"path": rel, "action": "skip (exists)"})
+            return
+        actions.append({"path": rel,
+                        "action": ("would " if dry_run else "") +
+                        ("merge" if kind == "merge" else "write")})
+        if not dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write()
+
+    md_name = "CLAUDE.md" if agent == "claude" else "AGENTS.md"
+    md = base / md_name
+    plan(md, "create", lambda: md.write_text(_agent_md(agent)))
+
+    snippet = {"FROG_AGENT": f"{agent}-$(hostname -s)"}
+    if agent == "claude":
+        sj = base / ".claude" / "settings.json"
+        def _w_sj():
+            cur = {}
+            if sj.exists():
+                try:
+                    cur = json.loads(sj.read_text())
+                except json.JSONDecodeError:
+                    cur = {}
+            sj.write_text(json.dumps(_merge_hooks(cur, _claude_settings_fragment()),
+                                     indent=2) + "\n")
+        plan(sj, "merge", _w_sj)
+        mj = base / ".mcp.json"
+        def _w_mj():
+            cur = {}
+            if mj.exists():
+                try:
+                    cur = json.loads(mj.read_text())
+                except json.JSONDecodeError:
+                    cur = {}
+            cur.setdefault("mcpServers", {})["frog"] = _mcp_json_fragment()["mcpServers"]["frog"]
+            mj.write_text(json.dumps(cur, indent=2) + "\n")
+        plan(mj, "merge", _w_mj)
+        extra = {"mcp": _mcp_json_fragment(),
+                 "env_snippet": f'export FROG_AGENT="claude-$(hostname -s)"'}
+    else:
+        # Codex reads AGENTS.md (written above). Emit the config.toml block
+        # to add by hand (we never edit a user's global ~/.codex/config.toml).
+        toml_block = (
+            "[mcp_servers.frog]\n"
+            f'command = "{_FROG_MCP}"\n'
+            "args = []\n"
+        )
+        extra = {"codex_config_toml": toml_block,
+                 "env_snippet": f'export FROG_AGENT="codex-$(hostname -s)"'}
+
+    return {"ok": True, "agent": agent, "dir": str(base),
+            "dry_run": dry_run, "actions": actions, **extra}
+
+
 def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = False) -> dict:
     if path_or_dir:
         raw = Path(path_or_dir).expanduser()

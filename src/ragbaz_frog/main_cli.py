@@ -88,7 +88,7 @@ def _workspace_names() -> list[str]:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent doctor board whereis agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    top = "db new agent doctor board whereis setup agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -242,6 +242,18 @@ def _emit(payload: dict, as_json: bool) -> int:
             if result["stderr"].strip():
                 print(result["stderr"].rstrip(), file=sys.stderr)
         return 0 if payload.get("ok", True) else 1
+    if "actions" in payload and "agent" in payload and "dir" in payload:
+        tag = "(dry-run) " if payload.get("dry_run") else ""
+        print(f"{tag}setup {payload['agent']} in {payload['dir']}")
+        for a in payload["actions"]:
+            print(f"  {a['action']:18} {a['path']}")
+        if payload.get("env_snippet"):
+            print("  env: " + payload["env_snippet"])
+        if payload.get("codex_config_toml"):
+            print("  add to ~/.codex/config.toml:")
+            for ln in payload["codex_config_toml"].splitlines():
+                print("    " + ln)
+        return 0
     if "repo_key" in payload and "aliases" in payload and "local_path" in payload:
         print(f"repo_key: {payload['repo_key']}")
         print(f"this box ({payload['box']}): {payload.get('local_path') or '-'}")
@@ -795,7 +807,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,doctor,board,whereis,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,doctor,board,whereis,setup,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -846,6 +858,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="Self-diagnostic over locks/tasks/events/DB")
     whereis_cmd = sub.add_parser("whereis", help="Resolve a repo_key to its local path on this box")
     whereis_cmd.add_argument("repo_key")
+    setup_cmd = sub.add_parser("setup", help="Generate Claude/Codex config + hooks + MCP for a repo")
+    setup_cmd.add_argument("agent", choices=["claude", "codex"])
+    setup_cmd.add_argument("--dir", dest="setup_dir", help="Target dir (default cwd)")
+    setup_cmd.add_argument("--dry-run", dest="setup_dry", action="store_true")
+    setup_cmd.add_argument("--force", action="store_true", help="Overwrite CLAUDE.md/AGENTS.md")
     board_cmd = sub.add_parser("board", help="Realtime colored task lifecycle board")
     board_cmd.add_argument("--once", action="store_true", help="Print one frame and exit")
     board_cmd.add_argument("--interval", type=float, default=2.0, help="Refresh seconds")
@@ -1321,6 +1338,10 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(store.doctor(conn, args.db), args.json)
         if args.command == "whereis":
             return _emit(store.whereis(conn, args.repo_key), args.json)
+        if args.command == "setup":
+            return _emit(store.setup_agent(conn, args.agent,
+                target_dir=args.setup_dir, dry_run=args.setup_dry,
+                force=args.force), args.json)
         if args.command == "board":
             if args.json:
                 return _emit(store.board_snapshot(conn), True)
