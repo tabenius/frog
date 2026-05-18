@@ -140,6 +140,58 @@ def _tool_specs() -> list[dict]:
             },
         },
         {
+            "name": "frog_task_claim",
+            "description": "Atomically take ownership + the scoped lock + mark a task in_progress.",
+            "inputSchema": {"type": "object", "properties": {
+                "workspace": {"type": "string"}, "slug": {"type": "string"},
+                "agent": {"type": "string"}, "lock_kind": {"type": "string"},
+                "force": {"type": "boolean"}}, "required": ["slug", "agent"]},
+        },
+        {
+            "name": "frog_task_finish",
+            "description": "Verify (affected build/test) then mark done, release locks, report unblocked dependents.",
+            "inputSchema": {"type": "object", "properties": {
+                "workspace": {"type": "string"}, "slug": {"type": "string"},
+                "agent": {"type": "string"}, "verify": {"type": "boolean"}},
+                "required": ["slug", "agent"]},
+        },
+        {
+            "name": "frog_task_create",
+            "description": "Create a task slice.",
+            "inputSchema": {"type": "object", "properties": {
+                "workspace": {"type": "string"}, "slug": {"type": "string"},
+                "title": {"type": "string"}, "repo_ref": {"type": "string"},
+                "why": {"type": "string"}, "what": {"type": "string"},
+                "priority": {"type": "string"}},
+                "required": ["slug", "title"]},
+        },
+        {
+            "name": "frog_task_dependency",
+            "description": "Declare task A depends_on task B.",
+            "inputSchema": {"type": "object", "properties": {
+                "workspace": {"type": "string"}, "slug": {"type": "string"},
+                "depends_on": {"type": "string"}, "relation": {"type": "string"}},
+                "required": ["slug", "depends_on"]},
+        },
+        {
+            "name": "frog_lock_acquire",
+            "description": "Acquire a coordination lock (atomic; conflicts return ok=false).",
+            "inputSchema": {"type": "object", "properties": {
+                "workspace": {"type": "string"}, "scope_key": {"type": "string"},
+                "repo_ref": {"type": "string"}, "lock_kind": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "agent": {"type": "string"}, "reason": {"type": "string"},
+                "force": {"type": "boolean"}},
+                "required": ["scope_key", "lock_kind", "agent"]},
+        },
+        {
+            "name": "frog_lock_release",
+            "description": "Release a coordination lock by id.",
+            "inputSchema": {"type": "object", "properties": {
+                "workspace": {"type": "string"}, "lock_id": {"type": "integer"},
+                "force": {"type": "boolean"}}, "required": ["lock_id"]},
+        },
+        {
             "name": "frog_task_next",
             "description": "Highest-ROI unblocked task slice an agent can safely take now (deps/conflicts/locks/ownership aware).",
             "inputSchema": {
@@ -270,6 +322,49 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
                 limit=int(arguments.get("limit", 20)),
                 repo_ref=arguments.get("repo_ref"),
             )
+        if tool_name == "frog_task_claim":
+            return store.task_claim(
+                conn, slug=arguments["slug"],
+                agent=arguments.get("agent", "unknown"),
+                lock_kind=arguments.get("lock_kind", "edit"),
+                force=bool(arguments.get("force", False)))
+        if tool_name == "frog_task_finish":
+            return store.task_finish(
+                conn, slug=arguments["slug"],
+                agent=arguments.get("agent", "unknown"),
+                verify=bool(arguments.get("verify", True)))
+        if tool_name == "frog_task_create":
+            return store.create_task(
+                conn, slug=arguments["slug"],
+                repo_ref=arguments.get("repo_ref"),
+                title=arguments["title"], why=arguments.get("why"),
+                what_text=arguments.get("what"),
+                roi_note=arguments.get("roi_note"),
+                priority=arguments.get("priority", "p3"),
+                workflow_status=arguments.get("workflow_status", "idea"),
+                git_status=arguments.get("git_status", "not_started"),
+                assigned_agent=arguments.get("assigned_agent"),
+                delegation_current=None, delegation_other=None,
+                parent_task_slug=arguments.get("parent_task_slug"))
+        if tool_name == "frog_task_dependency":
+            return store.task_add_dependency(
+                conn, arguments["slug"], arguments["depends_on"],
+                arguments.get("relation", "depends_on"))
+        if tool_name == "frog_lock_acquire":
+            return store.lock_acquire(
+                conn, scope_key=arguments["scope_key"],
+                repo_ref=arguments.get("repo_ref"),
+                lock_kind=arguments["lock_kind"],
+                files=arguments.get("files", []),
+                agent=arguments.get("agent", "unknown"),
+                pid=None, reason=arguments.get("reason"),
+                lease_seconds=int(arguments.get("lease_seconds", 1800)),
+                eta_minutes=arguments.get("eta_minutes"),
+                force=bool(arguments.get("force", False)))
+        if tool_name == "frog_lock_release":
+            return store.lock_release(
+                conn, int(arguments["lock_id"]),
+                force=bool(arguments.get("force", False)))
         if tool_name == "frog_task_next":
             return store.task_next(
                 conn,
