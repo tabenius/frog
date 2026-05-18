@@ -299,7 +299,7 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                 curses.napms(150)
                 continue
             c = chr(ch) if 0 <= ch < 256 else ""
-            if c in ("q", "Q"):
+            if c in ("q", "Q") or ch == 3:  # 3 = Ctrl-C (ETX)
                 return 0
             if c == "?":
                 show_help = not show_help
@@ -335,4 +335,7 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                         status = f"{verb} {slug} failed: {e}"
                     last_fp = None
 
-    return curses.wrapper(_loop)
+    try:
+        return curses.wrapper(_loop)
+    except KeyboardInterrupt:
+        return 0
