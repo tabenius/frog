@@ -181,21 +181,7 @@ def _emit(payload: dict, as_json: bool) -> int:
         print(f"error: {payload.get('error', 'unknown error')}", file=sys.stderr)
         return 1
     if "active_tasks" in payload and "active_locks" in payload:
-        print(f"active_tasks={len(payload['active_tasks'])} active_locks={len(payload['active_locks'])}")
-        if payload["active_tasks"]:
-            print("Tasks:")
-            for task in payload["active_tasks"]:
-                repo = Path(task["repo_path"]).name if task["repo_path"] else "-"
-                print(f"{task['slug']}  {task['priority']}  {task['workflow_status']}  {task['git_status']}  {repo}")
-        if payload["active_locks"]:
-            print("Locks:")
-            for lock in payload["active_locks"]:
-                repo = Path(lock["repo_path"]).name if lock["repo_path"] else "-"
-                print(f"{lock['id']}  {lock['lock_kind']}  {lock['scope_key']}  {repo}  {lock['agent_name']}")
-        if payload["recent_events"]:
-            print("Recent:")
-            for event in payload["recent_events"]:
-                print(f"{event['created_at']}  {event['kind']}  {event['summary']}")
+        _render_ps_summary(payload)
         return 0
     if "message" in payload:
         print(payload["message"])
@@ -230,13 +216,7 @@ def _emit(payload: dict, as_json: bool) -> int:
         _render_unit_list(payload["units"], payload.get("_view", "default"))
         return 0
     if "repo" in payload and "counts" in payload and "targets" not in payload and "artifacts" not in payload:
-        repo = payload["repo"]
-        print(f"{repo['name']}  {repo['repo_path']}")
-        print(f"status: {repo['status']}")
-        print(f"tasks: {payload['counts']['tasks']}")
-        print(f"active_locks: {payload['counts']['active_locks']}")
-        print(f"targets: {payload['counts'].get('targets', 0)}")
-        print(f"artifacts: {payload['counts'].get('artifacts', 0)}")
+        _render_repo_info(payload)
         return 0
     if "targets" in payload:
         for target in payload["targets"]:
@@ -245,13 +225,7 @@ def _emit(payload: dict, as_json: bool) -> int:
             print(f"{prefix} {target['target_kind']}  {target['name']}  {Path(target['workdir']).name}  {command}")
         return 0
     if "artifacts" in payload and "repo" in payload:
-        for artifact in payload["artifacts"]:
-            suffix = []
-            if "exists" in artifact:
-                suffix.append("present" if artifact["exists"] else "missing")
-            if artifact.get("stale"):
-                suffix.append("stale")
-            print(f"{artifact['artifact_name']}  {artifact['path_hint']}  {' '.join(suffix).strip()}")
+        _render_artifacts(payload)
         return 0
     if "results" in payload:
         for result in payload["results"]:
@@ -457,12 +431,7 @@ def _emit(payload: dict, as_json: bool) -> int:
             _print_event(event)
         return 0
     if "counts" in payload:
-        print(
-            f"repos={payload['counts']['repos']} files={payload['counts']['files']} "
-            f"tasks={payload['counts']['tasks']} active_locks={payload['counts']['active_locks']}"
-        )
-        for item in payload.get("tasks_by_workflow_status", []):
-            print(f"  {item['workflow_status']}: {item['count']}")
+        _render_status_summary(payload)
         return 0
     if "config_path" in payload:
         print(f"config_path: {payload['config_path']}")
@@ -483,6 +452,150 @@ def _dirty_mark(value) -> str:
     if value is False:
         return "clean"
     return "-"
+
+
+def _scope_label(repo_path: str | None) -> str:
+    if not repo_path:
+        return "workspace"
+    return f"{Path(repo_path).name}  ({repo_path})"
+
+
+def _render_kv(rows: list[tuple[str, object]]) -> None:
+    width = max((len(label) for label, _ in rows), default=0)
+    for label, value in rows:
+        print(f"{label:<{width}}  {value if value not in (None, '') else '-'}")
+
+
+def _render_repo_info(payload: dict) -> None:
+    repo = payload["repo"]
+    counts = payload["counts"]
+    print(f"Repo: {repo['name']}")
+    _render_kv([
+        ("Path", repo["repo_path"]),
+        ("Key", repo.get("repo_key")),
+        ("Status", repo.get("status")),
+        ("Kind", repo.get("kind")),
+        ("Third party", "yes" if repo.get("third_party") else "no"),
+    ])
+    print("")
+    print("Counts")
+    _render_kv([
+        ("Tasks", counts.get("tasks", 0)),
+        ("Active locks", counts.get("active_locks", 0)),
+        ("Targets", counts.get("targets", 0)),
+        ("Artifacts", counts.get("artifacts", 0)),
+    ])
+
+
+def _render_status_summary(payload: dict) -> None:
+    counts = payload["counts"]
+    print(f"Status: {_scope_label(payload.get('repo_path'))}")
+    _render_kv([
+        ("Repos", counts.get("repos", 0)),
+        ("Files", counts.get("files", 0)),
+        ("Tasks", counts.get("tasks", 0)),
+        ("Active locks", counts.get("active_locks", 0)),
+    ])
+    print("")
+    rows = payload.get("tasks_by_workflow_status", [])
+    if not rows:
+        print("Workflow: no tasks")
+        return
+    print("Workflow")
+    width = max(len(row["workflow_status"]) for row in rows)
+    for row in rows:
+        print(f"  {row['workflow_status']:<{width}}  {row['count']}")
+
+
+def _render_ps_summary(payload: dict) -> None:
+    tasks = payload["active_tasks"]
+    locks = payload["active_locks"]
+    print(f"Activity: {_scope_label(payload.get('repo_path'))}")
+    print(f"Active tasks: {len(tasks)}   Active locks: {len(locks)}")
+    print("")
+    print("Tasks")
+    if not tasks:
+        print("  none")
+    else:
+        for task in tasks:
+            repo = Path(task["repo_path"]).name if task.get("repo_path") else "-"
+            print(
+                f"  {task['priority']:<2}  {task['workflow_status']:<11} "
+                f"{task['slug']:<28} {repo}"
+            )
+            if task.get("title"):
+                print(f"      {task['title']}")
+    print("")
+    print("Locks")
+    if not locks:
+        print("  none")
+    else:
+        for lock in locks:
+            repo = Path(lock["repo_path"]).name if lock.get("repo_path") else "-"
+            files = lock.get("file_paths") or []
+            file_note = f"  files={len(files)}" if files else ""
+            print(
+                f"  #{lock['id']} {lock['lock_kind']:<8} {lock['scope_key']}  "
+                f"{repo}  {lock['agent_name']}{file_note}"
+            )
+    if payload.get("recent_events"):
+        print("")
+        print("Recent events")
+        for event in payload["recent_events"]:
+            print(f"  {event['created_at']}  {event['kind']:<15} {event['summary']}")
+
+
+def _render_artifacts(payload: dict) -> None:
+    repo = payload["repo"]
+    artifacts = payload.get("artifacts", [])
+    repo_root = Path(repo["repo_path"])
+    present = sum(1 for artifact in artifacts if artifact.get("exists") is True)
+    missing = sum(1 for artifact in artifacts if artifact.get("exists") is False)
+    stale = sum(1 for artifact in artifacts if artifact.get("stale"))
+    print(f"Artifacts: {repo['name']}  ({repo['repo_path']})")
+    summary = f"{len(artifacts)} tracked"
+    details = []
+    if present:
+        details.append(f"{present} present")
+    if missing:
+        details.append(f"{missing} missing")
+    if stale:
+        details.append(f"{stale} stale")
+    print("Summary: " + summary + (f" ({', '.join(details)})" if details else ""))
+    if payload.get("source_latest_mtime"):
+        latest = time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            time.localtime(payload["source_latest_mtime"]),
+        )
+        print(f"Source latest change: {latest}")
+    print("")
+    if not artifacts:
+        print("  no artifacts")
+        return
+    by_target: dict[str, list[dict]] = {}
+    for artifact in artifacts:
+        target = f"{artifact.get('target_kind') or '-'}:{artifact.get('target_name') or '-'}"
+        by_target.setdefault(target, []).append(artifact)
+    for target, rows in by_target.items():
+        print(target)
+        for artifact in rows:
+            flags = []
+            if artifact.get("exists") is True:
+                flags.append("present")
+            elif artifact.get("exists") is False:
+                flags.append("missing")
+            if artifact.get("stale"):
+                flags.append("stale")
+            flag_text = f" [{' '.join(flags)}]" if flags else ""
+            path_hint = artifact["path_hint"]
+            try:
+                display_path = str(Path(path_hint).relative_to(repo_root))
+            except ValueError:
+                display_path = path_hint
+            label = artifact["artifact_name"]
+            if label == target:
+                label = Path(path_hint).name
+            print(f"  {label:<24} {display_path}{flag_text}")
 
 
 def _render_repo_list(repos: list[dict], view: str) -> None:
@@ -1213,7 +1326,9 @@ def build_parser() -> argparse.ArgumentParser:
     repo_sync.add_argument("--root")
     repo_sync.add_argument("--no-scan", action="store_true", help="Register repos without scanning targets")
     repo_info = repo_sub.add_parser("info", help="Show repo metadata and counts")
-    repo_info.add_argument("repo_ref")
+    repo_info.add_argument("repo_ref", nargs="?", help="Repo name or path; defaults to cwd repo")
+    repo_info.add_argument("--repo", dest="repo_ref", metavar="REPO",
+                           help="Repo name or path; same as the optional positional repo")
     repo_task_inline = repo_sub.add_parser("task", help="Repo-scoped task commands")
     repo_task_inline_sub = repo_task_inline.add_subparsers(dest="repo_task_inline_command", required=True)
     repo_task_inline_list = repo_task_inline_sub.add_parser("list", help="List tasks for one repo")
@@ -1237,12 +1352,16 @@ def build_parser() -> argparse.ArgumentParser:
         "affected", help="List targets affected by working-tree / since-REF changes")
     repo_affected.add_argument("repo_ref", nargs="?",
                                help="Repo name or path; defaults to cwd repo")
+    repo_affected.add_argument("--repo", dest="repo_ref", metavar="REPO",
+                               help="Repo name or path; same as the optional positional repo")
     repo_affected.add_argument("--since", help="Diff since this git ref "
                                "(default: working-tree changes vs HEAD)")
     _runnable = {"build", "clean", "test", "lint", "check", "verify", "package", "dist"}
     for command_name in sorted(REPO_ACTIONS):
         cmd = repo_sub.add_parser(command_name, help=REPO_ACTION_HELP[command_name])
         cmd.add_argument("repo_ref", nargs="?", help="Repo name or path; defaults to cwd repo when omitted")
+        cmd.add_argument("--repo", dest="repo_ref", metavar="REPO",
+                         help="Repo name or path; same as the optional positional repo")
         if command_name in _runnable:
             cmd.add_argument(
                 "--no-cache", dest="no_cache", action="store_true",
@@ -1417,6 +1536,8 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
         repo_ref = inferred["repo_path"]
     if action in {"scan", "detect"}:
         return store.repo_scan(conn, repo_ref)
+    if action == "info":
+        return store.repo_info(conn, repo_ref)
     if action == "targets":
         return store.repo_targets(conn, repo_ref)
     if action == "doctor":
@@ -1672,7 +1793,7 @@ def main(argv: list[str] | None = None) -> int:
                 root = args.root or (workspace["root"] if workspace else "/data/src")
                 return _emit(store.discover_repos(conn, root=root, scan=not args.no_scan), args.json)
             if args.repo_command == "info":
-                return _emit(store.repo_info(conn, args.repo_ref), args.json)
+                return _emit(_run_repo_action(conn, args.repo_ref, args.repo_command, args), args.json)
             if args.repo_command == "task":
                 return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=None, assigned_agent=None), args.json)
             if args.repo_command == "key":
