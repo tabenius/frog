@@ -736,6 +736,33 @@ def _hide_subcommands(parser: argparse.ArgumentParser, hidden: set[str]) -> None
             ]
 
 
+def _subparser_help(action: argparse._SubParsersAction) -> dict[str, str]:
+    helps: dict[str, str] = {}
+    for choice in action._choices_actions:
+        name = getattr(choice, "dest", None)
+        text = getattr(choice, "help", None)
+        if name and text and text != argparse.SUPPRESS:
+            helps[name] = text
+    return helps
+
+
+def _finalize_help_descriptions(parser: argparse.ArgumentParser) -> None:
+    """Make every subcommand's own --help include a plain-language purpose.
+
+    argparse shows a subcommand's help text in the parent command, but it does
+    not automatically repeat that text when running `frog cmd subcmd --help`.
+    Keeping this centralized makes new commands describe themselves by default.
+    """
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        help_by_name = _subparser_help(action)
+        for name, child in action.choices.items():
+            if not child.description:
+                child.description = help_by_name.get(name)
+            _finalize_help_descriptions(child)
+
+
 def _split_workspace_repo_ref(repo_ref: str | None) -> tuple[str | None, str | None]:
     if not repo_ref or ":" not in repo_ref:
         return None, repo_ref
@@ -1055,6 +1082,7 @@ def _run_board(conn, *, once: bool, interval: float, poll: float = 0.3) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        prog="frog",
         description="RAGBAZ workspace coordination CLI",
         epilog=(
             "Grammar:  frog <command> <subcommand> [args]   (strict; no positional guessing)\n\n"
@@ -1522,6 +1550,7 @@ def build_parser() -> argparse.ArgumentParser:
     file_list.add_argument("--file-type")
     file_info = file_sub.add_parser("info", help="Show one file")
     file_info.add_argument("file_path")
+    _finalize_help_descriptions(parser)
     return parser
 
 
