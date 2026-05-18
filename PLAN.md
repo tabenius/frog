@@ -68,7 +68,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       lock_acquire / task_claim -> no double-grant, no deadlock.
 - [x] II-4 Remote seam: injectable dispatch so sync/workspace paths are
       testable without SSH; tests.
-- [ ] II-5 `frog db gc [--older-than D] [--keep N]`: prune event_log /
+- [x] II-5 `frog db gc [--older-than D] [--keep N]`: prune event_log /
       event_mirror / target_runs, WAL checkpoint + VACUUM.
 - [ ] II-6 `frog doctor`: health over locks/tasks/events/DB size
       (stale locks, deps-on-done-but-blocked data bugs, mirror lag).

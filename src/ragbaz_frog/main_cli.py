@@ -106,7 +106,7 @@ def _completion_script(shell: str) -> str:
   case "${{COMP_WORDS[1]}}" in
     completion) COMPREPLY=( $(compgen -W "bash fish" -- "$cur") ) ;;
     ps|snapshot|status) COMPREPLY=() ;;
-    db) COMPREPLY=( $(compgen -W "migrate schema" -- "$cur") ) ;;
+    db) COMPREPLY=( $(compgen -W "migrate schema gc" -- "$cur") ) ;;
     new|agent-instructions) COMPREPLY=( $(compgen -d -- "$cur") ) ;;
     config)
       if [[ $COMP_CWORD -eq 2 ]]; then
@@ -143,7 +143,7 @@ complete -F _frog_complete frog
         return f"""complete -c frog -f
 complete -c frog -n '__fish_use_subcommand' -a '{top}'
 complete -c frog -n '__fish_seen_subcommand_from completion' -a 'bash fish'
-complete -c frog -n '__fish_seen_subcommand_from db' -a 'migrate schema'
+complete -c frog -n '__fish_seen_subcommand_from db' -a 'migrate schema gc'
 complete -c frog -n '__fish_seen_subcommand_from new agent-instructions' -a '(__fish_complete_directories)'
 complete -c frog -n '__fish_seen_subcommand_from config' -a 'info host workspace path'
 complete -c frog -n '__fish_seen_subcommand_from path' -a 'bash fish'
@@ -692,6 +692,11 @@ def build_parser() -> argparse.ArgumentParser:
     db_sub = db_cmd.add_subparsers(dest="init_command", required=True)
     db_sub.add_parser("migrate", help="Apply pending AGENTS.db migrations")
     db_sub.add_parser("schema", help="Show applied AGENTS.db migrations")
+    db_gc = db_sub.add_parser("gc", help="Prune event/target_runs history + VACUUM")
+    db_gc.add_argument("--older-than", dest="older_than", type=int,
+                       help="Drop rows older than N days (newest --keep retained)")
+    db_gc.add_argument("--keep", type=int, default=200,
+                       help="Always retain the newest N (default 200)")
 
     new_cmd = sub.add_parser(
         "new",
@@ -1172,6 +1177,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "agent-instructions":
             return _emit(store.write_agent_instructions(conn, args.path, force=args.force), args.json)
+        if args.command == "db" and getattr(args, "init_command", None) == "gc":
+            return _emit(
+                store.db_gc(conn, older_than_days=args.older_than, keep=args.keep),
+                args.json,
+            )
         if args.command == "snapshot":
             return _emit(store.snapshot_workspace(conn), args.json)
         if args.command == "ps":

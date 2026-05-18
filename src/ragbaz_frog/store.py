@@ -399,6 +399,81 @@ def snapshot_workspace(conn) -> dict:
     }
 
 
+def db_gc(conn, *, older_than_days: int | None = None, keep: int = 200) -> dict:
+    """Prune unbounded coordination tables, then checkpoint + VACUUM.
+      - event_log / event_mirror: drop rows older than `older_than_days`
+        (if given) but always retain the newest `keep`.
+      - target_runs: keep only the newest `keep` rows per
+        (repo_path,target_kind,target_name); older cache rows are noise.
+    """
+    removed = {}
+    cutoff = None
+    if older_than_days is not None:
+        cutoff = (utc_now() - timedelta(days=older_than_days)).isoformat(timespec="seconds")
+
+    def _trim(table: str, order_col: str) -> int:
+        keep_ids = [r["id"] for r in conn.execute(
+            f"SELECT id FROM {table} ORDER BY {order_col} DESC LIMIT ?", (keep,)
+        ).fetchall()]
+        if cutoff is None:
+            return 0
+        ph = ",".join("?" * len(keep_ids)) or "0"
+        cur = conn.execute(
+            f"DELETE FROM {table} WHERE created_at < ? AND id NOT IN ({ph})",
+            (cutoff, *keep_ids),
+        )
+        return cur.rowcount
+
+    removed["event_log"] = _trim("event_log", "id")
+    # event_mirror keyed by (workspace, remote_id), no autoinc id
+    if cutoff is not None:
+        keep_rows = conn.execute(
+            "SELECT workspace, remote_id FROM event_mirror "
+            "ORDER BY mirrored_at DESC LIMIT ?", (keep,)
+        ).fetchall()
+        keep_set = {(r["workspace"], r["remote_id"]) for r in keep_rows}
+        em = conn.execute(
+            "SELECT rowid, workspace, remote_id, created_at FROM event_mirror"
+        ).fetchall()
+        gone = 0
+        for r in em:
+            if r["created_at"] < cutoff and (r["workspace"], r["remote_id"]) not in keep_set:
+                conn.execute("DELETE FROM event_mirror WHERE rowid = ?", (r["rowid"],))
+                gone += 1
+        removed["event_mirror"] = gone
+    else:
+        removed["event_mirror"] = 0
+    # target_runs: keep newest `keep` per logical target
+    tr = 0
+    groups = conn.execute(
+        "SELECT DISTINCT repo_path, target_kind, target_name FROM target_runs"
+    ).fetchall()
+    for g in groups:
+        ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM target_runs WHERE repo_path=? AND target_kind=? "
+            "AND target_name=? ORDER BY id DESC LIMIT -1 OFFSET ?",
+            (g["repo_path"], g["target_kind"], g["target_name"], keep),
+        ).fetchall()]
+        for i in ids:
+            conn.execute("DELETE FROM target_runs WHERE id = ?", (i,))
+            tr += 1
+    removed["target_runs"] = tr
+    conn.commit()
+    # checkpoint + reclaim space (VACUUM cannot run in a transaction)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("VACUUM")
+    except sqlite3.Error:
+        pass
+    record_event(conn, kind="db.gc",
+                 summary=f"gc removed {sum(removed.values())} row(s)",
+                 payload={"removed": removed, "older_than_days": older_than_days,
+                          "keep": keep})
+    conn.commit()
+    return {"ok": True, "removed": removed,
+            "message": f"gc removed {sum(removed.values())} row(s)"}
+
+
 def schema_status(db_path: str) -> dict:
     conn = connect(db_path)
     try:
