@@ -3182,6 +3182,12 @@ def _detect_from_pyproject(conn, repo_root: Path, path: Path) -> None:
         confidence=0.65,
     )
     if "build-system" in payload or "project" in payload:
+        artifact_paths = [
+            str(path.parent / "build"),
+            str(path.parent / "dist"),
+            str(path.parent / "*.egg-info"),
+            str(path.parent / "src" / "*.egg-info"),
+        ]
         _insert_target(
             conn,
             repo_path=str(repo_root),
@@ -3192,7 +3198,20 @@ def _detect_from_pyproject(conn, repo_root: Path, path: Path) -> None:
             runner="python",
             source=str(path),
             confidence=0.8,
-            artifact_paths=[str(path.parent / "dist")],
+            artifact_paths=artifact_paths,
+        )
+        _insert_target(
+            conn,
+            repo_path=str(repo_root),
+            target_kind="clean",
+            name=_make_target_name(repo_root, path.parent, "python-artifacts"),
+            command="rm -rf build dist *.egg-info src/*.egg-info",
+            workdir=str(path.parent),
+            runner="python",
+            source=str(path),
+            confidence=0.8,
+            artifact_paths=artifact_paths,
+            destructive=True,
         )
 
 

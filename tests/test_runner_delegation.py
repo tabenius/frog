@@ -80,9 +80,12 @@ class RunnerDelegation(unittest.TestCase):
         ts = self._scan(repo)
         kinds = {t["target_kind"] for t in ts}
         package = [t for t in ts if t["target_kind"] == "package"]
+        clean = [t for t in ts if t["target_kind"] == "clean"]
         self.assertIn("check", kinds)
+        self.assertIn("clean", kinds)
         self.assertNotIn("build", kinds)
         self.assertEqual(package[0]["command"], "uv build")
+        self.assertEqual(clean[0]["command"], "rm -rf build dist *.egg-info src/*.egg-info")
 
 
 if __name__ == "__main__":
