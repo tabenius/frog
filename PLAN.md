@@ -74,7 +74,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       (stale locks, deps-on-done-but-blocked data bugs, mirror lag).
 - [x] II-7 Packaging: pyproject.toml + console_scripts (frog, frog-mcp),
       pinned Python floor; bin/ shims kept.
-- [ ] II-8 A3 decision: with identity, lock guard enforces only against
+- [x] II-8 A3 decision: with identity, lock guard enforces only against
       a *different* agent's active lock; still opt-in but now meaningful.
 - [ ] II-9 Capstone: `frog board` realtime colored lifecycle board over
       event_log (enters / assigned / status / claimed / finished + which

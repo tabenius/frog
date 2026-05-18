@@ -678,7 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="Path to frog config JSON")
-    parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Path to AGENTS.db")
+    parser.add_argument("--db", default=None, help="Path to AGENTS.db (explicit value overrides the workspace DB)")
     parser.add_argument("--workspace", help="Named workspace to use; may point at another host over SSH")
     parser.add_argument("--json", action="store_true", help="Emit structured JSON output")
     sub = parser.add_subparsers(
@@ -1090,6 +1090,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
+    db_explicit = args.db is not None
+    if args.db is None:
+        args.db = DEFAULT_DB_PATH
 
     if args.command == "completion":
         script = _completion_script(args.shell)
@@ -1151,7 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace = frog_config.resolve_workspace(args.workspace, args.config)
         if workspace and workspace["host"].get("transport") != "local":
             return _emit(_dispatch_workspace(workspace, argv), args.json)
-        if workspace and workspace["host"].get("transport") == "local":
+        if workspace and workspace["host"].get("transport") == "local" and not db_explicit:
             args.db = workspace["db"]
         conn = store.connect(args.db)
         try:
@@ -1163,7 +1166,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace = frog_config.resolve_workspace(args.workspace, args.config)
         if workspace and workspace["host"].get("transport") != "local":
             return _emit(_dispatch_workspace(workspace, argv), args.json)
-        if workspace and workspace["host"].get("transport") == "local":
+        if workspace and workspace["host"].get("transport") == "local" and not db_explicit:
             args.db = workspace["db"]
         if args.init_command == "migrate":
             return _emit(store.migrate(args.db), args.json)
@@ -1175,7 +1178,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace = _workspace_for_args(args, conn)
         if workspace and workspace["host"].get("transport") != "local":
             return _emit(_dispatch_workspace(workspace, argv), args.json)
-        if workspace and workspace["host"].get("transport") == "local":
+        if workspace and workspace["host"].get("transport") == "local" and not db_explicit:
             args.db = workspace["db"]
             conn.close()
             conn = store.connect(args.db)

@@ -20,6 +20,6 @@ Enable (warn-only) by adding to `/data/src/.claude/settings.local.json`:
 - Default: prints a `systemMessage` warning, never blocks.
 - `FROG_LOCK_GUARD_BLOCK=1`: denies the edit on a conflicting lock.
 
-Honest limitation: precise "another agent's lock" attribution needs a
-per-agent id convention (agents currently share `$USER`); today it flags
-any active lock covering the file. Tightening this is future work.
+Agent-aware (II-8): it acts only on a conflicting lock held by a
+*different* agent, resolved via `FROG_AGENT` (else `$USER`). Your own
+lock never triggers it. `FROG_DB` can point at a non-default DB.
