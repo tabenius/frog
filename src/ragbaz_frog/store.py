@@ -399,6 +399,90 @@ def snapshot_workspace(conn) -> dict:
     }
 
 
+def doctor(conn, db_path: str | None = None) -> dict:
+    """Self-diagnostic: turn the coordination data back on the operator."""
+    findings = []
+
+    def add(level, code, detail):
+        findings.append({"level": level, "code": code, "detail": detail})
+
+    # DB size
+    if db_path:
+        try:
+            sz = Path(db_path).stat().st_size
+            mb = sz / (1024 * 1024)
+            if mb >= 250:
+                add("warn", "db_large", f"AGENTS.db is {mb:.0f} MB -- consider `frog db gc`")
+        except OSError:
+            pass
+
+    # stale/expired locks
+    _mark_stale_locks(conn)
+    conn.commit()
+    stale = conn.execute(
+        "SELECT COUNT(*) c FROM locks WHERE status = 'stale'"
+    ).fetchone()["c"]
+    if stale:
+        add("warn", "stale_locks", f"{stale} stale lock(s); `frog lock reap`/`list --status stale`")
+
+    # tasks whose deps are ALL done but task is still blocked-ish (drift)
+    drift = []
+    for r in conn.execute(
+        "SELECT slug, workflow_status FROM tasks "
+        "WHERE LOWER(workflow_status) IN ('blocked','idea')"
+    ):
+        deps = conn.execute(
+            "SELECT depends_on_slug FROM task_dependencies "
+            "WHERE task_slug=? AND relation='depends_on'", (r["slug"],)
+        ).fetchall()
+        if not deps:
+            continue
+        all_done = True
+        for d in deps:
+            dd = conn.execute(
+                "SELECT workflow_status FROM tasks WHERE slug=?",
+                (d["depends_on_slug"],)
+            ).fetchone()
+            if not dd or (dd["workflow_status"] or "").lower() not in _WF_DONE:
+                all_done = False
+                break
+        if all_done:
+            drift.append(r["slug"])
+    if drift:
+        add("info", "ready_tasks",
+            f"{len(drift)} task(s) have all deps done and are takeable: "
+            + ", ".join(drift[:10]))
+
+    # task.repo_path pointing at an unknown repo
+    orphans = conn.execute(
+        "SELECT COUNT(*) c FROM tasks t WHERE t.repo_path IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM repos r WHERE r.repo_path = t.repo_path)"
+    ).fetchone()["c"]
+    if orphans:
+        add("warn", "orphan_task_repo", f"{orphans} task(s) reference an unregistered repo")
+
+    # mirror lag
+    for r in conn.execute(
+        "SELECT workspace, MAX(mirrored_at) m FROM event_mirror GROUP BY workspace"
+    ):
+        try:
+            age_h = (utc_now() - parse_iso(r["m"])).total_seconds() / 3600
+            if age_h > 48:
+                add("info", "mirror_lag",
+                    f"workspace '{r['workspace']}' mirror is {age_h:.0f}h behind")
+        except Exception:
+            pass
+
+    return {
+        "ok": not any(f["level"] == "warn" for f in findings),
+        "findings": findings,
+        "summary": {
+            "warn": sum(1 for f in findings if f["level"] == "warn"),
+            "info": sum(1 for f in findings if f["level"] == "info"),
+        },
+    }
+
+
 def db_gc(conn, *, older_than_days: int | None = None, keep: int = 200) -> dict:
     """Prune unbounded coordination tables, then checkpoint + VACUUM.
       - event_log / event_mirror: drop rows older than `older_than_days`

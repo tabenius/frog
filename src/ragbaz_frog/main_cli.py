@@ -88,7 +88,7 @@ def _workspace_names() -> list[str]:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    top = "db new agent doctor agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -315,6 +315,15 @@ def _emit(payload: dict, as_json: bool) -> int:
         print(f"workflow_status: {task['workflow_status']}")
         print(f"git_status: {task['git_status']}")
         return 0
+    if "findings" in payload and "summary" in payload and "warn" in payload["summary"]:
+        s = payload["summary"]
+        if not payload["findings"]:
+            print("doctor: all clear")
+            return 0
+        print(f"doctor: {s['warn']} warn / {s['info']} info")
+        for f in payload["findings"]:
+            print(f"  [{f['level']}] {f['code']}: {f['detail']}")
+        return 0 if s["warn"] == 0 else 1
     if "findings" in payload and "agent" in payload:
         repo = payload.get("repo", {})
         rname = repo.get("name", "?") if isinstance(repo, dict) else "?"
@@ -675,7 +684,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,doctor,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -723,6 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
         "snapshot",
         help="Rotate /data/backups/src.last to src.prev and rsync /data/src to src.last",
     )
+    sub.add_parser("doctor", help="Self-diagnostic over locks/tasks/events/DB")
     ps = sub.add_parser(
         "ps",
         help="Show active tasks, active locks, and recent frog activity",
@@ -1182,6 +1192,8 @@ def main(argv: list[str] | None = None) -> int:
                 store.db_gc(conn, older_than_days=args.older_than, keep=args.keep),
                 args.json,
             )
+        if args.command == "doctor":
+            return _emit(store.doctor(conn, args.db), args.json)
         if args.command == "snapshot":
             return _emit(store.snapshot_workspace(conn), args.json)
         if args.command == "ps":

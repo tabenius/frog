@@ -70,7 +70,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       testable without SSH; tests.
 - [x] II-5 `frog db gc [--older-than D] [--keep N]`: prune event_log /
       event_mirror / target_runs, WAL checkpoint + VACUUM.
-- [ ] II-6 `frog doctor`: health over locks/tasks/events/DB size
+- [x] II-6 `frog doctor`: health over locks/tasks/events/DB size
       (stale locks, deps-on-done-but-blocked data bugs, mirror lag).
 - [ ] II-7 Packaging: pyproject.toml + console_scripts (frog, frog-mcp),
       pinned Python floor; bin/ shims kept.
