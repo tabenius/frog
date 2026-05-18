@@ -376,7 +376,7 @@ def _completion_script(shell: str) -> str:
       fi
       ;;
     provider) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "pull outbox sync" -- "$cur") ) ;;
-    log) COMPREPLY=( $(compgen -W "why blame --follow --limit --repo -f" -- "$cur") ) ;;
+    log) COMPREPLY=( $(compgen -W "why blame --follow --limit --repo --all -f" -- "$cur") ) ;;
   esac
 }}
 complete -F _frog_complete frog
@@ -408,7 +408,7 @@ complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcomman
 complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from info' -F
 complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from upsert' -F
 complete -c frog -n '__fish_seen_subcommand_from provider' -a 'pull outbox sync'
-complete -c frog -n '__fish_seen_subcommand_from log' -a 'why blame --follow --limit --repo -f'
+complete -c frog -n '__fish_seen_subcommand_from log' -a 'why blame --follow --limit --repo --all -f'
 """
     raise ValueError(f"unsupported shell: {shell}")
 
@@ -1104,6 +1104,17 @@ def _follow_log(conn, *, repo_ref: str | None, limit: int) -> int:
         return 0
 
 
+def _log_repo_ref(conn, args) -> str | None:
+    if getattr(args, "all", False):
+        return None
+    if getattr(args, "repo_ref", None):
+        return args.repo_ref
+    inferred = store.infer_repo_from_cwd(conn)
+    if inferred:
+        return inferred["repo_path"]
+    return ""
+
+
 def _hide_subcommands(parser: argparse.ArgumentParser, hidden: set[str]) -> None:
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
@@ -1618,12 +1629,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show recent frog event log entries or follow them live",
         description=(
             "Show the frog event log.\n"
-            "Use --follow or -f to stream new events as they are written to AGENTS.db."
+            "Defaults to the current repo when cwd is inside a known repo.\n"
+            "Use --all for the whole workspace, or --follow/-f to stream new events."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
     log.add_argument("--limit", type=int, default=20, help="Number of recent events to show initially")
-    log.add_argument("--repo", dest="repo_ref", metavar="REPO", help="Limit events to one repo by name or path")
+    log_scope = log.add_mutually_exclusive_group()
+    log_scope.add_argument("--repo", dest="repo_ref", metavar="REPO", help="Limit events to one repo by name or path")
+    log_scope.add_argument("--all", action="store_true", help="Show workspace-wide events instead of defaulting to cwd repo")
     log.add_argument("-f", "--follow", action="store_true", help="Follow new events live")
     log_sub = log.add_subparsers(dest="log_command")
     log_why = log_sub.add_parser("why", help="Event timeline + history for a task")
@@ -2071,7 +2085,13 @@ def main(argv: list[str] | None = None) -> int:
         conn = store.connect(args.db)
         try:
             _record_command(conn, argv)
-            return _follow_log(conn, repo_ref=args.repo_ref, limit=args.limit)
+            repo_ref = _log_repo_ref(conn, args)
+            if repo_ref == "":
+                return _emit({
+                    "ok": False,
+                    "error": "no repo specified and cwd is not inside a known or discoverable repo; use --all for workspace log",
+                }, args.json)
+            return _follow_log(conn, repo_ref=repo_ref, limit=args.limit)
         finally:
             conn.close()
     if args.command == "db":
@@ -2184,7 +2204,13 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.log_why(conn, args.slug), args.json)
             if lc == "blame":
                 return _emit(store.log_blame(conn, args.file), args.json)
-            return _emit(store.log_tail(conn, limit=args.limit, repo_ref=args.repo_ref), args.json)
+            repo_ref = _log_repo_ref(conn, args)
+            if repo_ref == "":
+                return _emit({
+                    "ok": False,
+                    "error": "no repo specified and cwd is not inside a known or discoverable repo; use --all for workspace log",
+                }, args.json)
+            return _emit(store.log_tail(conn, limit=args.limit, repo_ref=repo_ref), args.json)
         if args.command == "repo":
             if args.repo_command == "list":
                 return _emit(
