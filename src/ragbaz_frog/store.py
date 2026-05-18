@@ -453,14 +453,6 @@ def doctor(conn, db_path: str | None = None) -> dict:
             f"{len(drift)} task(s) have all deps done and are takeable: "
             + ", ".join(drift[:10]))
 
-    # task.repo_path pointing at an unknown repo
-    orphans = conn.execute(
-        "SELECT COUNT(*) c FROM tasks t WHERE t.repo_path IS NOT NULL "
-        "AND NOT EXISTS (SELECT 1 FROM repos r WHERE r.repo_path = t.repo_path)"
-    ).fetchone()["c"]
-    if orphans:
-        add("warn", "orphan_task_repo", f"{orphans} task(s) reference an unregistered repo")
-
     # mirror lag
     for r in conn.execute(
         "SELECT workspace, MAX(mirrored_at) m FROM event_mirror GROUP BY workspace"

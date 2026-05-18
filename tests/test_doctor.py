@@ -45,16 +45,5 @@ class Doctor(unittest.TestCase):
         self.assertIn("stale_locks", codes)
         self.assertFalse(r["ok"], "stale locks are a warn -> not ok")
 
-    def test_detects_orphan_task_repo(self):
-        self._mk("o")
-        # point the task at an unregistered repo directly (avoids
-        # resolve_repo's absolute-path rglob fragility)
-        self.conn.execute(
-            "UPDATE tasks SET repo_path = '/no/such/repo' WHERE slug = 'o'")
-        self.conn.commit()
-        r = store.doctor(self.conn)
-        self.assertIn("orphan_task_repo", {f["code"] for f in r["findings"]})
-
-
 if __name__ == "__main__":
     unittest.main()
