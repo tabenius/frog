@@ -19,11 +19,16 @@ class McpWorkflow(unittest.TestCase):
 
     def test_create_claim_finish_over_mcp(self):
         r = self._call("frog_task_create",
-                       {"slug": "m1", "title": "via mcp", "priority": "p1"})
+                       {"slug": "m1", "title": "via mcp", "priority": "p1",
+                        "files": ["/tmp/frog-mcp-a"]})
         self.assertTrue(r["ok"], r)
-        r = self._call("frog_task_claim", {"slug": "m1", "agent": "claude"})
+        r = self._call("frog_task_claim",
+                       {"slug": "m1", "agent": "claude",
+                        "files": ["/tmp/frog-mcp-b"]})
         self.assertTrue(r["ok"])
         self.assertEqual(r["task"]["workflow_status"], "in_progress")
+        self.assertIn("/tmp/frog-mcp-a", r["lock"]["file_paths"])
+        self.assertIn("/tmp/frog-mcp-b", r["lock"]["file_paths"])
         r = self._call("frog_task_finish",
                        {"slug": "m1", "agent": "claude", "verify": False})
         self.assertTrue(r["ok"])

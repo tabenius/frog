@@ -145,6 +145,7 @@ def _tool_specs() -> list[dict]:
             "inputSchema": {"type": "object", "properties": {
                 "workspace": {"type": "string"}, "slug": {"type": "string"},
                 "agent": {"type": "string"}, "lock_kind": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "string"}},
                 "force": {"type": "boolean"}}, "required": ["slug", "agent"]},
         },
         {
@@ -162,6 +163,7 @@ def _tool_specs() -> list[dict]:
                 "workspace": {"type": "string"}, "slug": {"type": "string"},
                 "title": {"type": "string"}, "repo_ref": {"type": "string"},
                 "why": {"type": "string"}, "what": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "string"}},
                 "priority": {"type": "string"}},
                 "required": ["slug", "title"]},
         },
@@ -327,6 +329,7 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
                 conn, slug=arguments["slug"],
                 agent=arguments.get("agent", "unknown"),
                 lock_kind=arguments.get("lock_kind", "edit"),
+                files=arguments.get("files", []),
                 force=bool(arguments.get("force", False)))
         if tool_name == "frog_task_finish":
             return store.task_finish(
@@ -345,7 +348,8 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
                 git_status=arguments.get("git_status", "not_started"),
                 assigned_agent=arguments.get("assigned_agent"),
                 delegation_current=None, delegation_other=None,
-                parent_task_slug=arguments.get("parent_task_slug"))
+                parent_task_slug=arguments.get("parent_task_slug"),
+                files=arguments.get("files", []))
         if tool_name == "frog_task_dependency":
             return store.task_add_dependency(
                 conn, arguments["slug"], arguments["depends_on"],

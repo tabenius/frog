@@ -88,7 +88,7 @@ def _workspace_names() -> list[str]:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent doctor board tui whereis setup provider agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    top = "db new agent doctor board tui whereis setup provider gh agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -875,7 +875,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,gh,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -931,6 +931,18 @@ def build_parser() -> argparse.ArgumentParser:
     setup_cmd.add_argument("--dir", dest="setup_dir", help="Target dir (default cwd)")
     setup_cmd.add_argument("--dry-run", dest="setup_dry", action="store_true")
     setup_cmd.add_argument("--force", action="store_true", help="Overwrite CLAUDE.md/AGENTS.md")
+    gh_cmd = sub.add_parser("gh", help="GitHub Issues two-way sync + CI helper")
+    gh_sub = gh_cmd.add_subparsers(dest="gh_command", required=True)
+    ghs = gh_sub.add_parser("sync", help="Pull issues into tasks, then push task state back")
+    ghs.add_argument("--repo", required=True, help="owner/name")
+    ghp = gh_sub.add_parser("pull", help="Import GitHub issues as tasks")
+    ghp.add_argument("--repo", required=True, help="owner/name")
+    ghu = gh_sub.add_parser("push", help="Push task status back to issues")
+    ghu.add_argument("--repo", required=True)
+    gh_sub.add_parser("action", help="Print a CI workflow gating on frog repo affected")
+    ghc = gh_sub.add_parser("comment", help="Post the board as a PR comment")
+    ghc.add_argument("--repo", required=True)
+    ghc.add_argument("--pr", type=int, required=True)
     prov = sub.add_parser("provider", help="External task-provider sync (GitHub/Asana/...)")
     prov_sub = prov.add_subparsers(dest="provider_command", required=True)
     pp = prov_sub.add_parser("pull", help="Sync a normalized JSON item list inbound")
@@ -1164,6 +1176,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_create.add_argument("--delegation-current")
     task_create.add_argument("--delegation-other")
     task_create.add_argument("--parent-task-slug")
+    task_create.add_argument("--file", action="append", default=[],
+                             help="File this task intends to touch; repeatable")
     task_list = task_sub.add_parser("list", help="List tasks")
     task_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     task_list.add_argument("--workflow-status")
@@ -1177,6 +1191,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_claim.add_argument("slug")
     task_claim.add_argument("--agent")
     task_claim.add_argument("--lock-kind", default="edit")
+    task_claim.add_argument("--file", action="append", default=[],
+                            help="Add and lock a file scope while claiming; repeatable")
     task_claim.add_argument("--force", action="store_true")
     task_finish = task_sub.add_parser("finish", help="Verify (affected build/test) -> done + release + report unblocks")
     task_finish.add_argument("slug")
@@ -1422,6 +1438,21 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(store.setup_agent(conn, args.agent,
                 target_dir=args.setup_dir, dry_run=args.setup_dry,
                 force=args.force), args.json)
+        if args.command == "gh":
+            from ragbaz_frog import gh as _gh
+            if args.gh_command == "sync":
+                return _emit(_gh.sync(conn, args.repo), args.json)
+            if args.gh_command == "pull":
+                return _emit(_gh.pull(conn, args.repo), args.json)
+            if args.gh_command == "push":
+                return _emit(_gh.push(conn, args.repo), args.json)
+            if args.gh_command == "action":
+                if args.json:
+                    return _emit({"ok": True, "yaml": _gh.action_yaml()}, True)
+                print(_gh.action_yaml()); return 0
+            if args.gh_command == "comment":
+                txt = _board_frame(store.board_snapshot(conn), color=False)
+                return _emit(_gh.comment_board(conn, args.repo, args.pr, txt), args.json)
         if args.command == "provider":
             if args.provider_command == "pull":
                 import json as _j
@@ -1519,6 +1550,7 @@ def main(argv: list[str] | None = None) -> int:
                         delegation_current=args.delegation_current,
                         delegation_other=args.delegation_other,
                         parent_task_slug=args.parent_task_slug,
+                        files=args.file,
                     ),
                     args.json,
                 )
@@ -1527,7 +1559,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.task_command == "claim":
                 return _emit(store.task_claim(conn, slug=args.slug,
                     agent=(args.agent or store.current_agent()),
-                    lock_kind=args.lock_kind, force=args.force), args.json)
+                    lock_kind=args.lock_kind, force=args.force,
+                    files=args.file), args.json)
             if args.task_command == "finish":
                 return _emit(store.task_finish(conn, slug=args.slug,
                     agent=(args.agent or store.current_agent()),

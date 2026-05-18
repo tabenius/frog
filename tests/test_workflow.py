@@ -34,6 +34,27 @@ class Workflow(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("codex", r["error"])
 
+    def test_create_and_claim_with_file_scopes(self):
+        store.create_task(
+            self.conn, slug="files", repo_ref=None, title="files",
+            why=None, what_text=None, roi_note=None, priority="p2",
+            workflow_status="idea", git_status="not_started",
+            assigned_agent=None, delegation_current=None,
+            delegation_other=None, parent_task_slug=None,
+            files=["/tmp/frog-task-file-a"],
+        )
+        info = store.task_info(self.conn, "files")
+        self.assertEqual(info["files"][0]["file_path"], "/tmp/frog-task-file-a")
+
+        r = store.task_claim(
+            self.conn, slug="files", agent="claude",
+            files=["/tmp/frog-task-file-b"],
+        )
+        self.assertTrue(r["ok"], r)
+        locked = r["lock"]["file_paths"]
+        self.assertIn("/tmp/frog-task-file-a", locked)
+        self.assertIn("/tmp/frog-task-file-b", locked)
+
     def test_finish_no_verify_flips_and_reports_unblock(self):
         mk(self.conn, "base")
         mk(self.conn, "dep")

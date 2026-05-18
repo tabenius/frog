@@ -1301,6 +1301,7 @@ def create_task(
     delegation_current: str | None,
     delegation_other: str | None,
     parent_task_slug: str | None,
+    files: list[str] | None = None,
 ) -> dict:
     repo_path = None
     if repo_ref:
@@ -1354,6 +1355,7 @@ def create_task(
             """,
             (slug, assigned_agent, now, "initial assignment"),
         )
+    _attach_task_files(conn, slug, repo_path, files)
     record_event(
         conn,
         kind="task.created",
@@ -1361,7 +1363,11 @@ def create_task(
         repo_path=repo_path,
         task_slug=slug,
         actor=assigned_agent,
-        payload={"priority": priority, "workflow_status": workflow_status},
+        payload={
+            "priority": priority,
+            "workflow_status": workflow_status,
+            "files": _task_file_paths(conn, slug),
+        },
     )
     conn.commit()
     return task_info(conn, slug)
@@ -1520,6 +1526,61 @@ def _task_file_paths(conn, slug: str) -> list[str]:
     ).fetchall()]
 
 
+def _normalise_task_file_paths(repo_path: str | None, files: list[str] | None) -> list[str]:
+    out = []
+    root = Path(repo_path).resolve() if repo_path else None
+    for item in files or []:
+        if not item:
+            continue
+        path = Path(item).expanduser()
+        if not path.is_absolute() and root:
+            path = root / path
+        out.append(str(path.resolve()))
+    return sorted(set(out))
+
+
+def _repo_path_for_task_file(repo_path: str | None, file_path: str) -> str | None:
+    if not repo_path:
+        return None
+    try:
+        Path(file_path).resolve().relative_to(Path(repo_path).resolve())
+        return repo_path
+    except ValueError:
+        return None
+
+
+def _attach_task_files(
+    conn,
+    slug: str,
+    repo_path: str | None,
+    files: list[str] | None,
+    role: str = "edit",
+) -> list[str]:
+    now = utc_now_iso()
+    paths = _normalise_task_file_paths(repo_path, files)
+    for file_path in paths:
+        file_repo_path = _repo_path_for_task_file(repo_path, file_path)
+        conn.execute(
+            """
+            INSERT INTO files(file_path, repo_path, file_type, source_of_truth, notes, created_at, updated_at)
+            VALUES(?, ?, NULL, NULL, NULL, ?, ?)
+            ON CONFLICT(file_path) DO UPDATE SET
+                repo_path = COALESCE(excluded.repo_path, files.repo_path),
+                updated_at = excluded.updated_at
+            """,
+            (file_path, file_repo_path, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO task_files(task_slug, file_path, role, created_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(task_slug, file_path) DO UPDATE SET role = excluded.role
+            """,
+            (slug, file_path, role, now),
+        )
+    return paths
+
+
 def _repo_key_for_path(conn, repo_path: str | None) -> str | None:
     if not repo_path:
         return None
@@ -1575,7 +1636,8 @@ def _newly_unblocked(conn, finished_slug: str) -> list[str]:
 
 
 def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
-               scope_key: str | None = None, force: bool = False) -> dict:
+               scope_key: str | None = None, force: bool = False,
+               files: list[str] | None = None) -> dict:
     """Atomic-ish: take ownership + the scoped lock + mark in_progress."""
     row = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
     if not row:
@@ -1587,6 +1649,7 @@ def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
     if owner and owner != agent and not force:
         return {"ok": False, "error": f"task {slug} is owned by {owner}"}
     scope = scope_key or f"task:{slug}"
+    added_files = _attach_task_files(conn, slug, task["repo_path"], files)
     files = _task_file_paths(conn, slug)
     lk = lock_acquire(
         conn, scope_key=scope, repo_ref=task["repo_path"],
@@ -1605,7 +1668,11 @@ def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
     record_event(conn, kind="task.claimed",
                  summary=f"{agent} claimed {slug}", repo_path=task["repo_path"],
                  task_slug=slug, actor=agent,
-                 payload={"lock": lk.get("lock", {}).get("id")})
+                 payload={
+                     "lock": lk.get("lock", {}).get("id"),
+                     "files": files,
+                     "added_files": added_files,
+                 })
     conn.commit()
     return {"ok": True, "task": dict(conn.execute(
         "SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()),
@@ -1742,7 +1809,7 @@ def provider_outbox(conn, source: str) -> dict:
     push back to the external system."""
     rows = dicts(conn.execute(
         "SELECT slug, external_id, title, workflow_status, git_status, "
-        "priority FROM tasks WHERE source = ? ORDER BY slug", (source,)
+        "priority, assigned_agent FROM tasks WHERE source = ? ORDER BY slug", (source,)
     ).fetchall())
     return {"ok": True, "source": source, "outbox": rows}
 
@@ -1773,6 +1840,12 @@ def task_info(conn, slug: str) -> dict:
                 (slug,),
             ).fetchall()
         ],
+        "files": dicts(
+            conn.execute(
+                "SELECT * FROM task_files WHERE task_slug = ? ORDER BY file_path",
+                (slug,),
+            ).fetchall()
+        ),
         "history": dicts(
             conn.execute(
                 "SELECT * FROM task_status_history WHERE task_slug = ? ORDER BY changed_at",
