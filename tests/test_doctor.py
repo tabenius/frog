@@ -33,7 +33,7 @@ class Doctor(unittest.TestCase):
         codes = {f["code"] for f in r["findings"]}
         self.assertIn("ready_tasks", codes)
 
-    def test_detects_stale_lock(self):
+    def test_repairs_stale_lock_by_default(self):
         store.lock_acquire(self.conn, scope_key="s", repo_ref=None,
                            lock_kind="x", files=[], agent="a", pid=None,
                            reason=None, lease_seconds=1, eta_minutes=None,
@@ -41,9 +41,25 @@ class Doctor(unittest.TestCase):
         self.conn.execute("UPDATE locks SET updated_at='2000-01-01T00:00:00+00:00'")
         self.conn.commit()
         r = store.doctor(self.conn)
+        repair_codes = {f["code"] for f in r["repairs"]}
+        stale = self.conn.execute(
+            "SELECT COUNT(*) c FROM locks WHERE status = 'stale'"
+        ).fetchone()["c"]
+        self.assertIn("stale_locks", repair_codes)
+        self.assertEqual(stale, 0)
+        self.assertTrue(r["ok"])
+
+    def test_no_fix_reports_stale_lock(self):
+        store.lock_acquire(self.conn, scope_key="s", repo_ref=None,
+                           lock_kind="x", files=[], agent="a", pid=None,
+                           reason=None, lease_seconds=1, eta_minutes=None,
+                           force=False)
+        self.conn.execute("UPDATE locks SET updated_at='2000-01-01T00:00:00+00:00'")
+        self.conn.commit()
+        r = store.doctor(self.conn, fix=False)
         codes = {f["code"] for f in r["findings"]}
         self.assertIn("stale_locks", codes)
-        self.assertFalse(r["ok"], "stale locks are a warn -> not ok")
+        self.assertFalse(r["ok"], "stale locks are a warn -> not ok with --no-fix")
 
 if __name__ == "__main__":
     unittest.main()

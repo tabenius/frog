@@ -222,6 +222,7 @@ def _completion_script(shell: str) -> str:
   case "${{COMP_WORDS[1]}}" in
     completion) COMPREPLY=( $(compgen -W "bash fish" -- "$cur") ) ;;
     ps|snapshot|status) COMPREPLY=() ;;
+    doctor) COMPREPLY=( $(compgen -W "--no-fix" -- "$cur") ) ;;
     db) COMPREPLY=( $(compgen -W "migrate schema gc" -- "$cur") ) ;;
     new|agent-instructions) COMPREPLY=( $(compgen -d -- "$cur") ) ;;
     config)
@@ -264,6 +265,7 @@ complete -F _frog_complete frog
         return f"""complete -c frog -f
 complete -c frog -n '__fish_use_subcommand' -a '{top}'
 complete -c frog -n '__fish_seen_subcommand_from completion' -a 'bash fish'
+complete -c frog -n '__fish_seen_subcommand_from doctor' -a '--no-fix'
 complete -c frog -n '__fish_seen_subcommand_from db' -a 'migrate schema gc'
 complete -c frog -n '__fish_seen_subcommand_from new agent-instructions' -a '(__fish_complete_directories)'
 complete -c frog -n '__fish_seen_subcommand_from config' -a 'info host workspace coordinator path'
@@ -300,6 +302,8 @@ def _emit(payload: dict, as_json: bool) -> int:
             _PAGE_HUMAN_OUTPUT = True
         _page_or_print(buf.getvalue())
         return rc
+    if "findings" in payload and "summary" in payload and "warn" in payload["summary"]:
+        return _render_doctor(payload)
     if not payload.get("ok", True):
         print(f"{_color('error', 'error')}: {payload.get('error', 'unknown error')}", file=sys.stderr)
         return 1
@@ -486,15 +490,6 @@ def _emit(payload: dict, as_json: bool) -> int:
         print(f"{_color('workflow_status', 'muted')}: {_status_text(task['workflow_status'])}")
         print(f"{_color('git_status', 'muted')}: {_status_text(task['git_status'])}")
         return 0
-    if "findings" in payload and "summary" in payload and "warn" in payload["summary"]:
-        s = payload["summary"]
-        if not payload["findings"]:
-            print(f"{_color('doctor', 'muted')}: {_color('all clear', 'success')}")
-            return 0
-        print(f"{_color('doctor', 'muted')}: {_color(s['warn'], 'warn')} warn / {_color(s['info'], 'meta')} info")
-        for f in payload["findings"]:
-            print(f"  [{_status_text(f['level'])}] {_color(f['code'], 'warn')}: {f['detail']}")
-        return 0 if s["warn"] == 0 else 1
     if "findings" in payload and "agent" in payload:
         repo = payload.get("repo", {})
         rname = repo.get("name", "?") if isinstance(repo, dict) else "?"
@@ -598,6 +593,30 @@ def _render_kv(rows: list[tuple[str, object]]) -> None:
         raw = value if value not in (None, "") else "-"
         role = "path" if label.lower() in {"path", "db", "root", "local_root"} else _status_role(raw)
         print(f"{_color(label, 'muted'):<{width + (len(_ANSI['muted']) + len(_ANSI['reset']) if _use_color() else 0)}}  {_color(raw, role)}")
+
+
+def _render_doctor(payload: dict) -> int:
+    summary = payload.get("summary", {})
+    findings = payload.get("findings", [])
+    repairs = payload.get("repairs", [])
+    warn_count = int(summary.get("warn", 0) or 0)
+    info_count = int(summary.get("info", 0) or 0)
+    repair_count = int(summary.get("repairs", len(repairs)) or 0)
+    if warn_count == 0:
+        print(f"{_color('doctor', 'muted')}: {_color('ok', 'success')}")
+    else:
+        print(f"{_color('doctor', 'muted')}: {_color(warn_count, 'warn')} warn / {_color(info_count, 'meta')} info")
+    for repair in repairs:
+        print(f"  {_color('fixed', 'success')} {_color(repair['code'], 'meta')}: {repair['detail']}")
+    for finding in findings:
+        role = _status_role(finding.get("level"))
+        marker = "repairable" if finding.get("repairable") else finding.get("level", "info")
+        print(f"  [{_color(marker, role)}] {_color(finding['code'], role)}: {finding['detail']}")
+    if not findings and not repairs:
+        print(f"  {_color('findings', 'muted')}: {_color('none', 'success')}")
+    elif repair_count and not findings:
+        print(f"  {_color('remaining', 'muted')}: {_color('none', 'success')}")
+    return 0 if payload.get("ok", True) else 1
 
 
 def _render_repo_info(payload: dict) -> None:
@@ -1322,7 +1341,12 @@ def build_parser() -> argparse.ArgumentParser:
         "snapshot",
         help="Rotate /data/backups/src.last to src.prev and rsync /data/src to src.last",
     )
-    sub.add_parser("doctor", help="Self-diagnostic over locks/tasks/events/DB")
+    doctor = sub.add_parser("doctor", help="Self-diagnostic over locks/tasks/events/DB")
+    doctor.add_argument(
+        "--no-fix",
+        action="store_true",
+        help="Only report findings; do not apply safe automatic repairs",
+    )
     whereis_cmd = sub.add_parser("whereis", help="Resolve a repo_key to its local path on this box")
     whereis_cmd.add_argument("--local-only", action="store_true", help=argparse.SUPPRESS)
     whereis_cmd.add_argument("repo_key")
@@ -1887,7 +1911,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.json,
             )
         if args.command == "doctor":
-            return _emit(store.doctor(conn, args.db), args.json)
+            return _emit(store.doctor(conn, args.db, fix=not args.no_fix), args.json)
         if args.command == "whereis":
             if args.local_only:
                 return _emit(store.whereis(conn, args.repo_key), args.json)

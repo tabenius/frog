@@ -523,12 +523,26 @@ def snapshot_workspace(conn) -> dict:
     }
 
 
-def doctor(conn, db_path: str | None = None) -> dict:
+def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
     """Self-diagnostic: turn the coordination data back on the operator."""
     findings = []
+    repairs = []
 
-    def add(level, code, detail):
-        findings.append({"level": level, "code": code, "detail": detail})
+    def add(level, code, detail, *, repairable=False):
+        findings.append({
+            "level": level,
+            "code": code,
+            "detail": detail,
+            "repairable": bool(repairable),
+        })
+
+    def repair(code, detail, *, count=0, ids=None):
+        repairs.append({
+            "code": code,
+            "detail": detail,
+            "count": count,
+            "ids": ids or [],
+        })
 
     # DB size
     if db_path:
@@ -543,11 +557,42 @@ def doctor(conn, db_path: str | None = None) -> dict:
     # stale/expired locks
     _mark_stale_locks(conn)
     conn.commit()
-    stale = conn.execute(
-        "SELECT COUNT(*) c FROM locks WHERE status = 'stale'"
-    ).fetchone()["c"]
-    if stale:
-        add("warn", "stale_locks", f"{stale} stale lock(s); `frog lock reap`/`list --status stale`")
+    stale_rows = conn.execute(
+        "SELECT id, scope_key, agent_name, repo_path FROM locks WHERE status = 'stale'"
+    ).fetchall()
+    if stale_rows:
+        if fix:
+            now = utc_now().isoformat()
+            ids = [r["id"] for r in stale_rows]
+            conn.executemany(
+                """
+                UPDATE locks
+                SET status = 'released',
+                    released_at = COALESCE(released_at, ?),
+                    updated_at = ?
+                WHERE id = ? AND status = 'stale'
+                """,
+                [(now, now, lock_id) for lock_id in ids],
+            )
+            record_event(
+                conn,
+                kind="doctor.repair",
+                summary=f"released {len(ids)} stale lock(s)",
+                payload={
+                    "code": "stale_locks",
+                    "lock_ids": ids,
+                    "locks": [dict(r) for r in stale_rows],
+                },
+            )
+            conn.commit()
+            repair("stale_locks", f"released {len(ids)} stale lock(s)", count=len(ids), ids=ids)
+        else:
+            add(
+                "warn",
+                "stale_locks",
+                f"{len(stale_rows)} stale lock(s); run `frog doctor` to release them or inspect with `frog lock list --status stale`",
+                repairable=True,
+            )
 
     # tasks whose deps are ALL done but task is still blocked-ish (drift)
     drift = []
@@ -592,9 +637,11 @@ def doctor(conn, db_path: str | None = None) -> dict:
     return {
         "ok": not any(f["level"] == "warn" for f in findings),
         "findings": findings,
+        "repairs": repairs,
         "summary": {
             "warn": sum(1 for f in findings if f["level"] == "warn"),
             "info": sum(1 for f in findings if f["level"] == "info"),
+            "repairs": len(repairs),
         },
     }
 
