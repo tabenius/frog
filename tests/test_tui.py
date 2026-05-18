@@ -133,5 +133,30 @@ class TuiRichTests(unittest.TestCase):
         self.assertEqual(st.offset[st.col], 0)
         self.assertEqual(st.row, 0)
 
+
+class TuiSegmentColors(unittest.TestCase):
+    def test_segments_match_board_color_coding(self):
+        tk = {"slug": "demo", "priority": "p1", "assigned_agent": "claude",
+              "unmet_deps": ["a", "b", "c"]}
+        segs = tui.task_segments(tk, ["demo"])
+        m = {text.strip().split()[0] if " " in text else text: code
+             for text, code in segs}
+        codes = {c for _, c in segs}
+        # base uses the p1 priority colour, NOT a generic one
+        self.assertEqual(segs[0][1], tui._PRIO_C["p1"])
+        # board parity: ready=220, agent=39, blockers=203
+        self.assertIn(tui._READY_C, codes)
+        self.assertIn(tui._AGENT_C, codes)
+        self.assertIn(tui._BLOCK_C, codes)
+        agent_seg = next(s for s in segs if "◆" in s[0])
+        self.assertEqual(agent_seg[1], 39)
+        self.assertIn("claude", agent_seg[0])
+
+    def test_segments_minimal_when_no_marks(self):
+        tk = {"slug": "x", "priority": "p3"}
+        segs = tui.task_segments(tk, [])
+        self.assertEqual(len(segs), 1)
+        self.assertEqual(segs[0][1], tui._PRIO_C["p3"])
+
 if __name__ == "__main__":
     unittest.main()
