@@ -1644,6 +1644,84 @@ def task_finish(conn, *, slug: str, agent: str, verify: bool = True) -> dict:
             "unblocked": unblocked}
 
 
+# ---- external task-provider contract -------------------------------------
+# A provider (GitHub, Asana, ...) is just code that produces/consumes a
+# normalised dict:
+#   {external_id, title, status, priority?, why?, what?, repo_ref?}
+# status maps: open/todo->idea, in_progress/doing->in_progress,
+#              done/closed->done, blocked->blocked.
+
+_EXT_STATUS = {
+    "open": "idea", "todo": "idea", "backlog": "idea", "new": "idea",
+    "in_progress": "in_progress", "doing": "in_progress",
+    "started": "in_progress", "review": "in_progress",
+    "done": "done", "closed": "done", "complete": "done",
+    "blocked": "blocked",
+}
+
+
+def _ext_workflow(status: str | None) -> str:
+    return _EXT_STATUS.get((status or "").strip().lower(), "idea")
+
+
+def provider_sync_in(conn, source: str, items: list[dict]) -> dict:
+    """Idempotent inbound sync. Upserts each external item as a task keyed
+    by (source, external_id). Slug is `source:external_id`."""
+    created, updated = [], []
+    for it in items:
+        ext = str(it["external_id"])
+        slug = f"{source}:{ext}"
+        wf = _ext_workflow(it.get("status"))
+        row = conn.execute(
+            "SELECT slug, workflow_status FROM tasks "
+            "WHERE source = ? AND external_id = ?", (source, ext)
+        ).fetchone()
+        now = utc_now_iso()
+        if row:
+            conn.execute(
+                "UPDATE tasks SET title=?, workflow_status=?, priority=?, "
+                "why=COALESCE(?,why), what_text=COALESCE(?,what_text), "
+                "updated_at=? WHERE slug=?",
+                (it.get("title") or row["slug"], wf,
+                 it.get("priority", "p3"), it.get("why"), it.get("what"),
+                 now, row["slug"]),
+            )
+            updated.append(row["slug"])
+        else:
+            create_task(
+                conn, slug=slug, repo_ref=it.get("repo_ref"),
+                title=it.get("title") or slug, why=it.get("why"),
+                what_text=it.get("what"), roi_note=None,
+                priority=it.get("priority", "p3"), workflow_status=wf,
+                git_status="not_started", assigned_agent=None,
+                delegation_current=None, delegation_other=None,
+                parent_task_slug=None,
+            )
+            conn.execute(
+                "UPDATE tasks SET source=?, external_id=? WHERE slug=?",
+                (source, ext, slug),
+            )
+            created.append(slug)
+    record_event(conn, kind="provider.sync_in",
+                 summary=f"{source}: +{len(created)} ~{len(updated)}",
+                 payload={"source": source, "created": created,
+                          "updated": updated})
+    conn.commit()
+    return {"ok": True, "source": source,
+            "created": created, "updated": updated,
+            "message": f"{source}: {len(created)} created, {len(updated)} updated"}
+
+
+def provider_outbox(conn, source: str) -> dict:
+    """Tasks owned by `source` + their current status, for an adapter to
+    push back to the external system."""
+    rows = dicts(conn.execute(
+        "SELECT slug, external_id, title, workflow_status, git_status, "
+        "priority FROM tasks WHERE source = ? ORDER BY slug", (source,)
+    ).fetchall())
+    return {"ok": True, "source": source, "outbox": rows}
+
+
 def task_info(conn, slug: str) -> dict:
     task = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
     if not task:

@@ -88,7 +88,7 @@ def _workspace_names() -> list[str]:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent doctor board tui whereis setup agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    top = "db new agent doctor board tui whereis setup provider agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -270,6 +270,11 @@ def _emit(payload: dict, as_json: bool) -> int:
         print(payload["message"])
         for r in payload["repos"]:
             print(f"  {r['repo_key']}  {r['repo_path']}")
+        return 0
+    if "outbox" in payload and "source" in payload:
+        print(f"{payload['source']} outbox: {len(payload['outbox'])} task(s)")
+        for r in payload["outbox"]:
+            print(f"  {r['external_id']}  {r['workflow_status']}  {r['slug']}")
         return 0
     if "deps" in payload:
         for d in payload["deps"]:
@@ -870,7 +875,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,doctor,board,tui,whereis,setup,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -926,6 +931,13 @@ def build_parser() -> argparse.ArgumentParser:
     setup_cmd.add_argument("--dir", dest="setup_dir", help="Target dir (default cwd)")
     setup_cmd.add_argument("--dry-run", dest="setup_dry", action="store_true")
     setup_cmd.add_argument("--force", action="store_true", help="Overwrite CLAUDE.md/AGENTS.md")
+    prov = sub.add_parser("provider", help="External task-provider sync (GitHub/Asana/...)")
+    prov_sub = prov.add_subparsers(dest="provider_command", required=True)
+    pp = prov_sub.add_parser("pull", help="Sync a normalized JSON item list inbound")
+    pp.add_argument("--source", required=True)
+    pp.add_argument("--file", required=True, help="JSON array of {external_id,title,status,...}")
+    po = prov_sub.add_parser("outbox", help="List source-owned tasks + status to push back")
+    po.add_argument("--source", required=True)
     tui_cmd = sub.add_parser("tui", help="Interactive curses kanban (claim/finish/next)")
     tui_cmd.add_argument("--agent")
     board_cmd = sub.add_parser("board", help="Realtime colored task lifecycle board")
@@ -1410,6 +1422,13 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(store.setup_agent(conn, args.agent,
                 target_dir=args.setup_dir, dry_run=args.setup_dry,
                 force=args.force), args.json)
+        if args.command == "provider":
+            if args.provider_command == "pull":
+                import json as _j
+                items = _j.loads(Path(args.file).read_text())
+                return _emit(store.provider_sync_in(conn, args.source, items), args.json)
+            if args.provider_command == "outbox":
+                return _emit(store.provider_outbox(conn, args.source), args.json)
         if args.command == "tui":
             from ragbaz_frog import tui
             return tui.run(conn, agent=(args.agent or store.current_agent()))
