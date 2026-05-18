@@ -88,8 +88,8 @@ def _workspace_names() -> list[str]:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent doctor board agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
-    repo_subs = "list register discover sync info task " + " ".join(sorted(REPO_ACTIONS))
+    top = "db new agent doctor board whereis agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
     if shell == "bash":
@@ -242,6 +242,23 @@ def _emit(payload: dict, as_json: bool) -> int:
             if result["stderr"].strip():
                 print(result["stderr"].rstrip(), file=sys.stderr)
         return 0 if payload.get("ok", True) else 1
+    if "repo_key" in payload and "aliases" in payload and "local_path" in payload:
+        print(f"repo_key: {payload['repo_key']}")
+        print(f"this box ({payload['box']}): {payload.get('local_path') or '-'}")
+        for a in payload["aliases"]:
+            print(f"  {a['box']}  {a['repo_path']}")
+        return 0 if payload.get("ok", True) else 1
+    if "repo_key" in payload and "repo_path" in payload and "aliases" in payload:
+        print(f"{payload.get('repo','?')}  {payload['repo_path']}")
+        print(f"repo_key: {payload['repo_key']}")
+        for a in payload["aliases"]:
+            print(f"  {a['box']}  {a['repo_path']}")
+        return 0
+    if "repos" in payload and payload.get("message", "").startswith("keyed "):
+        print(payload["message"])
+        for r in payload["repos"]:
+            print(f"  {r['repo_key']}  {r['repo_path']}")
+        return 0
     if "deps" in payload:
         for d in payload["deps"]:
             print(f"{d['dependent_repo_path']}  ->  {d['dependency_repo_path']}"
@@ -753,7 +770,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,doctor,board,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,doctor,board,whereis,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -802,6 +819,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rotate /data/backups/src.last to src.prev and rsync /data/src to src.last",
     )
     sub.add_parser("doctor", help="Self-diagnostic over locks/tasks/events/DB")
+    whereis_cmd = sub.add_parser("whereis", help="Resolve a repo_key to its local path on this box")
+    whereis_cmd.add_argument("repo_key")
     board_cmd = sub.add_parser("board", help="Realtime colored task lifecycle board")
     board_cmd.add_argument("--once", action="store_true", help="Print one frame and exit")
     board_cmd.add_argument("--interval", type=float, default=2.0, help="Refresh seconds")
@@ -947,6 +966,12 @@ def build_parser() -> argparse.ArgumentParser:
     repo_task_inline_sub = repo_task_inline.add_subparsers(dest="repo_task_inline_command", required=True)
     repo_task_inline_list = repo_task_inline_sub.add_parser("list", help="List tasks for one repo")
     repo_task_inline_list.add_argument("--repo", dest="repo_ref", metavar="REPO", required=True)
+    repo_key = repo_sub.add_parser("key", help="Show/set a repo's stable cross-box key")
+    repo_key.add_argument("repo_ref", nargs="?", help="Repo (default cwd repo)")
+    repo_key.add_argument("--set", dest="set_key", help="Set an explicit repo_key")
+    repo_key.add_argument("--write-frogid", dest="write_frogid",
+                          action="store_true", help="Write .frogid at repo root")
+    repo_keys = repo_sub.add_parser("keys", help="Backfill + list all repo keys")
     repo_dep = repo_sub.add_parser("dep", help="Declared cross-repo dependency edges")
     repo_dep_sub = repo_dep.add_subparsers(dest="repo_dep_command", required=True)
     rd_add = repo_dep_sub.add_parser("add", help="Declare: DEPENDENT depends on DEPENDENCY")
@@ -1269,6 +1294,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "doctor":
             return _emit(store.doctor(conn, args.db), args.json)
+        if args.command == "whereis":
+            return _emit(store.whereis(conn, args.repo_key), args.json)
         if args.command == "board":
             if args.json:
                 return _emit(store.board_snapshot(conn), True)
@@ -1315,6 +1342,16 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.repo_info(conn, args.repo_ref), args.json)
             if args.repo_command == "task":
                 return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=None, assigned_agent=None), args.json)
+            if args.repo_command == "key":
+                ref = args.repo_ref
+                if not ref:
+                    inf = store.infer_repo_from_cwd(conn)
+                    ref = inf["repo_path"] if inf else None
+                if not ref:
+                    return _emit({"ok": False, "error": "no repo specified and cwd not in a repo"}, args.json)
+                return _emit(store.repo_key_info(conn, ref, set_key=args.set_key, write_frogid=args.write_frogid), args.json)
+            if args.repo_command == "keys":
+                return _emit(store.repo_key_backfill(conn), args.json)
             if args.repo_command == "dep":
                 if args.repo_dep_command == "add":
                     return _emit(store.repo_dep_add(conn, args.dependent, args.dependency, args.note), args.json)

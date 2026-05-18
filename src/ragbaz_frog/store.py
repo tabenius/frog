@@ -602,6 +602,10 @@ def register_repo(
         payload={"name": name, "kind": kind, "status": status},
     )
     conn.commit()
+    try:
+        ensure_repo_key(conn, repo_path)
+    except sqlite3.Error:
+        pass
     return repo_info(conn, repo_path)
 
 
@@ -701,6 +705,126 @@ def path_metadata(path: str) -> dict:
     }
 
 
+def _box_id() -> str:
+    return socket.gethostname()
+
+
+def compute_repo_key(repo_path: str) -> str:
+    """Stable identity that is identical on every box:
+      1. a committed `.frogid` file at the repo root (authoritative), else
+      2. the git `origin` remote URL, else
+      3. the absolute path (box-local fallback -- not portable, flagged
+         by the `path:` prefix)."""
+    root = Path(repo_path)
+    fid = root / ".frogid"
+    try:
+        if fid.is_file():
+            v = fid.read_text().strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            text=True, capture_output=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            url = proc.stdout.strip()
+            return "git:" + hashlib.sha256(url.encode()).hexdigest()[:16]
+    except OSError:
+        pass
+    return "path:" + hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:16]
+
+
+def _record_repo_alias(conn, repo_key: str, repo_path: str) -> None:
+    conn.execute(
+        """INSERT OR IGNORE INTO repo_aliases(repo_key, box, repo_path, created_at)
+           VALUES(?,?,?,?)""",
+        (repo_key, _box_id(), repo_path, utc_now_iso()),
+    )
+
+
+def ensure_repo_key(conn, repo_path: str) -> str:
+    """Idempotently assign a repo_key to a registered repo + record the
+    (box -> local path) alias for this machine."""
+    row = conn.execute(
+        "SELECT repo_key FROM repos WHERE repo_path = ?", (repo_path,)
+    ).fetchone()
+    key = row["repo_key"] if row else None
+    if not key:
+        key = compute_repo_key(repo_path)
+        conn.execute(
+            "UPDATE repos SET repo_key = ?, updated_at = ? WHERE repo_path = ?",
+            (key, utc_now_iso(), repo_path),
+        )
+    _record_repo_alias(conn, key, repo_path)
+    conn.commit()
+    return key
+
+
+def repo_key_backfill(conn) -> dict:
+    done = []
+    for r in conn.execute("SELECT repo_path FROM repos").fetchall():
+        done.append({"repo_path": r["repo_path"],
+                     "repo_key": ensure_repo_key(conn, r["repo_path"])})
+    return {"ok": True, "message": f"keyed {len(done)} repo(s)", "repos": done}
+
+
+def resolve_local_path(conn, repo_key: str) -> str | None:
+    """Where does `repo_key` live on THIS box?"""
+    box = _box_id()
+    row = conn.execute(
+        "SELECT repo_path FROM repo_aliases WHERE repo_key = ? AND box = ? "
+        "ORDER BY created_at LIMIT 1", (repo_key, box)
+    ).fetchone()
+    if row:
+        return row["repo_path"]
+    row = conn.execute(
+        "SELECT repo_path FROM repos WHERE repo_key = ? LIMIT 1", (repo_key,)
+    ).fetchone()
+    return row["repo_path"] if row else None
+
+
+def whereis(conn, repo_key: str) -> dict:
+    box = _box_id()
+    here = resolve_local_path(conn, repo_key)
+    aliases = dicts(conn.execute(
+        "SELECT box, repo_path, created_at FROM repo_aliases "
+        "WHERE repo_key = ? ORDER BY box, repo_path", (repo_key,)
+    ).fetchall())
+    return {"ok": here is not None, "repo_key": repo_key, "box": box,
+            "local_path": here, "aliases": aliases,
+            "error": None if here else f"no local path for {repo_key} on {box}"}
+
+
+def repo_key_info(conn, repo_ref: str, *, set_key: str | None = None,
+                  write_frogid: bool = False) -> dict:
+    repo = resolve_repo(conn, repo_ref)
+    if not repo or not repo.get("repo_path"):
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    rp = repo["repo_path"]
+    if set_key:
+        conn.execute("UPDATE repos SET repo_key=?, updated_at=? WHERE repo_path=?",
+                     (set_key, utc_now_iso(), rp))
+        _record_repo_alias(conn, set_key, rp)
+        conn.commit()
+        key = set_key
+    else:
+        key = ensure_repo_key(conn, rp)
+    if write_frogid:
+        try:
+            (Path(rp) / ".frogid").write_text(key + "\n")
+        except OSError as e:
+            return {"ok": False, "error": f"could not write .frogid: {e}",
+                    "repo_key": key}
+    return {"ok": True, "repo": repo["name"], "repo_path": rp,
+            "repo_key": key,
+            "aliases": dicts(conn.execute(
+                "SELECT box, repo_path FROM repo_aliases WHERE repo_key=? "
+                "ORDER BY box", (key,)).fetchall())}
+
+
 def resolve_repo(conn, repo_ref: str) -> dict | None:
     repo_ref = repo_ref.strip()
     exact = conn.execute(
@@ -714,6 +838,20 @@ def resolve_repo(conn, repo_ref: str) -> dict | None:
         payload = dict(row)
         if Path(payload["repo_path"]).name == repo_ref:
             return payload
+    keyed = conn.execute(
+        "SELECT * FROM repos WHERE repo_key = ?", (repo_ref,)
+    ).fetchone()
+    if keyed:
+        return dict(keyed)
+    al = conn.execute(
+        "SELECT repo_path FROM repo_aliases WHERE repo_key = ? AND box = ? LIMIT 1",
+        (repo_ref, _box_id()),
+    ).fetchone()
+    if al:
+        r = conn.execute("SELECT * FROM repos WHERE repo_path = ?",
+                         (al["repo_path"],)).fetchone()
+        if r:
+            return dict(r)
     as_path = Path(repo_ref).expanduser()
     if as_path.exists() and as_path.is_dir():
         resolved = str(as_path.resolve())
