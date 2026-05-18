@@ -1318,10 +1318,10 @@ def _whereis_federated(conn, repo_key: str, *, config_path: str | None = None) -
 
 
 _FROG_ART = [
-    "   @   @",
-    "  ( ._. )",
-    "  ( >o< )",
-    "  /vvvvv\\",
+    "   ◉ ◉",
+    "  ( •ᴥ•)›",
+    "  ╰┬──┬╯",
+    " __┴__┴__",
 ]
 _PRIO_COLOR = {"p0": "196", "p1": "208", "p2": "214", "p3": "245"}
 _COL_ORDER = [("idea", "IDEA", "39"), ("blocked", "BLOCKED", "203"),
