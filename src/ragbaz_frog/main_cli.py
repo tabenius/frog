@@ -142,6 +142,7 @@ def _completion_script(shell: str) -> str:
     task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list next claim finish info status dependency conflict tag assign" -- "$cur") ) ;;
     lock) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "check acquire renew release list info" -- "$cur") ) ;;
     file) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "upsert list info" -- "$cur") ) ;;
+    provider) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "pull outbox sync" -- "$cur") ) ;;
     log) COMPREPLY=( $(compgen -W "why blame --follow --limit --repo -f" -- "$cur") ) ;;
   esac
 }}
@@ -165,6 +166,7 @@ complete -c frog -n '__fish_seen_subcommand_from unit' -a 'discover list'
 complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list next claim finish info status dependency conflict tag assign'
 complete -c frog -n '__fish_seen_subcommand_from lock' -a 'check acquire renew release list info'
 complete -c frog -n '__fish_seen_subcommand_from file' -a 'upsert list info'
+complete -c frog -n '__fish_seen_subcommand_from provider' -a 'pull outbox sync'
 complete -c frog -n '__fish_seen_subcommand_from log' -a 'why blame --follow --limit --repo -f'
 """
     raise ValueError(f"unsupported shell: {shell}")
@@ -1057,6 +1059,10 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--file", required=True, help="JSON array of {external_id,title,status,...}")
     po = prov_sub.add_parser("outbox", help="List source-owned tasks + status to push back")
     po.add_argument("--source", required=True)
+    psync = prov_sub.add_parser("sync", help="Run a configured Asana/Linear/Jira adapter")
+    psync.add_argument("--source", required=True, choices=["asana", "linear", "jira"])
+    psync.add_argument("--config-file", required=True, help="Provider adapter JSON config")
+    psync.add_argument("--direction", choices=["pull", "push", "both"], default="both")
     tui_cmd = sub.add_parser("tui", help="Interactive curses kanban (claim/finish/next)")
     tui_cmd.add_argument("--agent")
     board_cmd = sub.add_parser("board", help="Realtime colored task lifecycle board")
@@ -1609,6 +1615,17 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.provider_sync_in(conn, args.source, items), args.json)
             if args.provider_command == "outbox":
                 return _emit(store.provider_outbox(conn, args.source), args.json)
+            if args.provider_command == "sync":
+                from ragbaz_frog import provider_adapters
+                return _emit(
+                    provider_adapters.sync(
+                        conn,
+                        args.source,
+                        provider_adapters.load_config(args.config_file),
+                        direction=args.direction,
+                    ),
+                    args.json,
+                )
         if args.command == "tui":
             from ragbaz_frog import tui
             return tui.run(conn, agent=(args.agent or store.current_agent()))

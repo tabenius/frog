@@ -31,6 +31,7 @@ shorthand. A repo is always addressed under `frog repo …`.
 - `frog repo discover [--root PATH]` (`sync` is an alias; `detect` aliases `scan`)
 - `frog task create …` / `frog task list [--repo REPO]`
 - `frog lock acquire …`
+- `frog provider sync --source asana|linear|jira --config-file FILE --direction pull|push|both`
 - `frog status` — workspace summary (now reachable; previously shadowed by the repo `status` action)
 - `frog log` / `frog log --follow` (there is no `frog log tail`)
 - `frog unit discover [--repo REPO]` / `frog unit list`
@@ -87,6 +88,10 @@ frog's differentiator is the coordination/scheduling/forensics layer:
 - `frog whereis REPO_KEY` resolves the local path and asks configured remote
   workspaces in non-recursive local-only mode, so agents can find the same
   logical repo on different boxes.
+- `frog provider sync` runs concrete Asana, Linear, and Jira adapters on top of
+  the normalized provider contract. `--direction pull|push|both` controls sync
+  direction; provider JSON supplies credentials and status round-trip mappings
+  such as Asana enum option GIDs, Linear state IDs, or Jira transition IDs.
 - `connect()` enforces WAL + local-FS-only AGENTS.db (network-FS sqlite
   refused; use `--workspace` which RPCs over SSH).
 - Runner delegation: a declared Taskfile/justfile/mise outranks
