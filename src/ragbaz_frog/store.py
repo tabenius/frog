@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import glob
 import json
 import time
 import os
@@ -1330,10 +1331,76 @@ def file_list(conn, *, repo_ref: str | None, file_type: str | None) -> dict:
 
 def file_info(conn, file_path: str) -> dict:
     file_path = str(Path(file_path).expanduser().resolve())
+    if Path(file_path).is_dir():
+        return {"ok": False, "error": f"{file_path} is a directory; expected a file"}
     row = conn.execute("SELECT * FROM files WHERE file_path = ?", (file_path,)).fetchone()
     if not row:
         return {"ok": False, "error": f"file not found: {file_path}"}
     return {"ok": True, "file": dict(row)}
+
+
+def _expand_file_info_args(file_paths: list[str]) -> tuple[list[str], list[dict]]:
+    expanded = []
+    errors = []
+    for item in file_paths:
+        if glob.has_magic(item):
+            matches = sorted(glob.glob(item))
+            if not matches:
+                errors.append({
+                    "path": item,
+                    "kind": "glob_empty",
+                    "error": f"glob matched no files: {item}",
+                })
+                continue
+            expanded.extend(matches)
+        else:
+            expanded.append(item)
+    return expanded, errors
+
+
+def file_info_many(conn, file_paths: list[str]) -> dict:
+    expanded, errors = _expand_file_info_args(file_paths)
+    rows = []
+    seen = set()
+    for item in expanded:
+        path = Path(item).expanduser()
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            resolved = str(path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if Path(resolved).is_dir():
+            errors.append({
+                "path": resolved,
+                "kind": "directory",
+                "error": f"{resolved} is a directory; expected a file",
+            })
+            continue
+        row = conn.execute("SELECT * FROM files WHERE file_path = ?", (resolved,)).fetchone()
+        if row:
+            rows.append(dict(row))
+        elif Path(resolved).exists():
+            errors.append({
+                "path": resolved,
+                "kind": "unregistered",
+                "error": f"file is not registered in AGENTS.db: {resolved}",
+            })
+        else:
+            errors.append({
+                "path": resolved,
+                "kind": "missing",
+                "error": f"file not found: {resolved}",
+            })
+    if len(file_paths) == 1 and len(rows) == 1 and not errors and not glob.has_magic(file_paths[0]):
+        return {"ok": True, "file": rows[0]}
+    return {
+        "ok": not errors,
+        "files": rows,
+        "file_errors": errors,
+        "error": None if not errors else f"{len(errors)} file path error(s)",
+    }
 
 
 def create_task(

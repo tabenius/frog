@@ -672,6 +672,13 @@ def _emit(payload: dict, as_json: bool) -> int:
         for path in lock["file_paths"]:
             print(f"{_color('file', 'muted')}: {_path_text(path)}")
         return 0
+    if "file_errors" in payload:
+        for f in payload.get("files", []):
+            print(f"{f['file_path']}  repo={f.get('repo_path') or '-'}  "
+                  f"type={f.get('file_type') or '-'}")
+        for e in payload["file_errors"]:
+            print(f"  [{e['kind']}] {e['error']}")
+        return 0 if payload.get("ok", True) else 1
     if "files" in payload:
         rows = []
         for item in payload["files"]:
@@ -1945,8 +1952,20 @@ def build_parser() -> argparse.ArgumentParser:
     file_list = file_sub.add_parser("list", help="List files")
     file_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     file_list.add_argument("--file-type")
-    file_info = file_sub.add_parser("info", help="Show one file")
-    file_info.add_argument("file_path")
+    file_info = file_sub.add_parser(
+        "info",
+        help="Show one or more files (accepts multiple paths and globs)",
+        description=(
+            "Inspect file records. Accepts several paths and quoted globs:\n"
+            "  frog file info src/a.py src/b.py\n"
+            "  frog file info 'src/**/*.py'\n"
+            "  find . -name '*.py' -print0 | xargs -0 frog file info\n"
+            "Directories, unregistered, and missing paths are reported "
+            "precisely (nonzero exit on any error)."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    file_info.add_argument("file_path", nargs="+", metavar="PATH")
     _finalize_help_descriptions(parser)
     return parser
 
@@ -2381,7 +2400,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.file_command == "list":
                 return _emit(store.file_list(conn, repo_ref=args.repo_ref, file_type=args.file_type), args.json)
             if args.file_command == "info":
-                return _emit(store.file_info(conn, args.file_path), args.json)
+                return _emit(store.file_info_many(conn, args.file_path), args.json)
         if args.command == "sync":
             if args.sync_command == "pull":
                 ws = frog_config.resolve_workspace(args.workspace, args.config)
