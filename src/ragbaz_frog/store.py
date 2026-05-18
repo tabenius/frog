@@ -1876,15 +1876,42 @@ def _lock_rows(
     for row in conn.execute(query, tuple(params)).fetchall():
         payload = dict(row)
         payload["file_paths"] = json.loads(payload.pop("file_paths_json"))
+        payload["rel_files"] = json.loads(payload.pop("rel_files_json", "[]") or "[]")
         rows.append(payload)
     return rows
 
 
+def _rel_files(repo_path: str | None, files: list[str]) -> list[str]:
+    if not repo_path:
+        return sorted(set(files or []))
+    root = Path(repo_path)
+    out = []
+    for f in files or []:
+        try:
+            out.append(Path(f).resolve().relative_to(root.resolve()).as_posix())
+        except ValueError:
+            out.append(str(f))            # outside the repo -> keep absolute
+    return sorted(set(out))
+
+
 def _locks_conflict(candidate: dict, lock: dict) -> bool:
-    if candidate["repo_path"] and lock["repo_path"] and candidate["repo_path"] != lock["repo_path"]:
-        return False
     if candidate["scope_key"] == lock["scope_key"]:
         return True
+    # Cross-box clause FIRST: same logical repo (repo_key) makes a lock
+    # meaningful even when the absolute path / box differs. This must be
+    # evaluated before the repo_path-mismatch shortcut below, which would
+    # otherwise wrongly clear a same-repo-different-box conflict.
+    ck, lk = candidate.get("repo_key"), lock.get("repo_key")
+    if ck and lk and ck == lk:
+        cr = set(candidate.get("rel_files") or [])
+        lr = set(lock.get("rel_files") or [])
+        if not cr or not lr:
+            return True   # a whole-repo lock on the same logical repo
+        return bool(cr & lr)
+    # Different logical repos (or repo_key unknown): a differing absolute
+    # repo_path means no conflict.
+    if candidate["repo_path"] and lock["repo_path"] and candidate["repo_path"] != lock["repo_path"]:
+        return False
     current_files = set(candidate["file_paths"])
     other_files = set(lock["file_paths"])
     if not current_files or not other_files:
@@ -1901,7 +1928,15 @@ def lock_check(conn, *, scope_key: str, repo_ref: str | None, files: list[str] |
             repo_path = repo["repo_path"]
         elif repo_ref.startswith("/"):
             repo_path = str(Path(repo_ref).expanduser().resolve())
-    candidate = {"scope_key": scope_key, "repo_path": repo_path, "file_paths": _normalise_files(files)}
+    nf = _normalise_files(files)
+    rk = None
+    if repo_path:
+        rr = conn.execute("SELECT repo_key FROM repos WHERE repo_path = ?",
+                          (repo_path,)).fetchone()
+        rk = rr["repo_key"] if rr else None
+    candidate = {"scope_key": scope_key, "repo_path": repo_path,
+                 "file_paths": nf, "repo_key": rk,
+                 "rel_files": _rel_files(repo_path, nf)}
     conflicts = [lock for lock in _lock_rows(conn, include_inactive=False) if _locks_conflict(candidate, lock)]
     return {"ok": True, "scope_key": scope_key, "repo_path": repo_path, "conflicts": conflicts}
 
@@ -1925,13 +1960,24 @@ def lock_acquire(
         repo = resolve_repo(conn, repo_ref)
         repo_path = repo["repo_path"] if repo else str(Path(repo_ref).expanduser().resolve())
     files = _normalise_files(files)
+    lock_repo_key = None
+    if repo_path:
+        try:
+            lock_repo_key = ensure_repo_key(conn, repo_path)
+        except sqlite3.Error:
+            rr = conn.execute("SELECT repo_key FROM repos WHERE repo_path=?",
+                              (repo_path,)).fetchone()
+            lock_repo_key = rr["repo_key"] if rr else None
+    rel_files = _rel_files(repo_path, files)
     # Reap expired leases in their own short transaction first.
     _mark_stale_locks(conn)
     try:
         conn.commit()
     except sqlite3.Error:
         pass
-    candidate = {"scope_key": scope_key, "repo_path": repo_path, "file_paths": files}
+    candidate = {"scope_key": scope_key, "repo_path": repo_path,
+                 "file_paths": files, "repo_key": lock_repo_key,
+                 "rel_files": rel_files}
     # The conflict check + insert MUST be atomic. A plain check-then-insert
     # let concurrent acquirers double-grant the same contended scope
     # (TOCTOU). BEGIN IMMEDIATE takes SQLite's write lock up front, so
@@ -1942,6 +1988,7 @@ def lock_acquire(
         for row in conn.execute("SELECT * FROM locks WHERE status = 'active'").fetchall():
             r = dict(row)
             r["file_paths"] = json.loads(r.pop("file_paths_json"))
+            r["rel_files"] = json.loads(r.pop("rel_files_json", "[]") or "[]")
             rows.append(r)
         conflicts = [r for r in rows if _locks_conflict(candidate, r)]
         if conflicts and not force:
@@ -1955,15 +2002,18 @@ def lock_acquire(
         conn.execute(
             """
             INSERT INTO locks(
-                scope_key, repo_path, lock_kind, file_paths_json, agent_name, pid, host, reason,
+                scope_key, repo_path, repo_key, lock_kind, file_paths_json,
+                rel_files_json, agent_name, pid, host, reason,
                 status, lease_seconds, started_at, updated_at, eta_finish_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
             """,
             (
                 scope_key,
                 repo_path,
+                lock_repo_key,
                 lock_kind,
                 json.dumps(files),
+                json.dumps(rel_files),
                 agent,
                 pid if pid is not None else os.getpid(),
                 socket.gethostname(),
