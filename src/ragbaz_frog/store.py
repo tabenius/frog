@@ -1512,45 +1512,68 @@ def lock_acquire(
         repo = resolve_repo(conn, repo_ref)
         repo_path = repo["repo_path"] if repo else str(Path(repo_ref).expanduser().resolve())
     files = _normalise_files(files)
-    conflicts = lock_check(conn, scope_key=scope_key, repo_ref=repo_path, files=files)["conflicts"]
-    if conflicts and not force:
-        return {"ok": False, "error": "conflicting active lock exists", "conflicts": conflicts}
-    now = utc_now_iso()
-    eta_finish_at = None
-    if eta_minutes is not None:
-        eta_finish_at = (utc_now() + timedelta(minutes=eta_minutes)).isoformat(timespec="seconds")
-    conn.execute(
-        """
-        INSERT INTO locks(
-            scope_key, repo_path, lock_kind, file_paths_json, agent_name, pid, host, reason,
-            status, lease_seconds, started_at, updated_at, eta_finish_at
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
-        """,
-        (
-            scope_key,
-            repo_path,
-            lock_kind,
-            json.dumps(files),
-            agent,
-            pid if pid is not None else os.getpid(),
-            socket.gethostname(),
-            reason,
-            lease_seconds,
-            now,
-            now,
-            eta_finish_at,
-        ),
-    )
-    lock_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    record_event(
-        conn,
-        kind="lock.acquired",
-        summary=f"acquired {lock_kind} lock {scope_key}",
-        repo_path=repo_path,
-        actor=agent,
-        payload={"lock_id": lock_id, "files": files},
-    )
-    conn.commit()
+    # Reap expired leases in their own short transaction first.
+    _mark_stale_locks(conn)
+    try:
+        conn.commit()
+    except sqlite3.Error:
+        pass
+    candidate = {"scope_key": scope_key, "repo_path": repo_path, "file_paths": files}
+    # The conflict check + insert MUST be atomic. A plain check-then-insert
+    # let concurrent acquirers double-grant the same contended scope
+    # (TOCTOU). BEGIN IMMEDIATE takes SQLite's write lock up front, so
+    # contenders serialize: the loser re-reads the now-committed winner.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        rows = []
+        for row in conn.execute("SELECT * FROM locks WHERE status = 'active'").fetchall():
+            r = dict(row)
+            r["file_paths"] = json.loads(r.pop("file_paths_json"))
+            rows.append(r)
+        conflicts = [r for r in rows if _locks_conflict(candidate, r)]
+        if conflicts and not force:
+            conn.rollback()
+            return {"ok": False, "error": "conflicting active lock exists",
+                    "conflicts": conflicts}
+        now = utc_now_iso()
+        eta_finish_at = None
+        if eta_minutes is not None:
+            eta_finish_at = (utc_now() + timedelta(minutes=eta_minutes)).isoformat(timespec="seconds")
+        conn.execute(
+            """
+            INSERT INTO locks(
+                scope_key, repo_path, lock_kind, file_paths_json, agent_name, pid, host, reason,
+                status, lease_seconds, started_at, updated_at, eta_finish_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                scope_key,
+                repo_path,
+                lock_kind,
+                json.dumps(files),
+                agent,
+                pid if pid is not None else os.getpid(),
+                socket.gethostname(),
+                reason,
+                lease_seconds,
+                now,
+                now,
+                eta_finish_at,
+            ),
+        )
+        lock_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        record_event(
+            conn,
+            kind="lock.acquired",
+            summary=f"acquired {lock_kind} lock {scope_key}",
+            repo_path=repo_path,
+            actor=agent,
+            payload={"lock_id": lock_id, "files": files},
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
     return lock_info(conn, lock_id)
 
 

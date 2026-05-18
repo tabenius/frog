@@ -64,7 +64,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       in_progress + event, atomic) and `frog task finish <slug>`
       (affected build/test gate -> done + release + event), reporting
       newly-unblocked dependents.
-- [ ] II-3 Concurrency stress test: N processes hammering
+- [x] II-3 Concurrency stress test: N processes hammering
       lock_acquire / task_claim -> no double-grant, no deadlock.
 - [ ] II-4 Remote seam: injectable dispatch so sync/workspace paths are
       testable without SSH; tests.
