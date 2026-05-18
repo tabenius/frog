@@ -39,7 +39,7 @@ class HelpDescriptions(unittest.TestCase):
             with redirect_stdout(out):
                 parser.parse_args(["task", "claim", "--help"])
         self.assertEqual(caught.exception.code, 0)
-        text = out.getvalue()
+        text = out.getvalue().replace("\x1b[90m", "").replace("\x1b[36m", "").replace("\x1b[0m", "")
         self.assertIn("Take ownership + lock + mark in_progress", text)
         self.assertIn("usage: frog task claim", text)
 
@@ -50,7 +50,7 @@ class HelpDescriptions(unittest.TestCase):
             with redirect_stdout(out):
                 parser.parse_args(["repo", "info", "--help"])
         self.assertEqual(caught.exception.code, 0)
-        text = out.getvalue()
+        text = out.getvalue().replace("\x1b[90m", "").replace("\x1b[36m", "").replace("\x1b[0m", "")
         self.assertIn("Show repo metadata and counts", text)
         self.assertIn("--repo REPO", text)
 

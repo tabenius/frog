@@ -29,6 +29,7 @@ class CliRender(unittest.TestCase):
     def tearDown(self):
         main_cli._COLOR_ENABLED = True
         main_cli._PAGE_HUMAN_OUTPUT = False
+        main_cli._PAGER_ENABLED = True
 
     def test_repo_info_is_labeled(self):
         rc, out = render({
@@ -144,6 +145,31 @@ class CliRender(unittest.TestCase):
     def test_pager_threshold_uses_terminal_height(self):
         self.assertFalse(main_cli._should_page_text("one\ntwo\n", rows=10))
         self.assertTrue(main_cli._should_page_text("\n".join(str(i) for i in range(10)), rows=10))
+
+    def test_visible_width_table_aligns_colorized_columns(self):
+        main_cli._COLOR_ENABLED = True
+        buf = io.StringIO()
+        rows = [
+            [main_cli._color("short", "claim"), "x"],
+            [main_cli._color("much-longer", "claim"), "y"],
+        ]
+        with redirect_stdout(buf):
+            main_cli._render_table(rows)
+        lines = plain(buf.getvalue()).splitlines()
+        self.assertEqual(lines[0].index("x"), lines[1].index("y"))
+
+    def test_fish_completion_includes_file_info_files(self):
+        script = main_cli._completion_script("fish")
+        self.assertIn("__frog_complete_registered_files", script)
+        self.assertIn("__fish_seen_subcommand_from file; and __fish_seen_subcommand_from info", script)
+        self.assertIn("--json file list", script)
+        self.assertIn("__fish_seen_subcommand_from info' -F", script)
+
+    def test_help_output_is_colorized(self):
+        main_cli._COLOR_ENABLED = True
+        text = main_cli._colorize_help("usage: frog [-h]\noptions:\n")
+        self.assertIn("\x1b[", text)
+        self.assertIn("frog", text)
 
 
 if __name__ == "__main__":

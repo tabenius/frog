@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import shlex
 import subprocess
@@ -93,6 +94,8 @@ _ANSI = {
 
 _COLOR_ENABLED = True
 _PAGE_HUMAN_OUTPUT = False
+_PAGER_ENABLED = True
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 
 def _use_color() -> bool:
@@ -128,7 +131,7 @@ def _should_page_text(text: str, *, rows: int | None = None) -> bool:
 def _page_or_print(text: str) -> None:
     if not text:
         return
-    if not (sys.stdout.isatty() and _should_page_text(text)):
+    if not (_PAGER_ENABLED and sys.stdout.isatty() and _should_page_text(text)):
         print(text, end="")
         return
     cmd = _pager_command()
@@ -155,6 +158,101 @@ def _should_page_for_args(args) -> bool:
     if args.command == "gh" and getattr(args, "gh_command", None) == "action":
         return False
     return True
+
+
+def _visible_len(value: object) -> int:
+    return len(_ANSI_RE.sub("", str(value)))
+
+
+def _pad_visible(value: object, width: int) -> str:
+    text = str(value)
+    return text + " " * max(0, width - _visible_len(text))
+
+
+def _clip_visible(value: object, width: int | None) -> str:
+    text = str(value)
+    if width is None or width <= 0 or _visible_len(text) <= width:
+        return text
+    if width <= 3:
+        return "." * width
+    target = width - 3
+    out = []
+    visible = 0
+    index = 0
+    while index < len(text) and visible < target:
+        match = _ANSI_RE.match(text, index)
+        if match:
+            out.append(match.group(0))
+            index = match.end()
+            continue
+        out.append(text[index])
+        visible += 1
+        index += 1
+    out.append("...")
+    if "\033[" in text:
+        out.append(_ANSI["reset"])
+    return "".join(out)
+
+
+def _render_table(
+    rows: list[list[object]],
+    *,
+    indent: str = "",
+    gap: str = "  ",
+    max_widths: list[int | None] | None = None,
+) -> None:
+    if not rows:
+        return
+    prepared = []
+    for row in rows:
+        prepared.append([
+            _clip_visible(value, max_widths[index] if max_widths and index < len(max_widths) else None)
+            for index, value in enumerate(row)
+        ])
+    widths = [0] * max(len(row) for row in prepared)
+    for row in prepared:
+        for index, value in enumerate(row):
+            widths[index] = max(widths[index], _visible_len(value))
+    for row in prepared:
+        cells = [_pad_visible(value, widths[index]) for index, value in enumerate(row)]
+        print(indent + gap.join(cells).rstrip())
+
+
+def _colorize_help(text: str) -> str:
+    if not _use_color():
+        return text
+    section_headers = {
+        "positional arguments:",
+        "options:",
+        "commands:",
+        "subcommands:",
+        "JSON:",
+        "Repo addressing:",
+        "Examples:",
+        "Grammar:",
+    }
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if line.startswith("usage:"):
+            lines.append(_color("usage:", "muted") + line[len("usage:"):])
+        elif stripped in section_headers:
+            lines.append(line.replace(stripped, _color(stripped, "meta"), 1))
+        elif stripped.startswith("frog "):
+            lines.append(line.replace(stripped, _color(stripped, "claim"), 1))
+        else:
+            lines.append(line)
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+class FrogArgumentParser(argparse.ArgumentParser):
+    def print_help(self, file=None):
+        target = file or sys.stdout
+        text = _colorize_help(self.format_help())
+        if target is sys.stdout:
+            _page_or_print(text)
+        else:
+            target.write(text)
 
 
 def _status_role(value: object) -> str:
@@ -203,6 +301,18 @@ def _workspace_names() -> list[str]:
         return []
 
 
+def _registered_file_words() -> str:
+    try:
+        conn = store.connect(DEFAULT_DB_PATH)
+        try:
+            files = store.file_list(conn, repo_ref=None, file_type=None)["files"]
+            return " ".join(shlex.quote(row["file_path"]) for row in files)
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+
+
 def _completion_script(shell: str) -> str:
     top = "db new agent doctor board tui whereis setup provider gh agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
@@ -215,6 +325,7 @@ def _completion_script(shell: str) -> str:
   local top="{top}"
   local repo_subs="{repo_subs}"
   local repo_names="{repo_names}"
+  local registered_files="{_registered_file_words()}"
   if [[ $COMP_CWORD -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$top" -- "$cur") )
     return
@@ -254,7 +365,16 @@ def _completion_script(shell: str) -> str:
     unit) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "discover list" -- "$cur") ) ;;
     task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list next claim finish info status dependency conflict tag assign" -- "$cur") ) ;;
     lock) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "check acquire renew release list info" -- "$cur") ) ;;
-    file) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "upsert list info" -- "$cur") ) ;;
+    file)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "upsert list info" -- "$cur") )
+      elif [[ "${{COMP_WORDS[2]}}" == "info" ]]; then
+        COMPREPLY=( $(compgen -W "$registered_files" -- "$cur") )
+        [[ ${{#COMPREPLY[@]}} -eq 0 ]] && COMPREPLY=( $(compgen -f -- "$cur") )
+      elif [[ "${{COMP_WORDS[2]}}" == "upsert" ]]; then
+        COMPREPLY=( $(compgen -f -- "$cur") )
+      fi
+      ;;
     provider) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "pull outbox sync" -- "$cur") ) ;;
     log) COMPREPLY=( $(compgen -W "why blame --follow --limit --repo -f" -- "$cur") ) ;;
   esac
@@ -262,7 +382,11 @@ def _completion_script(shell: str) -> str:
 complete -F _frog_complete frog
 """
     if shell == "fish":
-        return f"""complete -c frog -f
+        return f"""function __frog_complete_registered_files
+    command frog --no-color --no-pager --json file list 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); [print(item.get("file_path","")) for item in data.get("files",[]) if item.get("file_path")]' 2>/dev/null
+end
+
+complete -c frog -f
 complete -c frog -n '__fish_use_subcommand' -a '{top}'
 complete -c frog -n '__fish_seen_subcommand_from completion' -a 'bash fish'
 complete -c frog -n '__fish_seen_subcommand_from doctor' -a '--no-fix'
@@ -279,7 +403,10 @@ complete -c frog -n '__fish_seen_subcommand_from {" ".join(sorted(REPO_ACTIONS))
 complete -c frog -n '__fish_seen_subcommand_from unit' -a 'discover list'
 complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list next claim finish info status dependency conflict tag assign'
 complete -c frog -n '__fish_seen_subcommand_from lock' -a 'check acquire renew release list info'
-complete -c frog -n '__fish_seen_subcommand_from file' -a 'upsert list info'
+complete -c frog -n '__fish_seen_subcommand_from file; and not __fish_seen_subcommand_from upsert list info' -a 'upsert list info'
+complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from info' -a '(__frog_complete_registered_files)'
+complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from info' -F
+complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from upsert' -F
 complete -c frog -n '__fish_seen_subcommand_from provider' -a 'pull outbox sync'
 complete -c frog -n '__fish_seen_subcommand_from log' -a 'why blame --follow --limit --repo -f'
 """
@@ -478,9 +605,17 @@ def _emit(payload: dict, as_json: bool) -> int:
             print(f"  {_color('skip', 'warn')} {_color(s['slug'], 'claim')}: {s['reason']}")
         return 0
     if "tasks" in payload:
+        rows = []
         for task in payload["tasks"]:
             repo = Path(task["repo_path"]).name if task["repo_path"] else "-"
-            print(f"{_color(task['slug'], 'claim')}  {_priority_text(task['priority'])}  {_status_text(task['workflow_status'])}  {_status_text(task['git_status'])}  {_color(repo, 'meta')}")
+            rows.append([
+                _color(task["slug"], "claim"),
+                _priority_text(task["priority"]),
+                _status_text(task["workflow_status"]),
+                _status_text(task["git_status"]),
+                _color(repo, "meta"),
+            ])
+        _render_table(rows)
         return 0
     if "task" in payload:
         task = payload["task"]
@@ -503,13 +638,28 @@ def _emit(payload: dict, as_json: bool) -> int:
         return 1
     if "reaped" in payload:
         print(_color(payload.get("message", f"reaped {len(payload['reaped'])}"), "success"))
+        rows = []
         for r in payload["reaped"]:
-            print(f"  {_color(r['id'], 'lock')}  {_color(r.get('scope_key','-'), 'lock')}  {_color(r.get('agent_name','-'), 'claim')}")
+            rows.append([
+                _color(r["id"], "lock"),
+                _color(r.get("scope_key", "-"), "lock"),
+                _color(r.get("agent_name", "-"), "claim"),
+            ])
+        _render_table(rows, indent="  ")
         return 0
     if "locks" in payload:
+        rows = []
         for lock in payload["locks"]:
             repo = Path(lock["repo_path"]).name if lock["repo_path"] else "-"
-            print(f"{_color(lock['id'], 'lock')}  {_color(lock['lock_kind'], 'lock')}  {_color(lock['scope_key'], 'lock')}  {_color(repo, 'meta')}  {_color(lock['agent_name'], 'claim')}  {_status_text(lock['status'])}")
+            rows.append([
+                _color(lock["id"], "lock"),
+                _color(lock["lock_kind"], "lock"),
+                _color(lock["scope_key"], "lock"),
+                _color(repo, "meta"),
+                _color(lock["agent_name"], "claim"),
+                _status_text(lock["status"]),
+            ])
+        _render_table(rows)
         return 0
     if "lock" in payload:
         lock = payload["lock"]
@@ -523,8 +673,13 @@ def _emit(payload: dict, as_json: bool) -> int:
             print(f"{_color('file', 'muted')}: {_path_text(path)}")
         return 0
     if "files" in payload:
+        rows = []
         for item in payload["files"]:
-            print(f"{_color(item['file_type'] or '-', 'meta')}  {_path_text(item['file_path'])}")
+            rows.append([
+                _color(item["file_type"] or "-", "meta"),
+                _path_text(item["file_path"]),
+            ])
+        _render_table(rows)
         return 0
     if "file" in payload:
         item = payload["file"]
@@ -755,47 +910,88 @@ def _render_artifacts(payload: dict) -> None:
 
 
 def _render_repo_list(repos: list[dict], view: str) -> None:
+    rows = []
     for repo in repos:
         marker = " [3p]" if repo.get("third_party") else ""
         if view == "long":
             scope = "/".join(
                 part for part in [repo.get("category"), repo.get("suite"), repo.get("subgroup")] if part
             ) or "-"
-            print(
-                f"{repo['name']}  {repo.get('kind') or '-'}  {repo['status']}{marker}  "
-                f"{_dirty_mark(repo.get('dirty'))}  git={repo.get('last_git_change_at') or '-'}  "
-                f"fs={repo.get('last_fs_change_at') or '-'}  scope={scope}  {repo['repo_path']}"
-            )
+            rows.append([
+                _color(repo["name"], "meta"),
+                _color(repo.get("kind") or "-", "meta"),
+                _status_text((repo["status"] or "-") + marker),
+                _status_text(_dirty_mark(repo.get("dirty"))),
+                _color("git=" + str(repo.get("last_git_change_at") or "-"), "muted"),
+                _color("fs=" + str(repo.get("last_fs_change_at") or "-"), "muted"),
+                _color("scope=" + scope, "muted"),
+                _path_text(repo["repo_path"]),
+            ])
         elif view == "one":
-            print(
-                f"{repo['name']}\tkind={repo.get('kind') or '-'}\tstatus={repo['status']}{marker}"
-                f"\tdirty={_dirty_mark(repo.get('dirty'))}\tgit={repo.get('last_git_change_at') or '-'}"
-                f"\tfs={repo.get('last_fs_change_at') or '-'}\tpath={repo.get('relative_path') or repo['repo_path']}"
-            )
+            rows.append([
+                _color(repo["name"], "meta"),
+                _color("kind=" + str(repo.get("kind") or "-"), "meta"),
+                _status_text("status=" + str(repo["status"]) + marker),
+                _status_text("dirty=" + _dirty_mark(repo.get("dirty"))),
+                _color("git=" + str(repo.get("last_git_change_at") or "-"), "muted"),
+                _color("fs=" + str(repo.get("last_fs_change_at") or "-"), "muted"),
+                _path_text("path=" + str(repo.get("relative_path") or repo["repo_path"])),
+            ])
         else:
-            print(f"{repo['name']}  {repo['repo_path']}  {repo['status']}{marker}")
+            rows.append([
+                _color(repo["name"], "meta"),
+                _path_text(repo["repo_path"]),
+                _status_text(str(repo["status"]) + marker),
+            ])
+    if view == "long":
+        caps = [32, None, 18, None, None, None, None, None]
+    elif view == "one":
+        caps = [32, None, 22, None, None, None, 88]
+    else:
+        caps = [32, 88, 18]
+    _render_table(rows, max_widths=caps)
 
 
 def _render_unit_list(units: list[dict], view: str) -> None:
+    rows = []
     for unit in units:
         repo_name = Path(unit["repo_path"]).name
         if view == "long":
-            print(
-                f"{repo_name}  {unit['rel_path']}  {unit.get('kind') or '-'}  "
-                f"{_dirty_mark(unit.get('dirty'))}  git={unit.get('last_git_change_at') or '-'}  "
-                f"fs={unit.get('last_fs_change_at') or '-'}  {unit['unit_path']}"
-            )
+            rows.append([
+                _color(repo_name, "meta"),
+                _path_text(unit["rel_path"]),
+                _color(unit.get("kind") or "-", "meta"),
+                _status_text(_dirty_mark(unit.get("dirty"))),
+                _color("git=" + str(unit.get("last_git_change_at") or "-"), "muted"),
+                _color("fs=" + str(unit.get("last_fs_change_at") or "-"), "muted"),
+                _path_text(unit["unit_path"]),
+            ])
         elif view == "one":
-            print(
-                f"{repo_name}\trel={unit['rel_path']}\tkind={unit.get('kind') or '-'}"
-                f"\tdirty={_dirty_mark(unit.get('dirty'))}\tgit={unit.get('last_git_change_at') or '-'}"
-                f"\tfs={unit.get('last_fs_change_at') or '-'}"
-            )
+            rows.append([
+                _color(repo_name, "meta"),
+                _path_text("rel=" + str(unit["rel_path"])),
+                _color("kind=" + str(unit.get("kind") or "-"), "meta"),
+                _status_text("dirty=" + _dirty_mark(unit.get("dirty"))),
+                _color("git=" + str(unit.get("last_git_change_at") or "-"), "muted"),
+                _color("fs=" + str(unit.get("last_fs_change_at") or "-"), "muted"),
+            ])
         else:
-            print(f"{repo_name}  {unit['rel_path']}  {unit.get('kind') or '-'}")
+            rows.append([
+                _color(repo_name, "meta"),
+                _path_text(unit["rel_path"]),
+                _color(unit.get("kind") or "-", "meta"),
+            ])
+    if view == "long":
+        caps = [32, 52, 18, None, None, None, None]
+    elif view == "one":
+        caps = [32, 52, 18, None, None, None]
+    else:
+        caps = [32, 52, 18]
+    _render_table(rows, max_widths=caps)
 
 
 def _render_workspace_list(workspaces: list[dict], view: str) -> None:
+    rows = []
     for workspace in workspaces:
         markers = []
         if workspace.get("is_current"):
@@ -804,17 +1000,30 @@ def _render_workspace_list(workspaces: list[dict], view: str) -> None:
             markers.append("coord")
         marker = " " + ",".join(markers) if markers else ""
         if view == "long":
-            print(
-                f"{workspace['name']}{marker}  host={workspace['host']}  repos={workspace.get('repo_count', 0)}  "
-                f"last_db={workspace.get('last_db_change_at') or '-'}  root={workspace['root']}  db={workspace['db']}"
-            )
+            rows.append([
+                _color(str(workspace["name"]) + marker, "meta"),
+                _color("host=" + str(workspace["host"]), "meta"),
+                _color("repos=" + str(workspace.get("repo_count", 0)), "claim"),
+                _color("last_db=" + str(workspace.get("last_db_change_at") or "-"), "muted"),
+                _path_text("root=" + str(workspace["root"])),
+                _path_text("db=" + str(workspace["db"])),
+            ])
         elif view == "one":
-            print(
-                f"{workspace['name']}\thost={workspace['host']}\trepos={workspace.get('repo_count', 0)}"
-                f"\tlast_db={workspace.get('last_db_change_at') or '-'}\troot={workspace['root']}{marker}"
-            )
+            rows.append([
+                _color(str(workspace["name"]) + marker, "meta"),
+                _color("host=" + str(workspace["host"]), "meta"),
+                _color("repos=" + str(workspace.get("repo_count", 0)), "claim"),
+                _color("last_db=" + str(workspace.get("last_db_change_at") or "-"), "muted"),
+                _path_text("root=" + str(workspace["root"])),
+            ])
         else:
-            print(f"{workspace['name']}  {workspace['host']}  {workspace['root']}  {workspace['db']}{marker}")
+            rows.append([
+                _color(str(workspace["name"]) + marker, "meta"),
+                _color(workspace["host"], "meta"),
+                _path_text(workspace["root"]),
+                _path_text(workspace["db"]),
+            ])
+    _render_table(rows, max_widths=[28, 24, None, None, None, None])
 
 
 def _payload_with_view(payload: dict, args) -> dict:
@@ -1248,7 +1457,7 @@ def _run_board(conn, *, once: bool, interval: float, poll: float = 0.3) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = FrogArgumentParser(
         prog="frog",
         description="RAGBAZ workspace coordination CLI",
         epilog=(
@@ -1770,10 +1979,13 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    global _COLOR_ENABLED, _PAGE_HUMAN_OUTPUT, _PAGER_ENABLED
+    _COLOR_ENABLED = "--no-color" not in argv
+    _PAGER_ENABLED = "--no-pager" not in argv
     parser = build_parser()
     args = parser.parse_args(argv)
-    global _COLOR_ENABLED, _PAGE_HUMAN_OUTPUT
     _COLOR_ENABLED = not getattr(args, "no_color", False)
+    _PAGER_ENABLED = not getattr(args, "no_pager", False)
     _PAGE_HUMAN_OUTPUT = _should_page_for_args(args)
     db_explicit = args.db is not None
     args._db_explicit = db_explicit
