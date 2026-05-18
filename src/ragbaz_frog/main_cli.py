@@ -667,10 +667,22 @@ def _c(s: str, code: str, color: bool) -> str:
     return f"\033[38;5;{code}m{s}\033[0m" if color else s
 
 
-def _board_frame(snap: dict, *, color: bool = True, changed: set | None = None) -> str:
+def _board_frame(snap: dict, *, color: bool = True, changed: set | None = None,
+                 width: int | None = None) -> str:
+    import shutil
     changed = changed or set()
+    if width is None:
+        width = shutil.get_terminal_size((100, 40)).columns
+    width = max(40, int(width))
     cols = snap["columns"]
     out = []
+
+    def _clip(s: str, budget: int) -> str:
+        budget = max(1, budget)
+        if len(s) <= budget:
+            return s
+        return s[: budget - 1] + "\u2026"
+
     title = _c("RAGBAZ", "208", color) + _c("/frog", "39", color) + "  task board"
     out.append(title)
     out.append("")
@@ -684,14 +696,22 @@ def _board_frame(snap: dict, *, color: bool = True, changed: set | None = None) 
             pc = _PRIO_COLOR.get((tk["priority"] or "p3").lower(), "245")
             badge = _c(tk["priority"] or "p?", pc, color)
             mark = ""
+            mark_plain = ""
             if tk["slug"] in snap.get("ready", []):
-                mark += _c(" ★", "220", color)        # ready
+                mark += _c(" ★", "220", color); mark_plain += " ★"
             if tk.get("assigned_agent"):
-                mark += _c(f" ◆{tk['assigned_agent']}", "39", color)
+                seg = f" ◆{tk['assigned_agent']}"
+                mark += _c(seg, "39", color); mark_plain += seg
             if tk.get("unmet_deps"):
-                mark += _c(f" ⛓{len(tk['unmet_deps'])}", "203", color)
-            flash = _c("▸ ", "220", color) if tk["slug"] in changed else "  "
-            title_txt = (tk["title"] or "")[:46]
+                deps = tk["unmet_deps"]
+                shown = ", ".join(deps[:3]) + ("\u2026" if len(deps) > 3 else "")
+                seg = f" \u26d3 {len(deps)} \u2190 {shown}"
+                mark += _c(seg, "203", color); mark_plain += seg
+            is_changed = tk["slug"] in changed
+            flash = _c("▸ ", "220", color) if is_changed else "  "
+            prefix_plain = f"{'▸ ' if is_changed else '  '}{tk['priority'] or 'p?'} {tk['slug']}  "
+            budget = width - len(prefix_plain) - len(mark_plain)
+            title_txt = _clip(tk["title"] or "", budget)
             out.append(f"{flash}{badge} {tk['slug']}  {title_txt}{mark}")
         out.append("")
     out.append(_c("recent", "245", color))
@@ -700,11 +720,15 @@ def _board_frame(snap: dict, *, color: bool = True, changed: set | None = None) 
         kc = "220" if k == "task.unblocked" else (
             "78" if k == "task.finished" else (
             "39" if k == "task.claimed" else "245"))
-        out.append(f"  {ev['created_at'][11:19]}  {_c(k, kc, color)}  {ev['summary']}")
+        ts = ev["created_at"][11:19]
+        rec_prefix_plain = f"  {ts}  {k}  "
+        summary = _clip(ev["summary"] or "", width - len(rec_prefix_plain))
+        out.append(f"  {ts}  {_c(k, kc, color)}  {summary}")
     return "\n".join(out)
 
 
 def _run_board(conn, *, once: bool, interval: float) -> int:
+    import shutil
     import time as _t
     color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
     prev_col = {}
@@ -716,7 +740,8 @@ def _run_board(conn, *, once: bool, interval: float) -> int:
                        for tk in snap["columns"].get(key, [])}
             changed = {s for s, c in cur_col.items() if prev_col.get(s) != c and s in prev_col}
             prev_col = cur_col
-            frame = _board_frame(snap, color=color, changed=changed)
+            width = shutil.get_terminal_size((100, 40)).columns
+            frame = _board_frame(snap, color=color, changed=changed, width=width)
             if once:
                 print(frame)
                 return 0

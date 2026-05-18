@@ -69,5 +69,32 @@ class Board(unittest.TestCase):
         self.assertIn("\033[38;5;", frame)
 
 
+    def test_width_aware_no_early_crop_and_clip(self):
+        mk(self.conn, "wtask")
+        snap = store.board_snapshot(self.conn)
+        # long title
+        self.conn.execute("UPDATE tasks SET title=? WHERE slug='wtask'",
+                          ("A" * 90,))
+        self.conn.commit()
+        snap = store.board_snapshot(self.conn)
+        wide = main_cli._board_frame(snap, color=False, width=140)
+        narrow = main_cli._board_frame(snap, color=False, width=60)
+        self.assertIn("A" * 80, wide, "wide terminal must not crop")
+        self.assertNotIn("A" * 80, narrow, "narrow must clip")
+        self.assertIn("\u2026", narrow, "clip uses an ellipsis")
+        for line in narrow.splitlines():
+            self.assertLessEqual(len(line), 60, "no line exceeds width")
+
+    def test_blocked_task_shows_blocking_dep_slugs(self):
+        mk(self.conn, "root1"); mk(self.conn, "leaf")
+        store.task_add_dependency(self.conn, "leaf", "root1", "depends_on")
+        frame = main_cli._board_frame(store.board_snapshot(self.conn),
+                                      color=False, width=120)
+        # the blocked task's line names the actual blocker, not just a count
+        bl = [l for l in frame.splitlines() if l.strip().endswith("root1")
+              or "\u2190 root1" in l]
+        self.assertTrue(bl, f"expected a blocked line naming root1; got:\n{frame}")
+        self.assertIn("\u26d3", frame)  # chain glyph present
+
 if __name__ == "__main__":
     unittest.main()
