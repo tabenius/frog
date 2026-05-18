@@ -1565,9 +1565,14 @@ def build_parser() -> argparse.ArgumentParser:
     agent_instructions.add_argument("path", nargs="?", help="Repo directory or AGENTS.md path; defaults to cwd")
     agent_instructions.add_argument("--force", action="store_true", help="Overwrite an existing AGENTS.md")
 
-    sub.add_parser(
+    snap_p = sub.add_parser(
         "snapshot",
-        help="Rotate /data/backups/src.last to src.prev and rsync /data/src to src.last",
+        help="Back up AGENTS.db (consistent copy) to a backup location, "
+             "rotating <name>.last -> <name>.prev",
+    )
+    snap_p.add_argument(
+        "--dest", metavar="DIR",
+        help="Backup directory (default: /data/backups)",
     )
     doctor = sub.add_parser("doctor", help="Self-diagnostic over locks/tasks/events/DB")
     doctor.add_argument(
@@ -2274,7 +2279,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.board_snapshot(conn), True)
             return _run_board(conn, once=args.once, interval=args.interval, poll=args.poll)
         if args.command == "snapshot":
-            return _emit(store.snapshot_workspace(conn), args.json)
+            return _emit(store.snapshot_workspace(
+                conn, dest=args.dest), args.json)
         if args.command == "ps":
             return _emit(store.ps_summary(conn, repo_ref=args.repo_ref), args.json)
         if args.command == "status":

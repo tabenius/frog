@@ -468,59 +468,58 @@ def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = Fal
     return {"ok": True, "message": f"wrote {target}", "agents_path": str(target)}
 
 
-def snapshot_workspace(conn) -> dict:
-    source_root = Path("/data/src")
-    backup_root = Path("/data/backups")
-    src_last = backup_root / "src.last"
-    src_prev = backup_root / "src.prev"
+def snapshot_workspace(conn, *, dest: str | None = None) -> dict:
+    """Back up the AGENTS.db file itself (not the source tree).
 
+    Uses SQLite's online backup API so the copy is transactionally
+    consistent even while agents are writing under WAL -- a plain `cp`
+    can capture a torn WAL/-shm pair. Keeps one generation: the prior
+    `<name>.last` is rotated to `<name>.prev` before the new snapshot."""
+    row = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name = 'main'"
+    ).fetchone()
+    db_file = row[0] if row else None
+    if not db_file:
+        return {"ok": False, "error": "database is not file-backed "
+                "(in-memory connection); nothing to snapshot"}
+    db_path = Path(db_file)
+    backup_root = Path(dest) if dest else Path("/data/backups")
     backup_root.mkdir(parents=True, exist_ok=True)
+    last = backup_root / f"{db_path.name}.last"
+    prev = backup_root / f"{db_path.name}.prev"
 
-    if src_prev.exists():
-        if src_prev.is_dir():
-            shutil.rmtree(src_prev)
-        else:
-            src_prev.unlink()
+    if last.exists():
+        if prev.exists():
+            prev.unlink()
+        last.rename(prev)
 
-    if src_last.exists():
-        src_last.rename(src_prev)
+    dst = sqlite3.connect(str(last))
+    try:
+        conn.backup(dst)
+    finally:
+        dst.close()
 
-    src_last.mkdir(parents=True, exist_ok=True)
-
-    proc = subprocess.run(
-        ["rsync", "-a", f"{source_root}/", f"{src_last}/"],
-        text=True,
-        capture_output=True,
-    )
-    if proc.returncode != 0:
-        return {
-            "ok": False,
-            "error": "rsync snapshot failed",
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-        }
-
+    size = last.stat().st_size
     record_event(
         conn,
         kind="workspace.snapshot",
-        summary="snapshotted /data/src to /data/backups/src.last",
+        summary=f"backed up {db_path.name} to {last}",
         payload={
-            "source_root": str(source_root),
+            "db_path": str(db_path),
             "backup_root": str(backup_root),
-            "src_last": str(src_last),
-            "src_prev": str(src_prev),
+            "last": str(last),
+            "prev": str(prev),
+            "bytes": size,
         },
     )
     conn.commit()
     return {
         "ok": True,
-        "message": f"snapshotted {source_root} to {src_last}",
-        "source_root": str(source_root),
-        "src_last": str(src_last),
-        "src_prev": str(src_prev),
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
+        "message": f"backed up {db_path} to {last} ({size} bytes)",
+        "db_path": str(db_path),
+        "last": str(last),
+        "prev": str(prev),
+        "bytes": size,
     }
 
 
