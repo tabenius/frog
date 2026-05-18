@@ -66,7 +66,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       newly-unblocked dependents.
 - [x] II-3 Concurrency stress test: N processes hammering
       lock_acquire / task_claim -> no double-grant, no deadlock.
-- [ ] II-4 Remote seam: injectable dispatch so sync/workspace paths are
+- [x] II-4 Remote seam: injectable dispatch so sync/workspace paths are
       testable without SSH; tests.
 - [ ] II-5 `frog db gc [--older-than D] [--keep N]`: prune event_log /
       event_mirror / target_runs, WAL checkpoint + VACUUM.

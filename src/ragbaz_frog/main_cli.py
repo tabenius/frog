@@ -591,6 +591,15 @@ def _forwardable_argv(argv: list[str]) -> list[str]:
     return cleaned
 
 
+def _remote_exec(ssh_target: str, remote_cmd: str) -> tuple[int, str, str]:
+    """SSH boundary, isolated so tests can inject a fake transport.
+    Returns (returncode, stdout, stderr)."""
+    proc = subprocess.run(
+        ["ssh", ssh_target, remote_cmd], text=True, capture_output=True
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
 def _dispatch_workspace(workspace: dict, argv: list[str]) -> dict:
     transport = workspace["host"].get("transport", "local")
     if transport == "local":
@@ -600,30 +609,26 @@ def _dispatch_workspace(workspace: dict, argv: list[str]) -> dict:
         forwarded.extend(["--root", workspace["root"]])
     remote_argv = [workspace["frog_bin"], "--db", workspace["db"], "--json", *forwarded]
     remote_cmd = shlex.join(remote_argv)
-    proc = subprocess.run(
-        ["ssh", workspace["host"]["ssh_target"], remote_cmd],
-        text=True,
-        capture_output=True,
-    )
-    if proc.returncode != 0:
+    rc, out, err = _remote_exec(workspace["host"]["ssh_target"], remote_cmd)
+    if rc != 0:
         return {
             "ok": False,
             "error": f"remote frog failed on workspace {workspace['name']}",
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "returncode": rc,
+            "stdout": out,
+            "stderr": err,
         }
     try:
-        payload = json.loads(proc.stdout or "{}")
+        payload = json.loads(out or "{}")
     except json.JSONDecodeError:
         return {
             "ok": False,
             "error": f"remote frog returned non-JSON output for workspace {workspace['name']}",
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stdout": out,
+            "stderr": err,
         }
-    if proc.stderr.strip():
-        payload.setdefault("remote_stderr", proc.stderr)
+    if err.strip():
+        payload.setdefault("remote_stderr", err)
     return payload
 
 
