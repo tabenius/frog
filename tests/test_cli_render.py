@@ -1,4 +1,5 @@
 import io
+import re
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -10,6 +11,8 @@ if str(SRC) not in sys.path:
 
 from ragbaz_frog import main_cli
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 
 def render(payload):
     buf = io.StringIO()
@@ -18,7 +21,15 @@ def render(payload):
     return rc, buf.getvalue()
 
 
+def plain(text):
+    return ANSI_RE.sub("", text)
+
+
 class CliRender(unittest.TestCase):
+    def tearDown(self):
+        main_cli._COLOR_ENABLED = True
+        main_cli._PAGE_HUMAN_OUTPUT = False
+
     def test_repo_info_is_labeled(self):
         rc, out = render({
             "ok": True,
@@ -33,10 +44,12 @@ class CliRender(unittest.TestCase):
             "counts": {"tasks": 2, "active_locks": 1, "targets": 3, "artifacts": 4},
         })
         self.assertEqual(rc, 0)
-        self.assertIn("Repo: frog", out)
-        self.assertIn("Path", out)
-        self.assertIn("Active locks", out)
-        self.assertNotIn("active_locks=", out)
+        self.assertIn("\x1b[", out)
+        text = plain(out)
+        self.assertIn("Repo: frog", text)
+        self.assertIn("Path", text)
+        self.assertIn("Active locks", text)
+        self.assertNotIn("active_locks=", text)
 
     def test_status_summary_is_scoped_and_grouped(self):
         rc, out = render({
@@ -49,9 +62,11 @@ class CliRender(unittest.TestCase):
             ],
         })
         self.assertEqual(rc, 0)
-        self.assertIn("Status: frog", out)
-        self.assertIn("Workflow", out)
-        self.assertIn("idea", out)
+        self.assertIn("\x1b[", out)
+        text = plain(out)
+        self.assertIn("Status: frog", text)
+        self.assertIn("Workflow", text)
+        self.assertIn("idea", text)
 
     def test_ps_summary_has_sections(self):
         rc, out = render({
@@ -73,10 +88,12 @@ class CliRender(unittest.TestCase):
             }],
         })
         self.assertEqual(rc, 0)
-        self.assertIn("Activity: frog", out)
-        self.assertIn("Tasks", out)
-        self.assertIn("Locks", out)
-        self.assertIn("Recent events", out)
+        self.assertIn("\x1b[34m", out, "claim/in-progress output should be blue")
+        text = plain(out)
+        self.assertIn("Activity: frog", text)
+        self.assertIn("Tasks", text)
+        self.assertIn("Locks", text)
+        self.assertIn("Recent events", text)
 
     def test_artifacts_group_by_target_and_show_relative_paths(self):
         rc, out = render({
@@ -93,10 +110,40 @@ class CliRender(unittest.TestCase):
             "source_latest_mtime": 1779100000.0,
         })
         self.assertEqual(rc, 0)
-        self.assertIn("Artifacts: frog", out)
-        self.assertIn("build:dist", out)
-        self.assertIn("dist [missing stale]", out)
-        self.assertNotIn("/data/src/frog/dist", out)
+        self.assertIn("\x1b[31m", out, "missing artifacts should be red")
+        text = plain(out)
+        self.assertIn("Artifacts: frog", text)
+        self.assertIn("build:dist", text)
+        self.assertIn("dist [missing stale]", text)
+        self.assertNotIn("/data/src/frog/dist", text)
+
+    def test_json_payloads_stay_plain(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main_cli._emit({"ok": True, "workflow_status": "done"}, True)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("\x1b[", buf.getvalue())
+
+    def test_no_color_disables_ansi(self):
+        main_cli._COLOR_ENABLED = False
+        rc, out = render({
+            "ok": True,
+            "task": {
+                "slug": "done-task",
+                "title": "Done task",
+                "repo_path": "/data/src/frog",
+                "priority": "p1",
+                "workflow_status": "done",
+                "git_status": "done",
+            },
+        })
+        self.assertEqual(rc, 0)
+        self.assertNotIn("\x1b[", out)
+        self.assertIn("workflow_status: done", out)
+
+    def test_pager_threshold_uses_terminal_height(self):
+        self.assertFalse(main_cli._should_page_text("one\ntwo\n", rows=10))
+        self.assertTrue(main_cli._should_page_text("\n".join(str(i) for i in range(10)), rows=10))
 
 
 if __name__ == "__main__":

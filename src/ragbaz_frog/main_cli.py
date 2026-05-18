@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
+import shutil
 import shlex
 import subprocess
 import sys
@@ -70,6 +73,115 @@ REPO_ACTION_HELP = {
     "artifacts": "List known artifact paths for a repo.",
     "artifact-stale": "List artifact paths that appear stale or missing.",
 }
+
+
+_ANSI = {
+    "reset": "\033[0m",
+    "muted": "\033[90m",
+    "meta": "\033[36m",
+    "path": "\033[36m",
+    "success": "\033[32m",
+    "claim": "\033[34m",
+    "lock": "\033[33m",
+    "warn": "\033[33m",
+    "error": "\033[31m",
+    "p0": "\033[31m",
+    "p1": "\033[33m",
+    "p2": "\033[36m",
+    "p3": "\033[90m",
+}
+
+_COLOR_ENABLED = True
+_PAGE_HUMAN_OUTPUT = False
+
+
+def _use_color() -> bool:
+    return _COLOR_ENABLED
+
+
+def _color(value: object, role: str) -> str:
+    text = str(value)
+    code = _ANSI.get(role)
+    if not code or not _use_color():
+        return text
+    return f"{code}{text}{_ANSI['reset']}"
+
+
+def _pager_command() -> list[str] | None:
+    configured = os.environ.get("PAGER")
+    if configured:
+        return shlex.split(configured)
+    less = shutil.which("less")
+    if less:
+        return [less, "-R"]
+    more = shutil.which("more")
+    if more:
+        return [more]
+    return None
+
+
+def _should_page_text(text: str, *, rows: int | None = None) -> bool:
+    rows = rows or shutil.get_terminal_size((80, 24)).lines
+    return len(text.splitlines()) >= max(1, rows - 1)
+
+
+def _page_or_print(text: str) -> None:
+    if not text:
+        return
+    if not (sys.stdout.isatty() and _should_page_text(text)):
+        print(text, end="")
+        return
+    cmd = _pager_command()
+    if not cmd:
+        print(text, end="")
+        return
+    try:
+        subprocess.run(cmd, input=text, text=True, check=False)
+    except OSError:
+        print(text, end="")
+
+
+def _should_page_for_args(args) -> bool:
+    if getattr(args, "json", False) or getattr(args, "no_pager", False):
+        return False
+    if args.command == "completion":
+        return False
+    if args.command == "board":
+        return False
+    if args.command == "mcp" and getattr(args, "mcp_command", None) == "serve":
+        return False
+    if args.command == "log" and getattr(args, "follow", False):
+        return False
+    if args.command == "gh" and getattr(args, "gh_command", None) == "action":
+        return False
+    return True
+
+
+def _status_role(value: object) -> str:
+    status = str(value or "").lower()
+    if status in {"done", "finished", "released", "passed", "active", "clean", "ok"}:
+        return "success"
+    if status in {"in_progress", "claimed", "assigned", "running"}:
+        return "claim"
+    if status in {"blocked", "failed", "missing", "error"}:
+        return "error"
+    if status in {"stale", "warn", "warning"}:
+        return "warn"
+    return "meta"
+
+
+def _status_text(value: object) -> str:
+    return _color(value, _status_role(value))
+
+
+def _priority_text(value: object) -> str:
+    priority = str(value or "p3").lower()
+    role = priority if priority in {"p0", "p1", "p2", "p3"} else "muted"
+    return _color(priority, role)
+
+
+def _path_text(value: object) -> str:
+    return _color(value, "path")
 
 
 
@@ -177,14 +289,25 @@ def _emit(payload: dict, as_json: bool) -> int:
         json.dump(payload, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0 if payload.get("ok", True) else 1
+    global _PAGE_HUMAN_OUTPUT
+    if _PAGE_HUMAN_OUTPUT:
+        _PAGE_HUMAN_OUTPUT = False
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = _emit(payload, False)
+        finally:
+            _PAGE_HUMAN_OUTPUT = True
+        _page_or_print(buf.getvalue())
+        return rc
     if not payload.get("ok", True):
-        print(f"error: {payload.get('error', 'unknown error')}", file=sys.stderr)
+        print(f"{_color('error', 'error')}: {payload.get('error', 'unknown error')}", file=sys.stderr)
         return 1
     if "active_tasks" in payload and "active_locks" in payload:
         _render_ps_summary(payload)
         return 0
     if "message" in payload:
-        print(payload["message"])
+        print(_color(payload["message"], "success"))
         return 0
     if "tools" in payload:
         for tool in payload["tools"]:
@@ -196,15 +319,15 @@ def _emit(payload: dict, as_json: bool) -> int:
     if "hosts" in payload:
         for host in payload["hosts"]:
             detail = host.get("ssh_target") or host.get("transport", "unknown")
-            print(f"{host['name']}  {detail}")
+            print(f"{_color(host['name'], 'meta')}  {_status_text(detail)}")
         return 0
     if "coordinator_workspace" in payload and "coordinator" in payload and "config_path" not in payload:
         coord = payload.get("coordinator") or {}
-        print(f"coordinator_workspace: {payload.get('coordinator_workspace') or '-'}")
+        print(f"{_color('coordinator_workspace', 'muted')}: {_color(payload.get('coordinator_workspace') or '-', 'claim')}")
         if coord:
-            print(f"host: {coord.get('host_name') or coord.get('host') or '-'}")
-            print(f"root: {coord.get('root') or '-'}")
-            print(f"db: {coord.get('db') or '-'}")
+            print(f"{_color('host', 'muted')}: {_color(coord.get('host_name') or coord.get('host') or '-', 'meta')}")
+            print(f"{_color('root', 'muted')}: {_path_text(coord.get('root') or '-')}")
+            print(f"{_color('db', 'muted')}: {_path_text(coord.get('db') or '-')}")
         return 0
     if "workspaces" in payload:
         _render_workspace_list(payload["workspaces"], payload.get("_view", "default"))
@@ -220,16 +343,24 @@ def _emit(payload: dict, as_json: bool) -> int:
         return 0
     if "targets" in payload:
         for target in payload["targets"]:
-            prefix = "*" if target.get("aggregate") else "-"
+            prefix = _color("*", "success") if target.get("aggregate") else _color("-", "muted")
             command = target.get("command") or "(aggregate)"
-            print(f"{prefix} {target['target_kind']}  {target['name']}  {Path(target['workdir']).name}  {command}")
+            print(
+                f"{prefix} {_color(target['target_kind'], 'meta')}  "
+                f"{_color(target['name'], 'claim')}  {_path_text(Path(target['workdir']).name)}  "
+                f"{_color(command, 'muted')}"
+            )
         return 0
     if "artifacts" in payload and "repo" in payload:
         _render_artifacts(payload)
         return 0
     if "results" in payload:
         for result in payload["results"]:
-            print(f"{result['target_kind']} {result['name']}  rc={result['returncode']}")
+            role = "success" if result["returncode"] == 0 else "error"
+            print(
+                f"{_color(result['target_kind'], 'meta')} {_color(result['name'], 'claim')}  "
+                f"{_color('rc=' + str(result['returncode']), role)}"
+            )
             if result["stdout"].strip():
                 print(result["stdout"].rstrip())
             if result["stderr"].strip():
@@ -248,183 +379,184 @@ def _emit(payload: dict, as_json: bool) -> int:
                 print("    " + ln)
         return 0
     if "repo_key" in payload and "aliases" in payload and "local_path" in payload and "workspaces" in payload:
-        print(f"repo_key: {payload['repo_key']}")
-        print(f"this box ({payload['box']}): {payload.get('local_path') or '-'}")
+        print(f"{_color('repo_key', 'muted')}: {_color(payload['repo_key'], 'meta')}")
+        print(f"{_color('this box', 'muted')} ({_color(payload['box'], 'meta')}): {_path_text(payload.get('local_path') or '-')}")
         for item in payload["workspaces"]:
             result = item.get("result", {})
             if item["workspace"] == "local":
                 continue
             status = "ok" if result.get("ok") else "missing"
-            print(f"workspace {item['workspace']} ({status}): {result.get('local_path') or '-'}")
+            print(f"workspace {_color(item['workspace'], 'meta')} ({_status_text(status)}): {_path_text(result.get('local_path') or '-')}")
         for a in payload["aliases"]:
-            print(f"  {a['box']}  {a['repo_path']}")
+            print(f"  {_color(a['box'], 'meta')}  {_path_text(a['repo_path'])}")
         return 0 if payload.get("ok", True) else 1
     if "repo_key" in payload and "aliases" in payload and "local_path" in payload:
-        print(f"repo_key: {payload['repo_key']}")
-        print(f"this box ({payload['box']}): {payload.get('local_path') or '-'}")
+        print(f"{_color('repo_key', 'muted')}: {_color(payload['repo_key'], 'meta')}")
+        print(f"{_color('this box', 'muted')} ({_color(payload['box'], 'meta')}): {_path_text(payload.get('local_path') or '-')}")
         for a in payload["aliases"]:
-            print(f"  {a['box']}  {a['repo_path']}")
+            print(f"  {_color(a['box'], 'meta')}  {_path_text(a['repo_path'])}")
         return 0 if payload.get("ok", True) else 1
     if "repo_key" in payload and "repo_path" in payload and "aliases" in payload:
-        print(f"{payload.get('repo','?')}  {payload['repo_path']}")
-        print(f"repo_key: {payload['repo_key']}")
+        print(f"{_color(payload.get('repo','?'), 'meta')}  {_path_text(payload['repo_path'])}")
+        print(f"{_color('repo_key', 'muted')}: {_color(payload['repo_key'], 'meta')}")
         for a in payload["aliases"]:
-            print(f"  {a['box']}  {a['repo_path']}")
+            print(f"  {_color(a['box'], 'meta')}  {_path_text(a['repo_path'])}")
         return 0
     if "repos" in payload and payload.get("message", "").startswith("keyed "):
-        print(payload["message"])
+        print(_color(payload["message"], "success"))
         for r in payload["repos"]:
-            print(f"  {r['repo_key']}  {r['repo_path']}")
+            print(f"  {_color(r['repo_key'], 'meta')}  {_path_text(r['repo_path'])}")
         return 0
     if "outbox" in payload and "source" in payload:
-        print(f"{payload['source']} outbox: {len(payload['outbox'])} task(s)")
+        print(f"{_color(payload['source'], 'meta')} outbox: {_color(len(payload['outbox']), 'claim')} task(s)")
         for r in payload["outbox"]:
-            print(f"  {r['external_id']}  {r['workflow_status']}  {r['slug']}")
+            print(f"  {_color(r['external_id'], 'meta')}  {_status_text(r['workflow_status'])}  {_color(r['slug'], 'claim')}")
         return 0
     if "deps" in payload:
         for d in payload["deps"]:
-            print(f"{d['dependent_repo_path']}  ->  {d['dependency_repo_path']}"
-                  + (f"  ({d['note']})" if d.get("note") else ""))
+            print(f"{_path_text(d['dependent_repo_path'])}  {_color('->', 'muted')}  {_path_text(d['dependency_repo_path'])}"
+                  + (f"  ({_color(d['note'], 'muted')})" if d.get("note") else ""))
         return 0
     if "affected" in payload and "changed_files" in payload:
         repo = payload.get("repo", {})
         rn = repo.get("name", "?") if isinstance(repo, dict) else "?"
-        print(f"{rn}: {len(payload['changed_files'])} changed file(s), "
-              f"{len(payload['affected'])} affected target(s)"
+        print(f"{_color(rn, 'meta')}: {_color(len(payload['changed_files']), 'warn')} changed file(s), "
+              f"{_color(len(payload['affected']), 'claim')} affected target(s)"
               + (f" since {payload['since']}" if payload.get("since") else ""))
         for tgt in payload["affected"]:
-            print(f"  {tgt['target_kind']}  {tgt['name']}  {tgt['workdir']}")
+            print(f"  {_color(tgt['target_kind'], 'meta')}  {_color(tgt['name'], 'claim')}  {_path_text(tgt['workdir'])}")
         for ds in payload.get("downstream", []):
             dn = ds["repo"]["name"] if isinstance(ds.get("repo"), dict) else "?"
-            print(f"  downstream {dn}: {len(ds['targets'])} target(s)")
+            print(f"  {_color('downstream', 'muted')} {_color(dn, 'meta')}: {_color(len(ds['targets']), 'claim')} target(s)")
         return 0
     if "diff" in payload:
         if payload.get("diff"):
             print(payload["diff"].rstrip())
         if payload.get("tasks"):
-            print("\nTasks:")
+            print("\n" + _color("Tasks", "muted") + ":")
             for task in payload["tasks"]:
-                print(f"{task['slug']}  {task['workflow_status']}  {task['git_status']}")
+                print(f"{_color(task['slug'], 'claim')}  {_status_text(task['workflow_status'])}  {_status_text(task['git_status'])}")
         if payload.get("impacted_targets"):
-            print("\nImpacted targets:")
+            print("\n" + _color("Impacted targets", "muted") + ":")
             for item in payload["impacted_targets"]:
-                print(f"{item['target_kind']}  {item['name']}  {item['workdir']}")
+                print(f"{_color(item['target_kind'], 'meta')}  {_color(item['name'], 'claim')}  {_path_text(item['workdir'])}")
         return 0
     if "advice" in payload:
-        print(f"{payload['repo']['name']}  {payload['repo']['repo_path']}")
+        print(f"{_color(payload['repo']['name'], 'meta')}  {_path_text(payload['repo']['repo_path'])}")
         if payload["advice"]:
             for item in payload["advice"]:
-                print(f"- {item}")
+                print(f"{_color('-', 'warn')} {item}")
         else:
-            print("no obvious issues")
+            print(_color("no obvious issues", "success"))
         return 0
     if "unblocked" in payload and "task" in payload and "verification" in payload:
         tk = payload["task"]
-        print(f"finished {tk['slug']}  ({tk['workflow_status']})")
+        print(f"{_color('finished', 'success')} {_color(tk['slug'], 'claim')}  ({_status_text(tk['workflow_status'])})")
         v = payload.get("verification")
         if v and v.get("ran"):
-            print(f"  verify: {'FAILED' if v['failed'] else 'passed'}")
+            result = "FAILED" if v["failed"] else "passed"
+            print(f"  {_color('verify', 'muted')}: {_status_text(result)}")
         if payload.get("released_locks"):
-            print(f"  released locks: {payload['released_locks']}")
+            print(f"  {_color('released locks', 'muted')}: {_color(payload['released_locks'], 'success')}")
         if payload["unblocked"]:
-            print("  unblocked: " + ", ".join(payload["unblocked"]))
+            print(f"  {_color('unblocked', 'muted')}: " + ", ".join(_color(t, "claim") for t in payload["unblocked"]))
         else:
-            print("  unblocked: (none)")
+            print(f"  {_color('unblocked', 'muted')}: {_color('(none)', 'muted')}")
         return 0
     if "eligible" in payload and "considered" in payload:
-        print(f"agent {payload['agent']}: {payload['eligible']} eligible "
-              f"of {payload['considered']} considered")
+        print(f"{_color('agent', 'muted')} {_color(payload['agent'], 'claim')}: {_color(payload['eligible'], 'success')} eligible "
+              f"of {_color(payload['considered'], 'meta')} considered")
         for tk in payload["tasks"]:
-            print(f"  -> {tk['slug']}  {tk['priority']}  {tk['title']}")
+            print(f"  {_color('->', 'claim')} {_color(tk['slug'], 'claim')}  {_priority_text(tk['priority'])}  {tk['title']}")
         if not payload["tasks"]:
-            print("  (nothing unblocked)")
+            print("  " + _color("(nothing unblocked)", "muted"))
         for s in payload.get("skipped", []):
-            print(f"  skip {s['slug']}: {s['reason']}")
+            print(f"  {_color('skip', 'warn')} {_color(s['slug'], 'claim')}: {s['reason']}")
         return 0
     if "tasks" in payload:
         for task in payload["tasks"]:
             repo = Path(task["repo_path"]).name if task["repo_path"] else "-"
-            print(f"{task['slug']}  {task['priority']}  {task['workflow_status']}  {task['git_status']}  {repo}")
+            print(f"{_color(task['slug'], 'claim')}  {_priority_text(task['priority'])}  {_status_text(task['workflow_status'])}  {_status_text(task['git_status'])}  {_color(repo, 'meta')}")
         return 0
     if "task" in payload:
         task = payload["task"]
-        print(f"{task['slug']}  {task['title']}")
-        print(f"repo: {task['repo_path'] or '-'}")
-        print(f"priority: {task['priority']}")
-        print(f"workflow_status: {task['workflow_status']}")
-        print(f"git_status: {task['git_status']}")
+        print(f"{_color(task['slug'], 'claim')}  {task['title']}")
+        print(f"{_color('repo', 'muted')}: {_path_text(task['repo_path'] or '-')}")
+        print(f"{_color('priority', 'muted')}: {_priority_text(task['priority'])}")
+        print(f"{_color('workflow_status', 'muted')}: {_status_text(task['workflow_status'])}")
+        print(f"{_color('git_status', 'muted')}: {_status_text(task['git_status'])}")
         return 0
     if "findings" in payload and "summary" in payload and "warn" in payload["summary"]:
         s = payload["summary"]
         if not payload["findings"]:
-            print("doctor: all clear")
+            print(f"{_color('doctor', 'muted')}: {_color('all clear', 'success')}")
             return 0
-        print(f"doctor: {s['warn']} warn / {s['info']} info")
+        print(f"{_color('doctor', 'muted')}: {_color(s['warn'], 'warn')} warn / {_color(s['info'], 'meta')} info")
         for f in payload["findings"]:
-            print(f"  [{f['level']}] {f['code']}: {f['detail']}")
+            print(f"  [{_status_text(f['level'])}] {_color(f['code'], 'warn')}: {f['detail']}")
         return 0 if s["warn"] == 0 else 1
     if "findings" in payload and "agent" in payload:
         repo = payload.get("repo", {})
         rname = repo.get("name", "?") if isinstance(repo, dict) else "?"
         if not payload["findings"]:
-            print(f"{rname}: clean ({payload.get('dirty_count', 0)} dirty, all covered)")
+            print(f"{_color(rname, 'meta')}: {_color('clean', 'success')} ({payload.get('dirty_count', 0)} dirty, all covered)")
             return 0
-        print(f"{rname}: {len(payload['findings'])} lock-audit finding(s)")
+        print(f"{_color(rname, 'meta')}: {_color(len(payload['findings']), 'warn')} lock-audit finding(s)")
         for f in payload["findings"]:
             who = ("held by " + ", ".join(f["holders"])) if f.get("holders") else "no active lock"
-            print(f"  {f['kind']:9} {f['file']}  ({who})")
+            print(f"  {_color(f['kind'], 'warn'):18} {_path_text(f['file'])}  ({_color(who, 'lock')})")
         return 1
     if "reaped" in payload:
-        print(payload.get("message", f"reaped {len(payload['reaped'])}"))
+        print(_color(payload.get("message", f"reaped {len(payload['reaped'])}"), "success"))
         for r in payload["reaped"]:
-            print(f"  {r['id']}  {r.get('scope_key','-')}  {r.get('agent_name','-')}")
+            print(f"  {_color(r['id'], 'lock')}  {_color(r.get('scope_key','-'), 'lock')}  {_color(r.get('agent_name','-'), 'claim')}")
         return 0
     if "locks" in payload:
         for lock in payload["locks"]:
             repo = Path(lock["repo_path"]).name if lock["repo_path"] else "-"
-            print(f"{lock['id']}  {lock['lock_kind']}  {lock['scope_key']}  {repo}  {lock['agent_name']}  {lock['status']}")
+            print(f"{_color(lock['id'], 'lock')}  {_color(lock['lock_kind'], 'lock')}  {_color(lock['scope_key'], 'lock')}  {_color(repo, 'meta')}  {_color(lock['agent_name'], 'claim')}  {_status_text(lock['status'])}")
         return 0
     if "lock" in payload:
         lock = payload["lock"]
-        print(f"lock {lock['id']}  {lock['lock_kind']}  {lock['scope_key']}")
-        print(f"repo: {lock['repo_path'] or '-'}")
-        print(f"agent: {lock['agent_name']}")
-        print(f"status: {lock['status']}")
-        print(f"started_at: {lock['started_at']}")
-        print(f"eta_finish_at: {lock['eta_finish_at'] or '-'}")
+        print(f"{_color('lock', 'lock')} {_color(lock['id'], 'lock')}  {_color(lock['lock_kind'], 'lock')}  {_color(lock['scope_key'], 'lock')}")
+        print(f"{_color('repo', 'muted')}: {_path_text(lock['repo_path'] or '-')}")
+        print(f"{_color('agent', 'muted')}: {_color(lock['agent_name'], 'claim')}")
+        print(f"{_color('status', 'muted')}: {_status_text(lock['status'])}")
+        print(f"{_color('started_at', 'muted')}: {_color(lock['started_at'], 'muted')}")
+        print(f"{_color('eta_finish_at', 'muted')}: {_color(lock['eta_finish_at'] or '-', 'muted')}")
         for path in lock["file_paths"]:
-            print(f"file: {path}")
+            print(f"{_color('file', 'muted')}: {_path_text(path)}")
         return 0
     if "files" in payload:
         for item in payload["files"]:
-            print(f"{item['file_type'] or '-'}  {item['file_path']}")
+            print(f"{_color(item['file_type'] or '-', 'meta')}  {_path_text(item['file_path'])}")
         return 0
     if "file" in payload:
         item = payload["file"]
-        print(item["file_path"])
-        print(f"repo: {item['repo_path'] or '-'}")
-        print(f"type: {item['file_type'] or '-'}")
-        print(f"source_of_truth: {item['source_of_truth'] or '-'}")
+        print(_path_text(item["file_path"]))
+        print(f"{_color('repo', 'muted')}: {_path_text(item['repo_path'] or '-')}")
+        print(f"{_color('type', 'muted')}: {_color(item['file_type'] or '-', 'meta')}")
+        print(f"{_color('source_of_truth', 'muted')}: {_color(item['source_of_truth'] or '-', 'meta')}")
         return 0
     if "mirrored_events" in payload:
         for e in payload["mirrored_events"]:
-            print(f"{e['workspace']}#{e['remote_id']}  {e['created_at']}  "
-                  f"{e['kind']}  {e['summary']}")
+            print(f"{_color(e['workspace'], 'meta')}#{_color(e['remote_id'], 'muted')}  {_color(e['created_at'], 'muted')}  "
+                  f"{_event_kind_text(e['kind'])}  {e['summary']}")
         return 0
     if "file_path" in payload and "locks" in payload and "tasks" in payload:
-        print(f"blame {payload['file_path']}  (repo: {payload.get('repo_path') or '-'})")
+        print(f"{_color('blame', 'muted')} {_path_text(payload['file_path'])}  (repo: {_path_text(payload.get('repo_path') or '-')})")
         if payload["tasks"]:
-            print("tasks:")
+            print(_color("tasks", "muted") + ":")
             for tk in payload["tasks"]:
-                print(f"  {tk['slug']}  {tk.get('role') or '-'}  {tk['workflow_status']}  {tk['title']}")
+                print(f"  {_color(tk['slug'], 'claim')}  {_color(tk.get('role') or '-', 'meta')}  {_status_text(tk['workflow_status'])}  {tk['title']}")
         if payload["locks"]:
-            print("locks:")
+            print(_color("locks", "muted") + ":")
             for lk in payload["locks"]:
-                print(f"  {lk['id']}  {lk['agent_name']}  {lk['lock_kind']}  {lk['status']}  {lk['started_at']}")
+                print(f"  {_color(lk['id'], 'lock')}  {_color(lk['agent_name'], 'claim')}  {_color(lk['lock_kind'], 'lock')}  {_status_text(lk['status'])}  {_color(lk['started_at'], 'muted')}")
         if payload["events"]:
-            print("recent repo events:")
+            print(_color("recent repo events", "muted") + ":")
             for e in payload["events"][:15]:
-                print(f"  {e['created_at']}  {e['kind']}  {e['summary']}")
+                print(f"  {_color(e['created_at'], 'muted')}  {_event_kind_text(e['kind'])}  {e['summary']}")
         return 0
     if "events" in payload:
         for event in payload["events"]:
@@ -434,12 +566,12 @@ def _emit(payload: dict, as_json: bool) -> int:
         _render_status_summary(payload)
         return 0
     if "config_path" in payload:
-        print(f"config_path: {payload['config_path']}")
-        print(f"current_workspace: {payload.get('current_workspace') or '-'}")
-        print(f"coordinator_workspace: {payload.get('coordinator_workspace') or '-'}")
-        print(f"local_root: {payload.get('local_root') or '-'}")
-        print(f"hosts: {payload.get('host_count', 0)}")
-        print(f"workspaces: {payload.get('workspace_count', 0)}")
+        print(f"{_color('config_path', 'muted')}: {_path_text(payload['config_path'])}")
+        print(f"{_color('current_workspace', 'muted')}: {_color(payload.get('current_workspace') or '-', 'claim')}")
+        print(f"{_color('coordinator_workspace', 'muted')}: {_color(payload.get('coordinator_workspace') or '-', 'claim')}")
+        print(f"{_color('local_root', 'muted')}: {_path_text(payload.get('local_root') or '-')}")
+        print(f"{_color('hosts', 'muted')}: {_color(payload.get('host_count', 0), 'meta')}")
+        print(f"{_color('workspaces', 'muted')}: {_color(payload.get('workspace_count', 0), 'meta')}")
         return 0
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
@@ -463,13 +595,15 @@ def _scope_label(repo_path: str | None) -> str:
 def _render_kv(rows: list[tuple[str, object]]) -> None:
     width = max((len(label) for label, _ in rows), default=0)
     for label, value in rows:
-        print(f"{label:<{width}}  {value if value not in (None, '') else '-'}")
+        raw = value if value not in (None, "") else "-"
+        role = "path" if label.lower() in {"path", "db", "root", "local_root"} else _status_role(raw)
+        print(f"{_color(label, 'muted'):<{width + (len(_ANSI['muted']) + len(_ANSI['reset']) if _use_color() else 0)}}  {_color(raw, role)}")
 
 
 def _render_repo_info(payload: dict) -> None:
     repo = payload["repo"]
     counts = payload["counts"]
-    print(f"Repo: {repo['name']}")
+    print(f"{_color('Repo', 'muted')}: {_color(repo['name'], 'meta')}")
     _render_kv([
         ("Path", repo["repo_path"]),
         ("Key", repo.get("repo_key")),
@@ -478,7 +612,7 @@ def _render_repo_info(payload: dict) -> None:
         ("Third party", "yes" if repo.get("third_party") else "no"),
     ])
     print("")
-    print("Counts")
+    print(_color("Counts", "muted"))
     _render_kv([
         ("Tasks", counts.get("tasks", 0)),
         ("Active locks", counts.get("active_locks", 0)),
@@ -489,7 +623,7 @@ def _render_repo_info(payload: dict) -> None:
 
 def _render_status_summary(payload: dict) -> None:
     counts = payload["counts"]
-    print(f"Status: {_scope_label(payload.get('repo_path'))}")
+    print(f"{_color('Status', 'muted')}: {_color(_scope_label(payload.get('repo_path')), 'meta')}")
     _render_kv([
         ("Repos", counts.get("repos", 0)),
         ("Files", counts.get("files", 0)),
@@ -499,50 +633,53 @@ def _render_status_summary(payload: dict) -> None:
     print("")
     rows = payload.get("tasks_by_workflow_status", [])
     if not rows:
-        print("Workflow: no tasks")
+        print(f"{_color('Workflow', 'muted')}: {_color('no tasks', 'muted')}")
         return
-    print("Workflow")
+    print(_color("Workflow", "muted"))
     width = max(len(row["workflow_status"]) for row in rows)
     for row in rows:
-        print(f"  {row['workflow_status']:<{width}}  {row['count']}")
+        status = row["workflow_status"]
+        print(f"  {_color(status, _status_role(status)):<{width + (len(_ANSI[_status_role(status)]) + len(_ANSI['reset']) if _use_color() else 0)}}  {row['count']}")
 
 
 def _render_ps_summary(payload: dict) -> None:
     tasks = payload["active_tasks"]
     locks = payload["active_locks"]
-    print(f"Activity: {_scope_label(payload.get('repo_path'))}")
-    print(f"Active tasks: {len(tasks)}   Active locks: {len(locks)}")
+    print(f"{_color('Activity', 'muted')}: {_color(_scope_label(payload.get('repo_path')), 'meta')}")
+    print(f"{_color('Active tasks', 'muted')}: {_color(len(tasks), 'claim')}   {_color('Active locks', 'muted')}: {_color(len(locks), 'lock')}")
     print("")
-    print("Tasks")
+    print(_color("Tasks", "muted"))
     if not tasks:
-        print("  none")
+        print("  " + _color("none", "muted"))
     else:
         for task in tasks:
             repo = Path(task["repo_path"]).name if task.get("repo_path") else "-"
             print(
-                f"  {task['priority']:<2}  {task['workflow_status']:<11} "
-                f"{task['slug']:<28} {repo}"
+                f"  {_priority_text(task['priority']):<11}  "
+                f"{_color(task['workflow_status'], _status_role(task['workflow_status'])):<20} "
+                f"{_color(task['slug'], 'claim'):<37} {_color(repo, 'meta')}"
             )
             if task.get("title"):
-                print(f"      {task['title']}")
+                print(f"      {_color(task['title'], 'muted')}")
     print("")
-    print("Locks")
+    print(_color("Locks", "muted"))
     if not locks:
-        print("  none")
+        print("  " + _color("none", "muted"))
     else:
         for lock in locks:
             repo = Path(lock["repo_path"]).name if lock.get("repo_path") else "-"
             files = lock.get("file_paths") or []
-            file_note = f"  files={len(files)}" if files else ""
+            file_note = f"  {_color('files=' + str(len(files)), 'muted')}" if files else ""
             print(
-                f"  #{lock['id']} {lock['lock_kind']:<8} {lock['scope_key']}  "
-                f"{repo}  {lock['agent_name']}{file_note}"
+                f"  {_color('#' + str(lock['id']), 'lock')} {_color(lock['lock_kind'], 'lock'):<17} "
+                f"{_color(lock['scope_key'], 'lock')}  {_color(repo, 'meta')}  "
+                f"{_color(lock['agent_name'], 'claim')}{file_note}"
             )
     if payload.get("recent_events"):
         print("")
-        print("Recent events")
+        print(_color("Recent events", "muted"))
         for event in payload["recent_events"]:
-            print(f"  {event['created_at']}  {event['kind']:<15} {event['summary']}")
+            print(f"  {_color(event['created_at'], 'muted')}  {_event_kind_text(event['kind']):<24} {event['summary']}")
 
 
 def _render_artifacts(payload: dict) -> None:
@@ -552,7 +689,7 @@ def _render_artifacts(payload: dict) -> None:
     present = sum(1 for artifact in artifacts if artifact.get("exists") is True)
     missing = sum(1 for artifact in artifacts if artifact.get("exists") is False)
     stale = sum(1 for artifact in artifacts if artifact.get("stale"))
-    print(f"Artifacts: {repo['name']}  ({repo['repo_path']})")
+    print(f"{_color('Artifacts', 'muted')}: {_color(repo['name'], 'meta')}  ({_path_text(repo['repo_path'])})")
     summary = f"{len(artifacts)} tracked"
     details = []
     if present:
@@ -561,23 +698,23 @@ def _render_artifacts(payload: dict) -> None:
         details.append(f"{missing} missing")
     if stale:
         details.append(f"{stale} stale")
-    print("Summary: " + summary + (f" ({', '.join(details)})" if details else ""))
+    print(f"{_color('Summary', 'muted')}: {_color(summary, 'meta')}" + (f" ({', '.join(_status_text(d) for d in details)})" if details else ""))
     if payload.get("source_latest_mtime"):
         latest = time.strftime(
             "%Y-%m-%d %H:%M:%S",
             time.localtime(payload["source_latest_mtime"]),
         )
-        print(f"Source latest change: {latest}")
+        print(f"{_color('Source latest change', 'muted')}: {_color(latest, 'meta')}")
     print("")
     if not artifacts:
-        print("  no artifacts")
+        print("  " + _color("no artifacts", "muted"))
         return
     by_target: dict[str, list[dict]] = {}
     for artifact in artifacts:
         target = f"{artifact.get('target_kind') or '-'}:{artifact.get('target_name') or '-'}"
         by_target.setdefault(target, []).append(artifact)
     for target, rows in by_target.items():
-        print(target)
+        print(_color(target, "meta"))
         for artifact in rows:
             flags = []
             if artifact.get("exists") is True:
@@ -586,7 +723,7 @@ def _render_artifacts(payload: dict) -> None:
                 flags.append("missing")
             if artifact.get("stale"):
                 flags.append("stale")
-            flag_text = f" [{' '.join(flags)}]" if flags else ""
+            flag_text = f" [{' '.join(_status_text(flag) for flag in flags)}]" if flags else ""
             path_hint = artifact["path_hint"]
             try:
                 display_path = str(Path(path_hint).relative_to(repo_root))
@@ -595,7 +732,7 @@ def _render_artifacts(payload: dict) -> None:
             label = artifact["artifact_name"]
             if label == target:
                 label = Path(path_hint).name
-            print(f"  {label:<24} {display_path}{flag_text}")
+            print(f"  {_color(label, 'claim'):<33} {_path_text(display_path)}{flag_text}")
 
 
 def _render_repo_list(repos: list[dict], view: str) -> None:
@@ -675,25 +812,36 @@ def _payload_with_view(payload: dict, args) -> dict:
 
 
 def _event_color(kind: str) -> str:
-    if kind.startswith("frog.command"):
-        return "\033[36m"
+    role = _event_role(kind)
+    return _ANSI.get(role, "\033[0m") if _use_color() else ""
+
+
+def _event_role(kind: str) -> str:
+    if kind in {"task.finished", "lock.released"}:
+        return "success"
+    if kind in {"task.claimed", "task.assigned"}:
+        return "claim"
     if kind.startswith("lock."):
-        return "\033[33m"
+        return "lock"
     if kind.startswith("task."):
-        return "\033[32m"
-    if kind.startswith("repo."):
-        return "\033[35m"
-    if kind.startswith("file."):
-        return "\033[34m"
-    if kind.startswith("workspace."):
-        return "\033[31m"
-    return "\033[0m"
+        return "meta"
+    if kind.startswith("repo.run") or kind.startswith("repo."):
+        return "success"
+    if kind.startswith("file.") or kind.startswith("workspace."):
+        return "meta"
+    if kind.startswith("frog.command"):
+        return "muted"
+    return "muted"
+
+
+def _event_kind_text(kind: str) -> str:
+    return _color(kind, _event_role(kind))
 
 
 def _print_event(event: dict) -> None:
     color = _event_color(event["kind"])
-    reset = "\033[0m"
-    print(f"{event['created_at']}  {color}{event['kind']}{reset}  {event['summary']}", flush=True)
+    reset = "\033[0m" if color else ""
+    print(f"{_color(event['created_at'], 'muted')}  {color}{event['kind']}{reset}  {event['summary']}", flush=True)
 
 
 def _record_command(conn, argv: list[str]) -> None:
@@ -1029,7 +1177,7 @@ def _db_fingerprint(db_path: str | None) -> tuple:
 def _run_board(conn, *, once: bool, interval: float, poll: float = 0.3) -> int:
     import shutil
     import time as _t
-    color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    color = _use_color()
     db_path = _conn_db_path(conn)
 
     # Optional true-inotify fast path (no hard dependency).
@@ -1121,6 +1269,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", default=None, help="Path to AGENTS.db (explicit value overrides the workspace DB)")
     parser.add_argument("--workspace", help="Named workspace to use; may point at another host over SSH")
     parser.add_argument("--json", action="store_true", help="Emit structured JSON output")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI color in human output")
+    parser.add_argument("--no-pager", action="store_true", help="Do not page long human output")
     sub = parser.add_subparsers(
         dest="command",
         required=True,
@@ -1598,6 +1748,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
+    global _COLOR_ENABLED, _PAGE_HUMAN_OUTPUT
+    _COLOR_ENABLED = not getattr(args, "no_color", False)
+    _PAGE_HUMAN_OUTPUT = _should_page_for_args(args)
     db_explicit = args.db is not None
     args._db_explicit = db_explicit
     if args.db is None:
