@@ -72,7 +72,7 @@ Baseline: `6bb0f7e` (import) -> `5d282f6` (strict-grammar redesign).
       event_mirror / target_runs, WAL checkpoint + VACUUM.
 - [x] II-6 `frog doctor`: health over locks/tasks/events/DB size
       (stale locks, deps-on-done-but-blocked data bugs, mirror lag).
-- [ ] II-7 Packaging: pyproject.toml + console_scripts (frog, frog-mcp),
+- [x] II-7 Packaging: pyproject.toml + console_scripts (frog, frog-mcp),
       pinned Python floor; bin/ shims kept.
 - [ ] II-8 A3 decision: with identity, lock guard enforces only against
       a *different* agent's active lock; still opt-in but now meaningful.
