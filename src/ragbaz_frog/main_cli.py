@@ -1596,6 +1596,10 @@ def build_parser() -> argparse.ArgumentParser:
     et.add_argument("--into", help="Replace a marked section inside FILE in place")
     et.add_argument("--marker", default="todo",
                     help="Section marker name (default: todo -> <!-- frog:todo -->)")
+    et.add_argument("--section", metavar="HEADING",
+                    help="With --into: replace under the Markdown heading "
+                         "HEADING (## HEADING / ### HEADING, any level) "
+                         "instead of using <!-- frog --> markers")
     imp = sub.add_parser("import", help="Import external task sources")
     imp_sub = imp.add_subparsers(dest="import_command", required=True)
     it = imp_sub.add_parser("todo", help="Import a markdown checkbox file as tasks")
@@ -2203,13 +2207,22 @@ def main(argv: list[str] | None = None) -> int:
                     if args.out and args.into:
                         return _emit({"ok": False,
                             "error": "use either --out or --into, not both"}, False)
+                    if args.section and not args.into:
+                        return _emit({"ok": False,
+                            "error": "--section requires --into FILE"}, False)
                     if args.into:
                         fp = Path(args.into)
                         cur = fp.read_text() if fp.exists() else ""
-                        fp.write_text(store.splice_marked_section(
-                            cur, args.marker, md))
-                        print(f"updated frog:{args.marker} section in "
-                              f"{args.into} ({res['count']} task(s))")
+                        if args.section:
+                            fp.write_text(store.splice_heading_section(
+                                cur, args.section, md))
+                            print(f"updated \"{args.section}\" section in "
+                                  f"{args.into} ({res['count']} task(s))")
+                        else:
+                            fp.write_text(store.splice_marked_section(
+                                cur, args.marker, md))
+                            print(f"updated frog:{args.marker} section in "
+                                  f"{args.into} ({res['count']} task(s))")
                     elif args.out:
                         Path(args.out).write_text(md + "\n")
                         print(f"wrote {res['count']} task(s) to {args.out}")

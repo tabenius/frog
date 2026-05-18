@@ -1476,6 +1476,42 @@ def splice_marked_section(text: str, marker: str, body: str) -> str:
     return f"{text}{sep}{block}\n"
 
 
+def splice_heading_section(text: str, heading: str, body: str) -> str:
+    """Replace the content under an existing Markdown heading whose text
+    equals ``heading`` (any level ``#``..``######``, case-insensitive).
+
+    The region replaced runs from the line *after* the heading up to the
+    next heading of the same or shallower level (or EOF); the heading
+    line itself and the surrounding document are preserved, so a re-run
+    with the same body is idempotent. If no such heading exists, a new
+    ``## <heading>`` section is appended at the end of the document."""
+    name = heading.strip()
+    lines = text.split("\n")
+    hpat = _re_splice.compile(
+        r"^(#{1,6})[ \t]+" + _re_splice.escape(name) + r"[ \t]*#*[ \t]*$",
+        _re_splice.I,
+    )
+    body_lines = body.split("\n")
+    for i, ln in enumerate(lines):
+        m = hpat.match(ln)
+        if not m:
+            continue
+        level = len(m.group(1))
+        nxt = _re_splice.compile(r"^#{1," + str(level) + r"}[ \t]+\S")
+        j = i + 1
+        while j < len(lines) and not nxt.match(lines[j]):
+            j += 1
+        rebuilt = lines[: i + 1] + [""] + body_lines + [""] + lines[j:]
+        out = "\n".join(rebuilt)
+        # collapse any >2 consecutive blank lines we may have introduced
+        return _re_splice.sub(r"\n{3,}", "\n\n", out)
+    sep = "" if (not text or text.endswith("\n")) else "\n"
+    pre = f"{text}{sep}" if text else ""
+    if pre and not pre.endswith("\n\n"):
+        pre += "\n"
+    return f"{pre}## {name}\n\n{body}\n"
+
+
 def _task_checkbox(tk: dict) -> str:
     done = (tk.get("workflow_status") or "").lower() in _WF_DONE
     box = "x" if done else " "
