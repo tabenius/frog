@@ -58,5 +58,80 @@ class TuiStateTests(unittest.TestCase):
         self.assertIsNone(st.action("c"))
 
 
+
+class TuiRichTests(unittest.TestCase):
+    def _state(self, n):
+        conn = store.connect(fresh_db())
+        for i in range(n):
+            store.create_task(conn, slug=f"t{i:02d}", repo_ref=None,
+                              title=f"task {i}", why=None, what_text=None,
+                              roi_note=None, priority="p2",
+                              workflow_status="idea", git_status="not_started",
+                              assigned_agent=None, delegation_current=None,
+                              delegation_other=None, parent_task_slug=None)
+        st = tui.TuiState(store.board_snapshot(conn), "claude")
+        conn.close()
+        return st
+
+    def test_scroll_keeps_selection_visible(self):
+        st = self._state(20)              # 20 tasks in idea (col 0)
+        st.col = 0
+        st.row = 0
+        start, end, above, below = st.scroll(5)
+        self.assertEqual((start, above, below), (0, False, True))
+        st.row = 12
+        start, end, above, below = st.scroll(5)
+        self.assertTrue(start <= 12 < end)
+        self.assertTrue(above)
+        st.to_edge(False)                 # bottom
+        start, end, above, below = st.scroll(5)
+        self.assertFalse(below)
+        self.assertTrue(end == len(st.grid[0]))
+
+    def test_window_returns_offset_slice(self):
+        st = self._state(10)
+        st.col = 0
+        st.row = 7
+        start, vis = st.window(0, 4)
+        self.assertEqual(len(vis), 4)
+        self.assertTrue(start <= 7 < start + 4)
+
+    def test_detail_reports_selected(self):
+        conn = store.connect(fresh_db())
+        store.create_task(conn, slug="root", repo_ref=None, title="Root",
+                          why=None, what_text=None, roi_note=None,
+                          priority="p1", workflow_status="idea",
+                          git_status="not_started", assigned_agent=None,
+                          delegation_current=None, delegation_other=None,
+                          parent_task_slug=None)
+        store.create_task(conn, slug="leaf", repo_ref=None, title="Leaf",
+                          why=None, what_text=None, roi_note=None,
+                          priority="p2", workflow_status="idea",
+                          git_status="not_started", assigned_agent=None,
+                          delegation_current=None, delegation_other=None,
+                          parent_task_slug=None)
+        store.task_add_dependency(conn, "leaf", "root", "depends_on")
+        st = tui.TuiState(store.board_snapshot(conn), "claude")
+        conn.close()
+        # select the blocked 'leaf'
+        for ci, _ in enumerate(tui._COLS):
+            for ri, tk in enumerate(st.grid[ci]):
+                if tk["slug"] == "leaf":
+                    st.col, st.row = ci, ri
+        d = st.detail()
+        self.assertEqual(d["slug"], "leaf")
+        self.assertEqual(d["blockers"], ["root"])
+        self.assertFalse(d["ready"])
+
+    def test_move_resets_scroll_on_column_change(self):
+        st = self._state(8)
+        st.col = 0
+        st.row = 6
+        st.scroll(3)
+        self.assertGreater(st.offset[0], 0)
+        st.move(1, 0)                      # change column
+        self.assertEqual(st.offset[st.col], 0)
+        self.assertEqual(st.row, 0)
+
 if __name__ == "__main__":
     unittest.main()
