@@ -676,10 +676,10 @@ def _dispatch_workspace(workspace: dict, argv: list[str]) -> dict:
 
 
 _FROG_ART = [
-    "   @ . . @",
-    "  ( o   o )",
-    "  (  \u203f  )",
-    " ~~oo~~~oo~~",
+    "   @   @",
+    "  ( ._. )",
+    "  ( >o< )",
+    "  /vvvvv\\",
 ]
 _PRIO_COLOR = {"p0": "196", "p1": "208", "p2": "214", "p3": "245"}
 _COL_ORDER = [("idea", "IDEA", "39"), ("blocked", "BLOCKED", "203"),

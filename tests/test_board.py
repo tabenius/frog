@@ -102,7 +102,8 @@ class Board(unittest.TestCase):
                                       color=False, width=100)
         self.assertIn("TASK BOARD", frame)
         self.assertNotIn("task board", frame)
-        self.assertTrue(any("oo" in l for l in frame.splitlines()[:6]),
+        head = frame.splitlines()[:6]
+        self.assertTrue(any("vvvvv" in l for l in head),
                         "ASCII frog should render under the header")
 
 if __name__ == "__main__":
