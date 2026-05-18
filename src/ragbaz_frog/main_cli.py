@@ -1592,7 +1592,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Filter by workflow status")
     et.add_argument("--tree", action="store_true",
                     help="Nest dependents under dependencies (connectors left of the box)")
-    et.add_argument("--out", help="Write to FILE (default: stdout)")
+    et.add_argument("--out", help="Write the whole FILE (default: stdout)")
+    et.add_argument("--into", help="Replace a marked section inside FILE in place")
+    et.add_argument("--marker", default="todo",
+                    help="Section marker name (default: todo -> <!-- frog:todo -->)")
     imp = sub.add_parser("import", help="Import external task sources")
     imp_sub = imp.add_subparsers(dest="import_command", required=True)
     it = imp_sub.add_parser("todo", help="Import a markdown checkbox file as tasks")
@@ -2197,7 +2200,17 @@ def main(argv: list[str] | None = None) -> int:
                     workflow_status=args.workflow_status, tree=args.tree)
                 if res.get("ok") and not args.json:
                     md = res["markdown"]
-                    if args.out:
+                    if args.out and args.into:
+                        return _emit({"ok": False,
+                            "error": "use either --out or --into, not both"}, False)
+                    if args.into:
+                        fp = Path(args.into)
+                        cur = fp.read_text() if fp.exists() else ""
+                        fp.write_text(store.splice_marked_section(
+                            cur, args.marker, md))
+                        print(f"updated frog:{args.marker} section in "
+                              f"{args.into} ({res['count']} task(s))")
+                    elif args.out:
                         Path(args.out).write_text(md + "\n")
                         print(f"wrote {res['count']} task(s) to {args.out}")
                     else:

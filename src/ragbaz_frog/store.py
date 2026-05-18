@@ -1454,6 +1454,28 @@ def import_todo(conn, path: str) -> dict:
     return res
 
 
+import re as _re_splice
+
+
+def splice_marked_section(text: str, marker: str, body: str) -> str:
+    """Idempotently set the content between
+    `<!-- frog:<marker> -->` and `<!-- /frog:<marker> -->`.
+    If the block is absent it is appended; markers are preserved so a
+    re-run replaces only the generated region, never the user's prose."""
+    marker = _re_splice.sub(r"[^a-z0-9_-]", "", marker.lower()) or "todo"
+    start = f"<!-- frog:{marker} -->"
+    end = f"<!-- /frog:{marker} -->"
+    block = f"{start}\n{body}\n{end}"
+    pat = _re_splice.compile(
+        _re_splice.escape(start) + r".*?" + _re_splice.escape(end),
+        _re_splice.S,
+    )
+    if pat.search(text):
+        return pat.sub(lambda _m: block, text, count=1)
+    sep = "" if (not text or text.endswith("\n")) else "\n"
+    return f"{text}{sep}{block}\n"
+
+
 def _task_checkbox(tk: dict) -> str:
     done = (tk.get("workflow_status") or "").lower() in _WF_DONE
     box = "x" if done else " "
