@@ -114,11 +114,15 @@ def _completion_script(shell: str) -> str:
     new|agent-instructions) COMPREPLY=( $(compgen -d -- "$cur") ) ;;
     config)
       if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "info host workspace path" -- "$cur") )
+        COMPREPLY=( $(compgen -W "info host workspace coordinator path" -- "$cur") )
       elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "host" ]]; then
         COMPREPLY=( $(compgen -W "add list" -- "$cur") )
       elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "workspace" ]]; then
         COMPREPLY=( $(compgen -W "add list use" -- "$cur") )
+      elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "coordinator" ]]; then
+        COMPREPLY=( $(compgen -W "show set" -- "$cur") )
+      elif [[ $COMP_CWORD -eq 4 && "${{COMP_WORDS[2]}}" == "coordinator" && "${{COMP_WORDS[3]}}" == "set" ]]; then
+        COMPREPLY=( $(compgen -W "{workspace_names}" -- "$cur") )
       elif [[ $COMP_CWORD -eq 4 && "${{COMP_WORDS[2]}}" == "workspace" && "${{COMP_WORDS[3]}}" == "use" ]]; then
         COMPREPLY=( $(compgen -W "{workspace_names}" -- "$cur") )
       elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "path" ]]; then
@@ -149,11 +153,12 @@ complete -c frog -n '__fish_use_subcommand' -a '{top}'
 complete -c frog -n '__fish_seen_subcommand_from completion' -a 'bash fish'
 complete -c frog -n '__fish_seen_subcommand_from db' -a 'migrate schema gc'
 complete -c frog -n '__fish_seen_subcommand_from new agent-instructions' -a '(__fish_complete_directories)'
-complete -c frog -n '__fish_seen_subcommand_from config' -a 'info host workspace path'
+complete -c frog -n '__fish_seen_subcommand_from config' -a 'info host workspace coordinator path'
 complete -c frog -n '__fish_seen_subcommand_from path' -a 'bash fish'
 complete -c frog -n '__fish_seen_subcommand_from mcp' -a 'serve tools'
 complete -c frog -n '__fish_seen_subcommand_from host' -a 'add list'
 complete -c frog -n '__fish_seen_subcommand_from workspace' -a 'add list use'
+complete -c frog -n '__fish_seen_subcommand_from coordinator' -a 'show set'
 complete -c frog -n '__fish_seen_subcommand_from repo' -a '{repo_subs}'
 complete -c frog -n '__fish_seen_subcommand_from {" ".join(sorted(REPO_ACTIONS))} info' -a '{repo_names}'
 complete -c frog -n '__fish_seen_subcommand_from unit' -a 'discover list'
@@ -204,6 +209,14 @@ def _emit(payload: dict, as_json: bool) -> int:
         for host in payload["hosts"]:
             detail = host.get("ssh_target") or host.get("transport", "unknown")
             print(f"{host['name']}  {detail}")
+        return 0
+    if "coordinator_workspace" in payload and "coordinator" in payload and "config_path" not in payload:
+        coord = payload.get("coordinator") or {}
+        print(f"coordinator_workspace: {payload.get('coordinator_workspace') or '-'}")
+        if coord:
+            print(f"host: {coord.get('host_name') or coord.get('host') or '-'}")
+            print(f"root: {coord.get('root') or '-'}")
+            print(f"db: {coord.get('db') or '-'}")
         return 0
     if "workspaces" in payload:
         _render_workspace_list(payload["workspaces"], payload.get("_view", "default"))
@@ -258,6 +271,18 @@ def _emit(payload: dict, as_json: bool) -> int:
             for ln in payload["codex_config_toml"].splitlines():
                 print("    " + ln)
         return 0
+    if "repo_key" in payload and "aliases" in payload and "local_path" in payload and "workspaces" in payload:
+        print(f"repo_key: {payload['repo_key']}")
+        print(f"this box ({payload['box']}): {payload.get('local_path') or '-'}")
+        for item in payload["workspaces"]:
+            result = item.get("result", {})
+            if item["workspace"] == "local":
+                continue
+            status = "ok" if result.get("ok") else "missing"
+            print(f"workspace {item['workspace']} ({status}): {result.get('local_path') or '-'}")
+        for a in payload["aliases"]:
+            print(f"  {a['box']}  {a['repo_path']}")
+        return 0 if payload.get("ok", True) else 1
     if "repo_key" in payload and "aliases" in payload and "local_path" in payload:
         print(f"repo_key: {payload['repo_key']}")
         print(f"this box ({payload['box']}): {payload.get('local_path') or '-'}")
@@ -440,6 +465,7 @@ def _emit(payload: dict, as_json: bool) -> int:
     if "config_path" in payload:
         print(f"config_path: {payload['config_path']}")
         print(f"current_workspace: {payload.get('current_workspace') or '-'}")
+        print(f"coordinator_workspace: {payload.get('coordinator_workspace') or '-'}")
         print(f"local_root: {payload.get('local_root') or '-'}")
         print(f"hosts: {payload.get('host_count', 0)}")
         print(f"workspaces: {payload.get('workspace_count', 0)}")
@@ -500,7 +526,12 @@ def _render_unit_list(units: list[dict], view: str) -> None:
 
 def _render_workspace_list(workspaces: list[dict], view: str) -> None:
     for workspace in workspaces:
-        marker = " *" if workspace.get("is_current") else ""
+        markers = []
+        if workspace.get("is_current"):
+            markers.append("*")
+        if workspace.get("is_coordinator"):
+            markers.append("coord")
+        marker = " " + ",".join(markers) if markers else ""
         if view == "long":
             print(
                 f"{workspace['name']}{marker}  host={workspace['host']}  repos={workspace.get('repo_count', 0)}  "
@@ -603,6 +634,7 @@ def _workspace_for_args(args, conn) -> dict | None:
     explicit = getattr(args, "workspace", None)
     repo_ref = getattr(args, "repo_ref", None)
     workspace_from_repo, actual_repo_ref = _split_workspace_repo_ref(repo_ref)
+    args._workspace_explicit = bool(explicit or workspace_from_repo)
     if workspace_from_repo and hasattr(args, "repo_ref"):
         args.repo_ref = actual_repo_ref
     workspace_name = explicit or workspace_from_repo
@@ -677,6 +709,76 @@ def _dispatch_workspace(workspace: dict, argv: list[str]) -> dict:
     if err.strip():
         payload.setdefault("remote_stderr", err)
     return payload
+
+
+def _is_coordinator_write(args) -> bool:
+    if args.command == "task":
+        return getattr(args, "task_command", None) in {
+            "create",
+            "claim",
+            "finish",
+            "status",
+            "dependency",
+            "conflict",
+            "tag",
+            "assign",
+        }
+    if args.command == "lock":
+        return getattr(args, "lock_command", None) in {
+            "check",
+            "acquire",
+            "renew",
+            "release",
+            "reap",
+        }
+    if args.command == "repo" and getattr(args, "repo_command", None) == "dep":
+        return getattr(args, "repo_dep_command", None) == "add"
+    return False
+
+
+def _coordinator_workspace_for_write(args, active_workspace: dict | None) -> dict | None:
+    if not _is_coordinator_write(args):
+        return None
+    if getattr(args, "_db_explicit", False):
+        return None
+    if getattr(args, "_workspace_explicit", False):
+        return None
+    coord = frog_config.coordinator(getattr(args, "config", None))
+    if not coord:
+        return None
+    if active_workspace and coord["name"] == active_workspace["name"]:
+        return None
+    return coord
+
+
+def _whereis_federated(conn, repo_key: str, *, config_path: str | None = None) -> dict:
+    local = store.whereis(conn, repo_key)
+    data = frog_config.load_config(config_path)
+    workspaces = [
+        {
+            "workspace": "local",
+            "transport": "local",
+            "result": local,
+        }
+    ]
+    for name in sorted(data.get("workspaces", {}).keys()):
+        ws = frog_config.resolve_workspace(name, config_path)
+        if not ws or ws["host"].get("transport", "local") == "local":
+            continue
+        remote = _dispatch_workspace(ws, ["whereis", "--local-only", repo_key])
+        workspaces.append(
+            {
+                "workspace": name,
+                "transport": ws["host"].get("transport", "unknown"),
+                "result": remote,
+            }
+        )
+    merged = dict(local)
+    merged["ok"] = local.get("ok", False) or any(
+        item["result"].get("ok", False) for item in workspaces
+    )
+    merged["workspaces"] = workspaces
+    return merged
 
 
 _FROG_ART = [
@@ -929,6 +1031,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("doctor", help="Self-diagnostic over locks/tasks/events/DB")
     whereis_cmd = sub.add_parser("whereis", help="Resolve a repo_key to its local path on this box")
+    whereis_cmd.add_argument("--local-only", action="store_true", help=argparse.SUPPRESS)
     whereis_cmd.add_argument("repo_key")
     setup_cmd = sub.add_parser("setup", help="Generate Claude/Codex config + hooks + MCP for a repo")
     setup_cmd.add_argument("agent", choices=["claude", "codex"])
@@ -1027,6 +1130,11 @@ def build_parser() -> argparse.ArgumentParser:
     config_workspace_list_view.add_argument("-l", dest="long", action="store_true", help="Long workspace listing")
     config_workspace_use = config_workspace_sub.add_parser("use", help="Select the default workspace")
     config_workspace_use.add_argument("name")
+    config_coord = config_sub.add_parser("coordinator", help="Manage the authoritative write workspace")
+    config_coord_sub = config_coord.add_subparsers(dest="config_coordinator_command", required=True)
+    config_coord_sub.add_parser("show", help="Show the configured coordinator workspace")
+    config_coord_set = config_coord_sub.add_parser("set", help="Select the coordinator workspace")
+    config_coord_set.add_argument("name")
     config_path_cmd = config_sub.add_parser("path", help="Show how to add frog to PATH")
     config_path_cmd.add_argument("shell", choices=["bash", "fish"])
 
@@ -1335,6 +1443,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     db_explicit = args.db is not None
+    args._db_explicit = db_explicit
     if args.db is None:
         args.db = DEFAULT_DB_PATH
 
@@ -1392,6 +1501,20 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(_payload_with_view(frog_config.list_workspaces(args.config), args), args.json)
             if args.config_workspace_command == "use":
                 return _emit(frog_config.use_workspace(args.name, args.config), args.json)
+        if args.config_command == "coordinator":
+            if args.config_coordinator_command == "show":
+                coord = frog_config.coordinator(args.config)
+                return _emit(
+                    {
+                        "ok": coord is not None,
+                        "coordinator_workspace": frog_config.coordinator_name(args.config),
+                        "coordinator": coord,
+                        "error": None if coord else "no coordinator workspace configured",
+                    },
+                    args.json,
+                )
+            if args.config_coordinator_command == "set":
+                return _emit(frog_config.set_coordinator(args.name, args.config), args.json)
         if args.config_command == "path":
             return _emit(frog_config.path_setup(args.shell, args.config), args.json)
     if args.command == "log" and getattr(args, "follow", False) and not getattr(args, "log_command", None):
@@ -1422,7 +1545,22 @@ def main(argv: list[str] | None = None) -> int:
         workspace = _workspace_for_args(args, conn)
         if workspace and workspace["host"].get("transport") != "local":
             return _emit(_dispatch_workspace(workspace, argv), args.json)
-        if workspace and workspace["host"].get("transport") == "local" and not db_explicit:
+        coordinator_workspace = _coordinator_workspace_for_write(args, workspace)
+        routed_to_local_coordinator = False
+        if coordinator_workspace:
+            if coordinator_workspace["host"].get("transport", "local") != "local":
+                return _emit(_dispatch_workspace(coordinator_workspace, argv), args.json)
+            if not db_explicit:
+                args.db = coordinator_workspace["db"]
+                conn.close()
+                conn = store.connect(args.db)
+                routed_to_local_coordinator = True
+        if (
+            workspace
+            and workspace["host"].get("transport") == "local"
+            and not db_explicit
+            and not routed_to_local_coordinator
+        ):
             args.db = workspace["db"]
             conn.close()
             conn = store.connect(args.db)
@@ -1442,7 +1580,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             return _emit(store.doctor(conn, args.db), args.json)
         if args.command == "whereis":
-            return _emit(store.whereis(conn, args.repo_key), args.json)
+            if args.local_only:
+                return _emit(store.whereis(conn, args.repo_key), args.json)
+            return _emit(_whereis_federated(conn, args.repo_key, config_path=args.config), args.json)
         if args.command == "setup":
             return _emit(store.setup_agent(conn, args.agent,
                 target_dir=args.setup_dir, dry_run=args.setup_dry,

@@ -42,6 +42,9 @@ def default_config() -> dict:
             }
         },
         "current_workspace": "local-src",
+        "federation": {
+            "coordinator_workspace": "local-src",
+        },
     }
 
 
@@ -54,6 +57,7 @@ def save_config(payload: dict, path: str | None = None) -> str:
 
 def ensure_config(path: str | None = None) -> dict:
     target = config_path(path)
+    changed = False
     if target.exists():
         payload = json.loads(target.read_text(encoding="utf-8"))
     else:
@@ -68,6 +72,15 @@ def ensure_config(path: str | None = None) -> dict:
         save_config(payload, path)
     if not payload.get("current_workspace"):
         payload["current_workspace"] = sorted(payload["workspaces"].keys())[0]
+        changed = True
+    federation = payload.setdefault("federation", {})
+    if not federation.get("coordinator_workspace"):
+        federation["coordinator_workspace"] = payload.get("current_workspace")
+        changed = True
+    if federation.get("coordinator_workspace") not in payload["workspaces"]:
+        federation["coordinator_workspace"] = payload.get("current_workspace")
+        changed = True
+    if changed:
         save_config(payload, path)
     return payload
 
@@ -95,6 +108,30 @@ def resolve_workspace(name: str | None, path: str | None = None) -> dict | None:
         "host_name": workspace["host"],
         "host": host,
         "frog_bin": workspace_frog_bin(workspace["root"]),
+    }
+
+
+def coordinator_name(path: str | None = None) -> str | None:
+    data = load_config(path)
+    return data.get("federation", {}).get("coordinator_workspace")
+
+
+def coordinator(path: str | None = None) -> dict | None:
+    return resolve_workspace(coordinator_name(path), path)
+
+
+def set_coordinator(name: str, path: str | None = None) -> dict:
+    data = load_config(path)
+    if name not in data["workspaces"]:
+        return {"ok": False, "error": f"unknown workspace: {name}"}
+    data.setdefault("federation", {})["coordinator_workspace"] = name
+    saved_to = save_config(data, path)
+    return {
+        "ok": True,
+        "message": f"selected coordinator workspace {name}",
+        "coordinator_workspace": name,
+        "coordinator": resolve_workspace(name, path),
+        "config_path": saved_to,
     }
 
 
@@ -168,13 +205,20 @@ def add_workspace(
 
 def list_workspaces(path: str | None = None) -> dict:
     data = load_config(path)
+    coordinator_workspace = data.get("federation", {}).get("coordinator_workspace")
     items = []
     for name in sorted(data["workspaces"].keys()):
         workspace = dict(data["workspaces"][name])
         workspace["is_current"] = data.get("current_workspace") == name
+        workspace["is_coordinator"] = coordinator_workspace == name
         workspace.update(_workspace_activity(workspace, data["hosts"].get(workspace["host"], {})))
         items.append(workspace)
-    return {"ok": True, "current_workspace": data.get("current_workspace"), "workspaces": items}
+    return {
+        "ok": True,
+        "current_workspace": data.get("current_workspace"),
+        "coordinator_workspace": coordinator_workspace,
+        "workspaces": items,
+    }
 
 
 def use_workspace(name: str, path: str | None = None) -> dict:
@@ -189,10 +233,13 @@ def use_workspace(name: str, path: str | None = None) -> dict:
 def info(path: str | None = None) -> dict:
     data = load_config(path)
     current = resolve_workspace(data.get("current_workspace"), path)
+    coord_name = data.get("federation", {}).get("coordinator_workspace")
     return {
         "ok": True,
         "config_path": str(config_path(path)),
         "current_workspace": data.get("current_workspace"),
+        "coordinator_workspace": coord_name,
+        "coordinator": resolve_workspace(coord_name, path) if coord_name else None,
         "local_root": current["root"] if current else None,
         "host_count": len(data["hosts"]),
         "workspace_count": len(data["workspaces"]),

@@ -34,7 +34,10 @@ shorthand. A repo is always addressed under `frog repo …`.
 - `frog status` — workspace summary (now reachable; previously shadowed by the repo `status` action)
 - `frog log` / `frog log --follow` (there is no `frog log tail`)
 - `frog unit discover [--repo REPO]` / `frog unit list`
-- `frog config info` / `frog config path fish`
+- `frog config info` / `frog config host …` / `frog config workspace …`
+- `frog config coordinator show` / `frog config coordinator set WORKSPACE`
+- `frog whereis REPO_KEY` — resolve a logical repo key to paths on configured boxes
+- `frog config path fish`
 - `frog completion bash` / `frog completion fish`
 - `frog mcp tools` / `frog mcp serve`
 
@@ -77,6 +80,13 @@ frog's differentiator is the coordination/scheduling/forensics layer:
 - `frog log why SLUG` / `frog log blame FILE` — causality/forensics.
 - `frog sync pull WS` / `frog sync list` — read-only event mirror of
   another workspace (single-writer-per-DB; safe cross-box visibility).
+- `frog config coordinator set WS` designates the single write authority for
+  tasks and locks. Default/current workspace writes to task and lock state
+  route there over the existing SSH workspace seam; explicit `--workspace` and
+  explicit `--db` still mean exactly what they say.
+- `frog whereis REPO_KEY` resolves the local path and asks configured remote
+  workspaces in non-recursive local-only mode, so agents can find the same
+  logical repo on different boxes.
 - `connect()` enforces WAL + local-FS-only AGENTS.db (network-FS sqlite
   refused; use `--workspace` which RPCs over SSH).
 - Runner delegation: a declared Taskfile/justfile/mise outranks
