@@ -98,3 +98,36 @@ class Board(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BoardRefresh(unittest.TestCase):
+    def test_fingerprint_changes_on_write_and_stable_otherwise(self):
+        import os, tempfile
+        from ragbaz_frog import main_cli
+        d = tempfile.mkdtemp(prefix="frog-fp-")
+        db = os.path.join(d, "AGENTS.db")
+        open(db, "w").write("a")
+        fp1 = main_cli._db_fingerprint(db)
+        self.assertEqual(fp1, main_cli._db_fingerprint(db), "stable when unchanged")
+        import time
+        time.sleep(0.01)
+        open(db, "a").write("bb")
+        self.assertNotEqual(fp1, main_cli._db_fingerprint(db), "changes on write")
+        # -wal appearing also changes the fingerprint
+        fp_before_wal = main_cli._db_fingerprint(db)
+        open(db + "-wal", "w").write("x")
+        self.assertNotEqual(fp_before_wal, main_cli._db_fingerprint(db),
+                            "a new -wal side file changes the fingerprint")
+
+    def test_conn_db_path_resolves(self):
+        from ragbaz_frog import main_cli, store
+        db = fresh_db()
+        c = store.connect(db)
+        try:
+            self.assertEqual(main_cli._conn_db_path(c), db)
+        finally:
+            c.close()
+
+    def test_none_db_fingerprint_is_empty(self):
+        from ragbaz_frog import main_cli
+        self.assertEqual(main_cli._db_fingerprint(None), ())

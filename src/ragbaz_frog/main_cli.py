@@ -739,27 +739,82 @@ def _board_frame(snap: dict, *, color: bool = True, changed: set | None = None,
     return "\n".join(out)
 
 
-def _run_board(conn, *, once: bool, interval: float) -> int:
+def _conn_db_path(conn) -> str | None:
+    try:
+        for seq, name, fpath in conn.execute("PRAGMA database_list"):
+            if name == "main" and fpath:
+                return fpath
+    except Exception:
+        pass
+    return None
+
+
+def _db_fingerprint(db_path: str | None) -> tuple:
+    """(mtime_ns,size) for the DB and its -wal/-shm side files. Any commit
+    bumps the WAL, so a changed fingerprint == 'something happened'.
+    Pure + cheap; the basis for event-driven (vs fixed-interval) refresh."""
+    if not db_path:
+        return ()
+    parts = []
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            st = os.stat(db_path + suffix)
+            parts.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            parts.append((0, 0))
+    return tuple(parts)
+
+
+def _run_board(conn, *, once: bool, interval: float, poll: float = 0.3) -> int:
     import shutil
     import time as _t
     color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    db_path = _conn_db_path(conn)
+
+    # Optional true-inotify fast path (no hard dependency).
+    inotify = None
+    if not once and db_path:
+        try:
+            from inotify_simple import INotify, flags  # type: ignore
+            inotify = INotify()
+            inotify.add_watch(str(Path(db_path).parent),
+                              flags.MODIFY | flags.CREATE | flags.MOVED_TO)
+        except Exception:
+            inotify = None
+
+    def render():
+        nonlocal prev_col
+        snap = store.board_snapshot(conn)
+        cur_col = {tk["slug"]: key
+                   for key, _l, _c2 in _COL_ORDER
+                   for tk in snap["columns"].get(key, [])}
+        changed = {s for s, c in cur_col.items()
+                   if prev_col.get(s) != c and s in prev_col}
+        prev_col = cur_col
+        width = shutil.get_terminal_size((100, 40)).columns
+        return _board_frame(snap, color=color, changed=changed, width=width)
+
     prev_col = {}
+    if once:
+        print(render())
+        return 0
     try:
+        last_fp = None
+        last_draw = 0.0
         while True:
-            snap = store.board_snapshot(conn)
-            cur_col = {tk["slug"]: key
-                       for key, _l, _c2 in _COL_ORDER
-                       for tk in snap["columns"].get(key, [])}
-            changed = {s for s, c in cur_col.items() if prev_col.get(s) != c and s in prev_col}
-            prev_col = cur_col
-            width = shutil.get_terminal_size((100, 40)).columns
-            frame = _board_frame(snap, color=color, changed=changed, width=width)
-            if once:
-                print(frame)
-                return 0
-            sys.stdout.write("\033[2J\033[H" + frame + "\n")
-            sys.stdout.flush()
-            _t.sleep(interval)
+            fp = _db_fingerprint(db_path)
+            now = _t.monotonic()
+            # Redraw only on a real change, or as a max-latency safety net
+            # (keeps relative timestamps from going stale).
+            if fp != last_fp or (now - last_draw) >= interval:
+                sys.stdout.write("\033[2J\033[H" + render() + "\n")
+                sys.stdout.flush()
+                last_fp, last_draw = fp, now
+            # Wait for the next change instead of busy/fixed-interval polling.
+            if inotify is not None:
+                inotify.read(timeout=int(min(interval, 5) * 1000))
+            else:
+                _t.sleep(poll)
     except KeyboardInterrupt:
         return 0
 
@@ -865,7 +920,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup_cmd.add_argument("--force", action="store_true", help="Overwrite CLAUDE.md/AGENTS.md")
     board_cmd = sub.add_parser("board", help="Realtime colored task lifecycle board")
     board_cmd.add_argument("--once", action="store_true", help="Print one frame and exit")
-    board_cmd.add_argument("--interval", type=float, default=2.0, help="Refresh seconds")
+    board_cmd.add_argument("--interval", type=float, default=5.0,
+                           help="Max seconds between forced redraws (safety net)")
+    board_cmd.add_argument("--poll", type=float, default=0.3,
+                           help="DB change-check granularity when inotify is unavailable")
     ps = sub.add_parser(
         "ps",
         help="Show active tasks, active locks, and recent frog activity",
@@ -1345,7 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "board":
             if args.json:
                 return _emit(store.board_snapshot(conn), True)
-            return _run_board(conn, once=args.once, interval=args.interval)
+            return _run_board(conn, once=args.once, interval=args.interval, poll=args.poll)
         if args.command == "snapshot":
             return _emit(store.snapshot_workspace(conn), args.json)
         if args.command == "ps":
