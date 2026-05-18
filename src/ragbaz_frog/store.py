@@ -1403,6 +1403,57 @@ def file_info_many(conn, file_paths: list[str]) -> dict:
     }
 
 
+import re as _re_todo
+
+
+def parse_todo_markdown(text: str) -> list[dict]:
+    """Markdown checkbox lines -> normalized provider items.
+      - [ ] thing            -> status open
+      - [x] thing            -> status done
+    Optional inline `(p1)`/`P0` sets priority; `#tag` tokens -> why note.
+    external_id is a stable slug of the cleaned text so re-import is
+    idempotent."""
+    items = []
+    for raw in text.splitlines():
+        m = _re_todo.match(r"\s*[-*]\s*\[([ xX])\]\s+(.*\S)\s*$", raw)
+        if not m:
+            continue
+        done = m.group(1).lower() == "x"
+        body = m.group(2).strip()
+        prio = "p3"
+        pm = _re_todo.search(r"\b[pP]([0-3])\b", body)
+        if pm:
+            prio = f"p{pm.group(1)}"
+        tags = _re_todo.findall(r"#([A-Za-z0-9_:-]+)", body)
+        title = _re_todo.sub(r"\s*#[A-Za-z0-9_:-]+", "", body)
+        title = _re_todo.sub(r"\s*\(?[pP][0-3]\)?", "", title).strip(" .")
+        if not title:
+            continue
+        slug = _re_todo.sub(r"[^a-z0-9]+", "-",
+                            title.lower()).strip("-")[:48] or "item"
+        items.append({
+            "external_id": slug,
+            "title": title,
+            "status": "done" if done else "open",
+            "priority": prio,
+            "why": ("tags: " + ",".join(tags)) if tags else None,
+        })
+    return items
+
+
+def import_todo(conn, path: str) -> dict:
+    fp = Path(path).expanduser()
+    if not fp.is_file():
+        return {"ok": False, "error": f"not a file: {fp}"}
+    items = parse_todo_markdown(fp.read_text())
+    if not items:
+        return {"ok": True, "message": "no checkbox lines found",
+                "created": [], "updated": []}
+    res = provider_sync_in(conn, "todo", items)
+    res["source_file"] = str(fp)
+    return res
+
+
 def create_task(
     conn,
     *,
