@@ -1,3 +1,4 @@
+import json
 import unittest
 from _util import fresh_db
 from ragbaz_frog import store
@@ -78,6 +79,39 @@ class Workflow(unittest.TestCase):
         # b still pending -> c not unblocked yet
         r = store.task_finish(self.conn, slug="b", agent="x", verify=False)
         self.assertEqual(r["unblocked"], ["c"])
+
+    def test_release_records_audit_metadata(self):
+        lock = store.lock_acquire(
+            self.conn,
+            scope_key="s",
+            repo_ref=None,
+            lock_kind="edit",
+            files=[],
+            agent="claude",
+            pid=None,
+            reason="work",
+            lease_seconds=1800,
+            eta_minutes=None,
+            force=False,
+        )
+        self.assertTrue(lock["ok"], lock)
+        released = store.lock_release(
+            self.conn,
+            lock["lock"]["id"],
+            force=False,
+            agent="codex",
+            reason="stale after adopted commit",
+        )
+        self.assertTrue(released["ok"], released)
+        event = self.conn.execute(
+            "SELECT actor, payload_json FROM event_log "
+            "WHERE kind = 'lock.released' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(event["actor"], "codex")
+        payload = json.loads(event["payload_json"])
+        self.assertEqual(payload["lock_agent"], "claude")
+        self.assertEqual(payload["released_by"], "codex")
+        self.assertEqual(payload["reason"], "stale after adopted commit")
 
 
 if __name__ == "__main__":

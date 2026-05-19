@@ -191,7 +191,8 @@ def _tool_specs() -> list[dict]:
             "description": "Release a coordination lock by id.",
             "inputSchema": {"type": "object", "properties": {
                 "workspace": {"type": "string"}, "lock_id": {"type": "integer"},
-                "force": {"type": "boolean"}}, "required": ["lock_id"]},
+                "force": {"type": "boolean"}, "agent": {"type": "string"},
+                "reason": {"type": "string"}}, "required": ["lock_id"]},
         },
         {
             "name": "frog_task_next",
@@ -368,7 +369,9 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
         if tool_name == "frog_lock_release":
             return store.lock_release(
                 conn, int(arguments["lock_id"]),
-                force=bool(arguments.get("force", False)))
+                force=bool(arguments.get("force", False)),
+                agent=arguments.get("agent"),
+                reason=arguments.get("reason"))
         if tool_name == "frog_task_next":
             return store.task_next(
                 conn,

@@ -3177,7 +3177,14 @@ def lock_renew(conn, lock_id: int, eta_minutes: int | None) -> dict:
     return lock_info(conn, lock_id)
 
 
-def lock_release(conn, lock_id: int, *, force: bool) -> dict:
+def lock_release(
+    conn,
+    lock_id: int,
+    *,
+    force: bool,
+    agent: str | None = None,
+    reason: str | None = None,
+) -> dict:
     row = conn.execute("SELECT * FROM locks WHERE id = ?", (lock_id,)).fetchone()
     if not row:
         return {"ok": False, "error": f"lock not found: {lock_id}"}
@@ -3193,8 +3200,14 @@ def lock_release(conn, lock_id: int, *, force: bool) -> dict:
         kind="lock.released",
         summary=f"released lock {lock_id}",
         repo_path=row["repo_path"],
-        actor=row["agent_name"],
-        payload={"lock_id": lock_id, "forced": force},
+        actor=agent or row["agent_name"],
+        payload={
+            "lock_id": lock_id,
+            "forced": force,
+            "lock_agent": row["agent_name"],
+            "released_by": agent,
+            "reason": reason,
+        },
     )
     conn.commit()
     return lock_info(conn, lock_id)

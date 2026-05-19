@@ -50,7 +50,10 @@ class McpWorkflow(unittest.TestCase):
                        {"scope_key": "s1", "lock_kind": "edit",
                         "agent": "codex", "files": ["/tmp/x"]})
         self.assertFalse(c["ok"])
-        rel = self._call("frog_lock_release", {"lock_id": lid})
+        rel = self._call(
+            "frog_lock_release",
+            {"lock_id": lid, "agent": "codex", "reason": "done"},
+        )
         self.assertTrue(rel["ok"])
 
 

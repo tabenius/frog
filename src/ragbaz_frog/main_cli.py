@@ -2168,6 +2168,8 @@ def build_parser() -> argparse.ArgumentParser:
     lock_renew.add_argument("--eta-minutes", type=int)
     lock_release = lock_sub.add_parser("release", help="Release a coordination lock")
     lock_release.add_argument("lock_id", type=int)
+    lock_release.add_argument("--agent", help="Acting agent recording the release")
+    lock_release.add_argument("--reason", help="Audit note explaining why the lock is released")
     lock_list = lock_sub.add_parser("list", help="List locks")
     lock_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     lock_list.add_argument("--include-inactive", action="store_true",
@@ -2745,7 +2747,16 @@ def main(argv: list[str] | None = None) -> int:
             if args.lock_command == "renew":
                 return _emit(store.lock_renew(conn, args.lock_id, args.eta_minutes), args.json)
             if args.lock_command == "release":
-                return _emit(store.lock_release(conn, args.lock_id, force=False), args.json)
+                return _emit(
+                    store.lock_release(
+                        conn,
+                        args.lock_id,
+                        force=False,
+                        agent=args.agent,
+                        reason=args.reason,
+                    ),
+                    args.json,
+                )
             if args.lock_command == "list":
                 return _emit(
                     store.lock_list(
