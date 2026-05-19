@@ -2522,6 +2522,24 @@ def _normalise_files(file_paths: list[str] | None) -> list[str]:
     return sorted(set(paths))
 
 
+_FED_STALE_TTL = int(os.environ.get("FROG_FED_STALE_TTL", "3600"))
+
+
+def _known_boxes(conn) -> set[str]:
+    """Boxes this DB legitimately knows: itself + every box recorded in
+    box_identity + every federated peer. A lock stamped with a box_id
+    outside this set is an orphan (its origin never federated here, or
+    the peer was removed) and is safe to reap once it goes quiet."""
+    boxes = {_box_id()}
+    try:
+        boxes |= {r[0] for r in conn.execute(
+            "SELECT box_id FROM box_identity")}
+        boxes |= {r[0] for r in conn.execute("SELECT box_id FROM peers")}
+    except sqlite3.OperationalError:
+        pass
+    return {b for b in boxes if b}
+
+
 def _pid_is_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return True
@@ -2534,40 +2552,64 @@ def _pid_is_alive(pid: int | None) -> bool:
         return True
 
 
-def _stale_lock_reason(row, now: datetime) -> str | None:
+def _stale_lock_reason(row, now: datetime, *, local_box=None,
+                       known_boxes=None) -> str | None:
     updated = parse_iso(row["updated_at"])
-    if row["lease_seconds"] and (now - updated).total_seconds() > row["lease_seconds"]:
+    elapsed = (now - updated).total_seconds()
+    if row["lease_seconds"] and elapsed > row["lease_seconds"]:
         return "lease_expired"
     # PID reaping is deliberately opt-in. Normal CLI/task claims store NULL
     # because the frog command process exits immediately and is not the agent.
     if row["host"] == socket.gethostname() and row["pid"] and not _pid_is_alive(row["pid"]):
         return "dead_pid"
+    # Cross-box liveness: a lock owned by another box can only be kept
+    # alive by that box's agent renewing it (which bumps updated_at).
+    # We cannot probe a remote pid, so the renewal heartbeat IS the
+    # liveness signal. Without this, a remote box that dies while
+    # holding a no-/long-lease lock would deadlock the whole federation.
+    box = row["box_id"] if "box_id" in row.keys() else None
+    if box and local_box is not None and box != local_box:
+        ttl = row["lease_seconds"] or _FED_STALE_TTL
+        if elapsed > ttl:
+            if known_boxes is not None and box not in known_boxes:
+                return "orphan_box"
+            return "remote_stale"
     return None
 
 
 def _mark_stale_locks(conn) -> list[dict]:
     rows = conn.execute(
         """
-        SELECT id, scope_key, repo_path, agent_name, pid, host, updated_at, lease_seconds
+        SELECT id, scope_key, repo_path, agent_name, pid, host, box_id,
+               updated_at, lease_seconds
         FROM locks WHERE status = 'active'
         """
     ).fetchall()
     now = utc_now()
+    local_box = _box_id()
+    known = _known_boxes(conn)
     stale = []
     for row in rows:
-        reason = _stale_lock_reason(row, now)
+        reason = _stale_lock_reason(row, now, local_box=local_box,
+                                    known_boxes=known)
         if reason:
             stale.append({"id": row["id"], "reason": reason, "row": row})
     for item in stale:
         lock_id = item["id"]
         row = item["row"]
         reason = item["reason"]
-        event_kind = "lock.dead_pid" if reason == "dead_pid" else "lock.stale"
-        summary = (
-            f"marked lock {lock_id} stale: dead pid {row['pid']}"
-            if reason == "dead_pid"
-            else f"marked lock {lock_id} stale"
-        )
+        event_kind = {
+            "dead_pid": "lock.dead_pid",
+            "orphan_box": "lock.orphan_box",
+            "remote_stale": "lock.remote_stale",
+        }.get(reason, "lock.stale")
+        if reason == "dead_pid":
+            summary = f"marked lock {lock_id} stale: dead pid {row['pid']}"
+        elif reason in ("orphan_box", "remote_stale"):
+            summary = (f"marked lock {lock_id} stale: {reason} "
+                       f"(box {row['box_id']} silent)")
+        else:
+            summary = f"marked lock {lock_id} stale"
         conn.execute("UPDATE locks SET status = 'stale' WHERE id = ?", (lock_id,))
         record_event(
             conn,
@@ -2580,6 +2622,7 @@ def _mark_stale_locks(conn) -> list[dict]:
                 "reason": reason,
                 "pid": row["pid"],
                 "host": row["host"],
+                "box_id": row["box_id"],
                 "scope_key": row["scope_key"],
             },
         )
