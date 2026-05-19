@@ -1081,7 +1081,8 @@ def _remote_exec(host: str, remote_db: str | None, remote_frog: str,
 
 
 def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
-                     remote_frog: str = "frog", exec=_remote_exec) -> dict:
+                     remote_frog: str = "frog", exec=_remote_exec,
+                     reciprocal_self: str | None = None) -> dict:
     """Federate with a peer box over SSH (no daemon, no shared file).
 
     Learns the peer's box_id and its (repo_key -> path) map, records
@@ -1145,16 +1146,29 @@ def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
         payload={"peer_box": peer_box, "host": host,
                  "matched": matched, "aliases_added": added})
     conn.commit()
+    reciprocal = None
+    if reciprocal_self:
+        # Turnkey: federate both directions in one command -- tell the
+        # peer to join back to us. Best-effort: a failure here does not
+        # undo the (successful) local half; it is reported instead.
+        try:
+            reciprocal = exec(host, rdb, remote_frog,
+                              ["box", "join", reciprocal_self])
+        except Exception as e:  # noqa: BLE001 - surfaced, not fatal
+            reciprocal = {"ok": False, "error": str(e)}
     return {
         "ok": True,
         "message": f"joined {peer_box} via {host}: "
-                   f"{len(matched)} shared repo(s), {added} alias(es) added",
+                   f"{len(matched)} shared repo(s), {added} alias(es) added"
+                   + (" (+reciprocal)" if reciprocal
+                      and reciprocal.get("ok") else ""),
         "peer_box": peer_box,
         "peer_hostname": peer_host,
         "matched": sorted(matched),
         "unmatched_remote": sorted(set(remote_repos) - set(matched)),
         "unmatched_local": sorted(local_keys - set(matched)),
         "aliases_added": added,
+        "reciprocal": reciprocal,
     }
 
 

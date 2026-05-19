@@ -26,6 +26,11 @@ This SSHes to the peer, reads its box id and its
 logical repo is resolvable on both boxes even at different paths.
 List federated peers with `frog box peers`.
 
+For one-command two-way federation, add `--reciprocal --self
+[user@]thisbox:/path/AGENTS.db` — the peer is told to join back to
+you over the same SSH connection (best-effort; a reciprocal failure
+is reported, not fatal, since the local half already succeeded).
+
 ## Where does a repo live?
 
     frog whereis <repo_key>

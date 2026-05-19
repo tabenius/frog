@@ -1945,6 +1945,8 @@ def build_parser() -> argparse.ArgumentParser:
     box_join.add_argument("ssh_target", help="[user@]host[:/path/to/AGENTS.db]")
     box_join.add_argument("--db", dest="remote_db", help="Remote AGENTS.db path (overrides :path in target)")
     box_join.add_argument("--remote-frog", default="frog", help="frog executable on the peer (default: frog)")
+    box_join.add_argument("--reciprocal", action="store_true", help="Also make the peer join back to us (one-command two-way federation)")
+    box_join.add_argument("--self", dest="self_target", metavar="SSH_TARGET", help="How the peer should reach us (required with --reciprocal): [user@]host[:/path/AGENTS.db]")
     agent_sub = agent_cmd.add_subparsers(dest="agent_command", required=True)
     agent_sub.add_parser("whoami", help="Show the resolved acting agent + session")
     ag_reg = agent_sub.add_parser("register", help="Register/update an agent")
@@ -2797,9 +2799,16 @@ def main(argv: list[str] | None = None) -> int:
             if args.box_command == "peers":
                 return _emit(store.peers_list(conn), args.json)
             if args.box_command == "join":
+                if args.reciprocal and not args.self_target:
+                    return _emit({"ok": False,
+                        "error": "--reciprocal requires --self SSH_TARGET "
+                                 "(how the peer reaches this box)"}, args.json)
                 return _emit(store.federation_join(
                     conn, args.ssh_target, remote_db=args.remote_db,
-                    remote_frog=args.remote_frog), args.json)
+                    remote_frog=args.remote_frog,
+                    reciprocal_self=(args.self_target
+                                     if args.reciprocal else None)),
+                    args.json)
         if args.command == "agent":
             if args.agent_command == "whoami":
                 return _emit(store.agent_whoami(conn), args.json)

@@ -414,6 +414,8 @@ Federate with a peer box over SSH
 - `ssh_target` — [user@]host[:/path/to/AGENTS.db]
 - `--db` — Remote AGENTS.db path (overrides :path in target)
 - `--remote-frog` — frog executable on the peer (default: frog)
+- `--reciprocal` — Also make the peer join back to us (one-command two-way federation)
+- `--self` — How the peer should reach us (required with --reciprocal): [user@]host[:/path/AGENTS.db]
 
 ### `frog box sync`
 
