@@ -156,6 +156,59 @@ class CliRender(unittest.TestCase):
         self.assertIn("already done", text)
         self.assertIn("skip owned: owned by claude", text)
 
+    def test_lock_release_event_renders_audit_metadata(self):
+        rc, out = render({
+            "ok": True,
+            "events": [{
+                "id": 1,
+                "created_at": "2026-05-19T12:00:00+00:00",
+                "kind": "lock.released",
+                "summary": "released lock 42",
+                "actor": "codex",
+                "payload": {
+                    "forced": True,
+                    "lock_agent": "claude",
+                    "released_by": "codex",
+                    "reason": "stale after adopted commit",
+                },
+            }],
+        })
+        self.assertEqual(rc, 0)
+        text = plain(out)
+        self.assertIn("released lock 42", text)
+        self.assertIn("forced", text)
+        self.assertIn("released by codex", text)
+        self.assertIn("held by claude", text)
+        self.assertIn("reason: stale after adopted commit", text)
+
+    def test_lock_release_command_output_renders_audit_metadata(self):
+        rc, out = render({
+            "ok": True,
+            "lock": {
+                "id": 42,
+                "lock_kind": "edit",
+                "scope_key": "task:demo",
+                "repo_path": "/data/src/frog",
+                "agent_name": "claude",
+                "status": "released",
+                "started_at": "2026-05-19T11:00:00+00:00",
+                "eta_finish_at": None,
+                "file_paths": [],
+            },
+            "release": {
+                "forced": True,
+                "lock_agent": "claude",
+                "released_by": "codex",
+                "reason": "operator recovery",
+            },
+        })
+        self.assertEqual(rc, 0)
+        text = plain(out)
+        self.assertIn("released_by: codex", text)
+        self.assertIn("original_holder: claude", text)
+        self.assertIn("forced: true", text)
+        self.assertIn("release_reason: operator recovery", text)
+
     def test_lock_release_help_includes_force_and_audit_metadata(self):
         parser = main_cli.build_parser()
         buf = io.StringIO()

@@ -103,6 +103,9 @@ class Workflow(unittest.TestCase):
             reason="stale after adopted commit",
         )
         self.assertTrue(released["ok"], released)
+        self.assertEqual(released["release"]["lock_agent"], "claude")
+        self.assertEqual(released["release"]["released_by"], "codex")
+        self.assertEqual(released["release"]["reason"], "stale after adopted commit")
         event = self.conn.execute(
             "SELECT actor, payload_json FROM event_log "
             "WHERE kind = 'lock.released' ORDER BY id DESC LIMIT 1"

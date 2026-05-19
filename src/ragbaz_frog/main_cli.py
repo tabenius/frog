@@ -802,6 +802,13 @@ def _emit(payload: dict, as_json: bool) -> int:
         print(f"{_color('status', 'muted')}: {_status_text(lock['status'])}")
         print(f"{_color('started_at', 'muted')}: {_color(lock['started_at'], 'muted')}")
         print(f"{_color('eta_finish_at', 'muted')}: {_color(lock['eta_finish_at'] or '-', 'muted')}")
+        if payload.get("release"):
+            release = payload["release"]
+            print(f"{_color('released_by', 'muted')}: {_color(release.get('released_by') or lock['agent_name'], 'claim')}")
+            print(f"{_color('original_holder', 'muted')}: {_color(release.get('lock_agent') or lock['agent_name'], 'claim')}")
+            print(f"{_color('forced', 'muted')}: {_color(str(bool(release.get('forced'))).lower(), 'warn' if release.get('forced') else 'muted')}")
+            if release.get("reason"):
+                print(f"{_color('release_reason', 'muted')}: {release['reason']}")
         for path in lock["file_paths"]:
             print(f"{_color('file', 'muted')}: {_path_text(path)}")
         return 0
@@ -839,7 +846,7 @@ def _emit(payload: dict, as_json: bool) -> int:
         if payload["events"]:
             print(_color("recent repo events", "muted") + ":")
             for e in payload["events"][:15]:
-                print(f"  {_color(e['created_at'], 'muted')}  {_event_kind_text(e['kind'])}  {e['summary']}")
+                print(f"  {_color(e['created_at'], 'muted')}  {_event_kind_text(e['kind'])}  {e['summary']}{_lock_release_audit_text(e)}")
         return 0
     if "events" in payload:
         for event in payload["events"]:
@@ -1231,6 +1238,41 @@ def _event_kind_text(kind: str) -> str:
     return _color(kind, _event_role(kind))
 
 
+def _event_payload(event: dict) -> dict:
+    payload = event.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    raw = event.get("payload_json")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _lock_release_audit_text(event: dict) -> str:
+    payload = _event_payload(event)
+    if event.get("kind") != "lock.released" or not payload:
+        return ""
+    parts = []
+    if payload.get("forced"):
+        parts.append(_color("forced", "warn"))
+    released_by = payload.get("released_by") or event.get("actor")
+    if released_by:
+        parts.append(f"released by {_color(released_by, 'claim')}")
+    lock_agent = payload.get("lock_agent")
+    if lock_agent:
+        parts.append(f"held by {_color(lock_agent, 'claim')}")
+    reason = payload.get("reason")
+    if reason:
+        parts.append(f"reason: {reason}")
+    if not parts:
+        return ""
+    return "  " + _color("(", "muted") + "; ".join(parts) + _color(")", "muted")
+
+
 def _print_event(event: dict) -> None:
     color = _event_color(event["kind"])
     reset = "\033[0m" if color else ""
@@ -1238,7 +1280,8 @@ def _print_event(event: dict) -> None:
     origin_text = f" {_color('@' + origin, 'claim')}" if origin else ""
     print(
         f"{_color(event['created_at'], 'muted')}  "
-        f"{color}{event['kind']}{reset}{origin_text}  {event['summary']}",
+        f"{color}{event['kind']}{reset}{origin_text}  {event['summary']}"
+        f"{_lock_release_audit_text(event)}",
         flush=True,
     )
 

@@ -3390,6 +3390,13 @@ def lock_release(
     if row["status"] != "active" and not force:
         return {"ok": False, "error": f"lock is not active: {lock_id}"}
     now = utc_now_iso()
+    release = {
+        "lock_id": lock_id,
+        "forced": force,
+        "lock_agent": row["agent_name"],
+        "released_by": agent,
+        "reason": reason,
+    }
     conn.execute(
         "UPDATE locks SET status = 'released', released_at = ?, updated_at = ? WHERE id = ?",
         (now, now, lock_id),
@@ -3400,16 +3407,13 @@ def lock_release(
         summary=f"released lock {lock_id}",
         repo_path=row["repo_path"],
         actor=agent or row["agent_name"],
-        payload={
-            "lock_id": lock_id,
-            "forced": force,
-            "lock_agent": row["agent_name"],
-            "released_by": agent,
-            "reason": reason,
-        },
+        payload=release,
     )
     conn.commit()
-    return lock_info(conn, lock_id)
+    result = lock_info(conn, lock_id)
+    if result.get("ok"):
+        result["release"] = release
+    return result
 
 
 def lock_list(
