@@ -32,6 +32,9 @@ shorthand. A repo is always addressed under `frog repo …`.
 - `frog task create …` / `frog task list [--repo REPO]`
 - `frog lock acquire …`
 - `frog provider sync --source asana|linear|jira --config-file FILE --direction pull|push|both`
+- `frog hook add URL` / `frog hook list` / `frog hook remove ID`
+- `frog hook dispatch [--id ID] [--limit N]` — POST new event-log batches to enabled hooks
+- `frog hook digest [--limit N] [--repo REPO]` — emit a Markdown event digest
 - `frog status` — workspace summary (now reachable; previously shadowed by the repo `status` action)
 - `frog log` / `frog log --follow` (there is no `frog log tail`)
 - `frog unit discover [--repo REPO]` / `frog unit list`
@@ -92,6 +95,10 @@ frog's differentiator is the coordination/scheduling/forensics layer:
   the normalized provider contract. `--direction pull|push|both` controls sync
   direction; provider JSON supplies credentials and status round-trip mappings
   such as Asana enum option GIDs, Linear state IDs, or Jira transition IDs.
+- `frog hook ...` publishes event-log batches to human notification systems.
+  Dispatch is explicit (`frog hook dispatch`) so ordinary coordination writes
+  do not unexpectedly perform network calls; `frog hook digest` provides a
+  terminal-friendly Markdown summary of recent events.
 - `connect()` enforces WAL + local-FS-only AGENTS.db (network-FS sqlite
   refused; use `--workspace` which RPCs over SSH).
 - Runner delegation: a declared Taskfile/justfile/mise outranks
