@@ -763,6 +763,30 @@ def db_gc(conn, *, older_than_days: int | None = None, keep: int = 200) -> dict:
             "message": f"gc removed {sum(removed.values())} row(s)"}
 
 
+def schema_drift(conn) -> dict:
+    """Compare migrations applied to this DB against the migrations the
+    running code ships. `behind` is non-empty when the code is newer
+    than the DB -- the exact condition that silently corrupted query
+    results (the whereis KeyError) until commands learned to refuse."""
+    on_disk = [f.name for f in sorted(migration_dir().glob("*.sql"))]
+    has_tbl = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name='schema_migrations'").fetchone()
+    applied = ([r[0] for r in conn.execute(
+        "SELECT name FROM schema_migrations")] if has_tbl else [])
+    applied_set = set(applied)
+    behind = [m for m in on_disk if m not in applied_set]
+    ahead = [m for m in applied if m not in set(on_disk)]
+    return {
+        "ok": True,
+        "applied": len(applied_set),
+        "available": len(on_disk),
+        "behind": behind,
+        "ahead": ahead,
+        "current": not behind,
+    }
+
+
 def schema_status(db_path: str) -> dict:
     conn = connect(db_path)
     try:

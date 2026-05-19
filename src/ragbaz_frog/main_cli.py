@@ -2310,6 +2310,23 @@ def main(argv: list[str] | None = None) -> int:
             args.db = workspace["db"]
             conn.close()
             conn = store.connect(args.db)
+        drift = store.schema_drift(conn)
+        if not drift["current"] and os.environ.get(
+                "FROG_ALLOW_SCHEMA_SKEW") != "1":
+            conn.close()
+            return _emit({
+                "ok": False,
+                "error": (
+                    f"AGENTS.db schema is behind this frog build "
+                    f"({drift['applied']}/{drift['available']} migrations)"
+                    f" -- run: frog --db {args.db} db migrate"
+                    f"  (or set FROG_ALLOW_SCHEMA_SKEW=1 to override,"
+                    f" unsafe: queries may crash or return wrong rows)"),
+                "applied": drift["applied"],
+                "available": drift["available"],
+                "behind": drift["behind"],
+                "fix": f"frog --db {args.db} db migrate",
+            }, args.json)
         _record_command(conn, argv)
         if args.command == "new":
             return _emit(
