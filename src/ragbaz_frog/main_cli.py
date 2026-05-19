@@ -2021,6 +2021,9 @@ def build_parser() -> argparse.ArgumentParser:
     repo_task_inline_sub = repo_task_inline.add_subparsers(dest="repo_task_inline_command", required=True)
     repo_task_inline_list = repo_task_inline_sub.add_parser("list", help="List tasks for one repo")
     repo_task_inline_list.add_argument("--repo", dest="repo_ref", metavar="REPO", required=True)
+    repo_task_inline_list.add_argument("--workflow-status")
+    repo_task_inline_list.add_argument("--all", action="store_true",
+                                       help="Include done/archived task history")
     repo_key = repo_sub.add_parser("key", help="Show/set a repo's stable cross-box key")
     repo_key.add_argument("repo_ref", nargs="?", help="Repo (default cwd repo)")
     repo_key.add_argument("--set", dest="set_key", help="Set an explicit repo_key")
@@ -2107,6 +2110,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     task_list.add_argument("--workflow-status")
     task_list.add_argument("--assigned-agent")
+    task_list.add_argument("--all", action="store_true",
+                           help="Include done/archived task history")
     task_next = task_sub.add_parser(
         "next", help="Highest-ROI unblocked slice you can safely take now")
     task_next.add_argument("--agent", help="Acting agent (default $USER)")
@@ -2670,7 +2675,16 @@ def main(argv: list[str] | None = None) -> int:
             if args.repo_command == "info":
                 return _emit(_run_repo_action(conn, args.repo_ref, args.repo_command, args), args.json)
             if args.repo_command == "task":
-                return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=None, assigned_agent=None), args.json)
+                return _emit(
+                    store.task_list(
+                        conn,
+                        repo_ref=args.repo_ref,
+                        workflow_status=args.workflow_status,
+                        assigned_agent=None,
+                        include_done=args.json or args.all or bool(args.workflow_status),
+                    ),
+                    args.json,
+                )
             if args.repo_command == "key":
                 ref = args.repo_ref
                 if not ref:
@@ -2717,7 +2731,16 @@ def main(argv: list[str] | None = None) -> int:
                     args.json,
                 )
             if args.task_command == "list":
-                return _emit(store.task_list(conn, repo_ref=args.repo_ref, workflow_status=args.workflow_status, assigned_agent=args.assigned_agent), args.json)
+                return _emit(
+                    store.task_list(
+                        conn,
+                        repo_ref=args.repo_ref,
+                        workflow_status=args.workflow_status,
+                        assigned_agent=args.assigned_agent,
+                        include_done=args.json or args.all or bool(args.workflow_status),
+                    ),
+                    args.json,
+                )
             if args.task_command == "claim":
                 return _emit(store.task_claim(conn, slug=args.slug,
                     agent=(args.agent or store.current_agent()),

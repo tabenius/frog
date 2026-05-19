@@ -167,6 +167,14 @@ class CliRender(unittest.TestCase):
         self.assertIn("--agent", text)
         self.assertIn("--reason", text)
 
+    def test_task_list_help_exposes_all_history_switch(self):
+        parser = main_cli.build_parser()
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(buf):
+            parser.parse_args(["task", "list", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("--all", plain(buf.getvalue()))
+
     def test_no_color_disables_ansi(self):
         main_cli._COLOR_ENABLED = False
         rc, out = render({

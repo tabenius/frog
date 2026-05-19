@@ -93,6 +93,19 @@ class Scheduler(unittest.TestCase):
         self.assertEqual(r["skipped_summary"]["owner"], 1)
         self.assertEqual(r["skipped_summary"]["deps"], 1)
 
+    def test_task_list_can_filter_done_tasks(self):
+        self._mk("todo", "p1")
+        self._mk("done", "p0", wf="done")
+        r = store.task_list(
+            self.conn,
+            repo_ref=None,
+            workflow_status=None,
+            assigned_agent=None,
+            include_done=False,
+        )
+        self.assertEqual([t["slug"] for t in r["tasks"]], ["todo"])
+        self.assertFalse(r["include_done"])
+
 
 if __name__ == "__main__":
     unittest.main()

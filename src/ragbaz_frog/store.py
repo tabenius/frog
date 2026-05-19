@@ -2340,6 +2340,7 @@ def task_list(
     repo_ref: str | None,
     workflow_status: str | None,
     assigned_agent: str | None,
+    include_done: bool = True,
 ) -> dict:
     clauses = []
     params = []
@@ -2354,6 +2355,10 @@ def task_list(
     if workflow_status:
         clauses.append("workflow_status = ?")
         params.append(workflow_status)
+    elif not include_done:
+        placeholders = ",".join("?" for _ in _WF_DONE)
+        clauses.append(f"LOWER(workflow_status) NOT IN ({placeholders})")
+        params.extend(sorted(_WF_DONE))
     if assigned_agent:
         clauses.append("assigned_agent = ?")
         params.append(assigned_agent)
@@ -2362,7 +2367,13 @@ def task_list(
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY priority, updated_at DESC, slug"
     rows = conn.execute(query, tuple(params)).fetchall()
-    return {"ok": True, "repo_path": repo_path, "tasks": dicts(rows)}
+    return {
+        "ok": True,
+        "repo_path": repo_path,
+        "tasks": dicts(rows),
+        "include_done": include_done,
+        "workflow_status": workflow_status,
+    }
 
 
 _WF_DONE = {"done", "cancelled", "abandoned", "archived"}
