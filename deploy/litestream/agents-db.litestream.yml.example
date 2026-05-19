@@ -1,0 +1,12 @@
+# Example Litestream config for the shared frog coordination DB.
+#
+# Copy to a private path such as ~/.config/ragbaz-frog/litestream.yml and
+# provide secrets through the systemd EnvironmentFile. Do not commit the
+# expanded replica URL, access keys, or private SSH key path.
+dbs:
+  - path: /data/src/AGENTS.db
+    replicas:
+      - url: ${FROG_LITESTREAM_REPLICA_URL}
+        key-path: ${FROG_LITESTREAM_SFTP_KEY_PATH}
+        sync-interval: 1s
+        retention: 168h

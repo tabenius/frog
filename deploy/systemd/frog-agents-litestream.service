@@ -1,0 +1,17 @@
+[Unit]
+Description=frog AGENTS.db Litestream replication
+Documentation=file:/data/src/ragbaz-frog/docs/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/ragbaz-frog/litestream.env
+ExecStart=/usr/bin/env litestream replicate -config %h/.config/ragbaz-frog/litestream.yml
+Restart=on-failure
+RestartSec=10s
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

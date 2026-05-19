@@ -33,6 +33,19 @@ class DocsGuides(unittest.TestCase):
                         pair, valid,
                         f"{n} cites unknown subcommand 'frog {pair}'")
 
+    def test_litestream_dr_files_are_documented(self):
+        deploy = (DOCS / "DEPLOY.md").read_text()
+        self.assertIn("Optional continuous disaster recovery with Litestream", deploy)
+        self.assertIn("Litestream is opt-in", deploy)
+        self.assertIn("does not require the `litestream` binary", deploy)
+        root = DOCS.parents[0]
+        for rel in (
+            "deploy/litestream/agents-db.litestream.yml.example",
+            "deploy/systemd/frog-agents-litestream.service",
+        ):
+            self.assertTrue((root / rel).exists(), rel)
+            self.assertIn(rel, deploy)
+
 
 if __name__ == "__main__":
     unittest.main()
