@@ -510,6 +510,41 @@ def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = Fal
     return {"ok": True, "message": f"wrote {target}", "agents_path": str(target)}
 
 
+def auto_snapshot(conn, *, label: str) -> dict:
+    """Consistent pre-flight backup taken before a destructive op, so a
+    bad mutation is always recoverable. Writes <backup_root>/<db>.pre-
+    <label> via SQLite's online backup API (overwritten each run -- it
+    is a safety net, not history; manual `frog snapshot` keeps the
+    .last/.prev generations). No-op for in-memory DBs or when
+    FROG_NO_AUTOSNAPSHOT=1."""
+    if os.environ.get("FROG_NO_AUTOSNAPSHOT") == "1":
+        return {"ok": True, "skipped": "disabled"}
+    row = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name='main'"
+    ).fetchone()
+    db_file = row[0] if row else None
+    if not db_file:
+        return {"ok": True, "skipped": "not file-backed"}
+    db_path = Path(db_file)
+    backup_root = Path("/data/backups")
+    try:
+        backup_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        backup_root = db_path.parent
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", label) or "op"
+    dest = backup_root / f"{db_path.name}.pre-{safe}"
+    try:
+        conn.commit()
+        dst = sqlite3.connect(str(dest))
+        try:
+            conn.backup(dst)
+        finally:
+            dst.close()
+    except Exception as e:
+        return {"ok": False, "error": f"auto-snapshot failed: {e}"}
+    return {"ok": True, "path": str(dest), "bytes": dest.stat().st_size}
+
+
 def snapshot_workspace(conn, *, dest: str | None = None) -> dict:
     """Back up the AGENTS.db file itself (not the source tree).
 
@@ -695,6 +730,7 @@ def db_gc(conn, *, older_than_days: int | None = None, keep: int = 200) -> dict:
       - target_runs: keep only the newest `keep` rows per
         (repo_path,target_kind,target_name); older cache rows are noise.
     """
+    auto_snapshot(conn, label="db-gc")
     removed = {}
     cutoff = None
     if older_than_days is not None:
@@ -1273,6 +1309,7 @@ def repo_move(conn, old_path: str, new_path: str, *,
         return {"ok": False,
                 "error": f"a repo is already registered at {new}"}
     repo_key = row["repo_key"]
+    auto_snapshot(conn, label="repo-move")
     tables = []
     for (tname,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"):
