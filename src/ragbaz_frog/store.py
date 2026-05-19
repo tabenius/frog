@@ -320,7 +320,7 @@ def _split_sql(text: str) -> list[str]:
     return stmts
 
 
-def migrate(db_path: str) -> dict:
+def _migrate_once(db_path: str) -> dict:
     conn = connect(db_path)
     prev_iso = conn.isolation_level
     conn.isolation_level = None  # explicit transaction control
@@ -359,6 +359,9 @@ def migrate(db_path: str) -> dict:
                 newly_applied.append(sql_file.name)
             except Exception as e:
                 conn.execute("ROLLBACK")
+                if (isinstance(e, sqlite3.OperationalError)
+                        and "locked" in str(e).lower()):
+                    raise  # transient contention -> retried by migrate()
                 return {
                     "ok": False,
                     "error": f"migration {sql_file.name} failed "
@@ -382,6 +385,30 @@ def migrate(db_path: str) -> dict:
     finally:
         conn.isolation_level = prev_iso
         conn.close()
+
+
+def migrate(db_path: str, *, attempts: int = 12) -> dict:
+    """Apply migrations, tolerating transient SQLite contention.
+
+    Opening a virgin DB from several processes at once (e.g. two
+    agents both running `frog init`/`db migrate`) can hit "database is
+    locked" during connection setup or while taking BEGIN IMMEDIATE --
+    a momentary race, not corruption (the per-migration transaction +
+    re-check still guarantee each migration applies at most once).
+    Retry with backoff so concurrent bootstrap just works; a re-run is
+    idempotent so already-applied migrations are skipped."""
+    for attempt in range(attempts):
+        try:
+            return _migrate_once(db_path)
+        except sqlite3.OperationalError as e:
+            if ("locked" not in str(e).lower()
+                    or attempt == attempts - 1):
+                return {"ok": False,
+                        "error": f"migrate failed: {e}",
+                        "db_path": db_path, "applied": []}
+            time.sleep(min(0.05 * (attempt + 1), 0.5))
+    return {"ok": False, "error": "migrate exhausted retries",
+            "db_path": db_path, "applied": []}
 
 
 def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | None = None) -> dict:
@@ -3676,6 +3703,65 @@ UNIT_KIND_BY_SOURCE = {
     "pyproject": "python",
     "compose": "compose",
 }
+
+
+_REPO_ACTIONS = ["build", "test", "lint", "scan", "doctor",
+                 "status", "info"]
+
+
+def repo_tree_snapshot(conn, *, include_third_party: bool = True) -> dict:
+    """Pure, serialisable view for the TUI repo view: every registered
+    repo with its units and the actions available on it, plus a nested
+    directory tree (common-prefix rooted) so the same data can be shown
+    either as a flat repo list or navigated as a filesystem tree."""
+    repos = repo_list(conn,
+                       include_third_party=include_third_party)["repos"]
+    units_by_repo: dict[str, list[str]] = {}
+    for u in unit_list(conn, repo_ref=None)["units"]:
+        units_by_repo.setdefault(u["repo_path"], []).append(
+            u.get("rel_path") or u.get("unit_path") or "?")
+    items = []
+    for r in repos:
+        items.append({
+            "repo_path": r["repo_path"],
+            "name": r.get("name") or Path(r["repo_path"]).name,
+            "repo_key": r.get("repo_key"),
+            "status": r.get("status"),
+            "third_party": bool(r.get("third_party")),
+            "units": sorted(units_by_repo.get(r["repo_path"], [])),
+            "actions": list(_REPO_ACTIONS),
+        })
+    items.sort(key=lambda x: x["repo_path"])
+
+    paths = [it["repo_path"] for it in items]
+    prefix = os.path.dirname(os.path.commonprefix(paths)) if paths else "/"
+    root = {"name": prefix or "/", "path": prefix or "/",
+            "dirs": {}, "repos": []}
+    by_path = {it["repo_path"]: it for it in items}
+    for rp in paths:
+        rel = rp[len(prefix):].strip("/")
+        parts = rel.split("/") if rel else [os.path.basename(rp)]
+        node = root
+        for comp in parts[:-1]:
+            child = node["dirs"].get(comp)
+            if child is None:
+                child = {"name": comp,
+                         "path": os.path.join(node["path"], comp),
+                         "dirs": {}, "repos": []}
+                node["dirs"][comp] = child
+            node = child
+        node["repos"].append(by_path[rp])
+
+    def _ser(n):
+        return {
+            "name": n["name"], "path": n["path"],
+            "dirs": [_ser(n["dirs"][k]) for k in sorted(n["dirs"])],
+            "repos": sorted(n["repos"],
+                            key=lambda x: x["repo_path"]),
+        }
+
+    return {"ok": True, "repos": items, "root": prefix or "/",
+            "tree": _ser(root)}
 
 
 def board_snapshot(conn, *, recent_limit: int = 14) -> dict:

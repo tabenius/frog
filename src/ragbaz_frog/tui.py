@@ -132,6 +132,97 @@ class TuiState:
         return None
 
 
+_REPO_C, _UNIT_C, _DIR_C, _ACTION_C = 78, 245, 39, 208
+
+
+class RepoView:
+    """Curses-free state for the repo view: a flat repo list (folded by
+    default, expand -> units + actions) that can be switched to a
+    foldable directory tree. Fully unit-tested; the shell only renders
+    ``visible_rows()`` and forwards keys."""
+
+    def __init__(self, snapshot: dict):
+        self.load(snapshot)
+        self.tree = False
+        self.expanded: set[str] = set()
+        self.sel = 0
+
+    def load(self, snapshot: dict) -> None:
+        self.snapshot = snapshot or {"repos": [], "tree":
+                                     {"dirs": [], "repos": [], "path": "/"}}
+
+    # ---- row model -------------------------------------------------
+    def _repo_rows(self, repo: dict, depth: int) -> list[dict]:
+        rp = repo["repo_path"]
+        exp = rp in self.expanded
+        out = [{"kind": "repo", "key": rp, "depth": depth,
+                "text": repo["name"], "repo": repo, "expanded": exp,
+                "foldable": True}]
+        if exp:
+            for u in repo["units"]:
+                out.append({"kind": "unit", "key": rp + "::" + u,
+                            "depth": depth + 1, "text": u,
+                            "foldable": False})
+            out.append({"kind": "actions",
+                        "key": rp + "::@actions", "depth": depth + 1,
+                        "text": "actions: " + " ".join(repo["actions"]),
+                        "foldable": False})
+        return out
+
+    def _walk_tree(self, node: dict, depth: int) -> list[dict]:
+        out = []
+        for d in node["dirs"]:
+            exp = d["path"] in self.expanded
+            out.append({"kind": "dir", "key": d["path"], "depth": depth,
+                        "text": d["name"] + "/", "expanded": exp,
+                        "foldable": True})
+            if exp:
+                out.extend(self._walk_tree(d, depth + 1))
+        for r in node["repos"]:
+            out.extend(self._repo_rows(r, depth))
+        return out
+
+    def visible_rows(self) -> list[dict]:
+        if self.tree:
+            return self._walk_tree(self.snapshot["tree"], 0)
+        rows = []
+        for r in self.snapshot["repos"]:
+            rows.extend(self._repo_rows(r, 0))
+        return rows
+
+    # ---- navigation ------------------------------------------------
+    def _clamp(self) -> None:
+        n = len(self.visible_rows())
+        self.sel = 0 if n == 0 else max(0, min(self.sel, n - 1))
+
+    def move(self, d: int) -> None:
+        n = len(self.visible_rows())
+        if n:
+            self.sel = (self.sel + d) % n
+
+    def to_edge(self, top: bool) -> None:
+        self.sel = 0 if top else max(0, len(self.visible_rows()) - 1)
+
+    def selected(self) -> dict | None:
+        rows = self.visible_rows()
+        return rows[self.sel] if rows else None
+
+    def toggle(self) -> None:
+        row = self.selected()
+        if not row or not row.get("foldable"):
+            return
+        k = row["key"]
+        if k in self.expanded:
+            self.expanded.discard(k)
+        else:
+            self.expanded.add(k)
+        self._clamp()
+
+    def toggle_tree(self) -> None:
+        self.tree = not self.tree
+        self.sel = 0
+
+
 def _use_color() -> bool:
     return (not os.environ.get("NO_COLOR")
             and _THEMES.get(os.environ.get("FROG_THEME", "ragbaz"), True))
@@ -194,6 +285,8 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                 pass
 
         st = TuiState(store.board_snapshot(conn), agent)
+        rv = RepoView(store.repo_tree_snapshot(conn))
+        view = "board"  # board | repos
         last_fp = None
         status = "claimed nothing yet"
         show_help = False
@@ -202,6 +295,7 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
             fp = _db_fingerprint(db_path)
             if fp != last_fp:
                 st.load(store.board_snapshot(conn))
+                rv.load(store.repo_tree_snapshot(conn))
                 last_fp = fp
             scr.erase()
             h, w = scr.getmaxyx()
@@ -209,86 +303,130 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
             # ---- header: RAGBAZ/frog + ASCII frog + TASK BOARD ----
             put(0, 2, "RAGBAZ", C(_ACCENT, bold=True))
             put(0, 8, "/frog", C(39, bold=True))
-            put(0, 14, "  TASK BOARD", C(_DIM))
+            put(0, 14, "  TASK BOARD" if view == "board"
+                else ("  REPOS (tree)" if rv.tree else "  REPOS"),
+                C(_DIM))
             for i, ln in enumerate(_FROG_ART):
                 put(1 + i, 2, ln, C(_FROG_C))
             top = 1 + len(_FROG_ART) + 1
 
-            # ---- columns ----
-            ncol = len(_COLS)
-            colw = max(16, w // ncol)
-            detail_h = 4
-            body_h = max(1, h - top - detail_h - 2)
-            for ci, (key, label) in enumerate(_COLS):
-                x = ci * colw
-                items = st.grid[ci]
-                put(top, x, f"{label} ({len(items)})".ljust(colw - 1),
-                    C(_COL_C[key], bold=True), colw - 1)
-                start, vis = st.window(ci, body_h)
-                if start > 0:
-                    put(top + 1, x + colw - 3, "▲", C(_DIM))
-                for r, tk in enumerate(vis):
-                    gy = top + 2 + r
-                    if gy >= top + 2 + body_h:
-                        break
-                    idx = start + r
-                    sel = (ci == st.col and idx == st.row)
-                    avail = colw - 2
-                    cx = 0
-                    for stext, scode in task_segments(
-                            tk, st.snapshot.get("ready", [])):
-                        if cx >= avail:
+            if view == "board":
+                # ---- columns ----
+                ncol = len(_COLS)
+                colw = max(16, w // ncol)
+                detail_h = 4
+                body_h = max(1, h - top - detail_h - 2)
+                for ci, (key, label) in enumerate(_COLS):
+                    x = ci * colw
+                    items = st.grid[ci]
+                    put(top, x, f"{label} ({len(items)})".ljust(colw - 1),
+                        C(_COL_C[key], bold=True), colw - 1)
+                    start, vis = st.window(ci, body_h)
+                    if start > 0:
+                        put(top + 1, x + colw - 3, "▲", C(_DIM))
+                    for r, tk in enumerate(vis):
+                        gy = top + 2 + r
+                        if gy >= top + 2 + body_h:
                             break
-                        chunk = stext[: avail - cx]
-                        put(gy, x + cx, chunk,
-                            C(scode, bold=sel, rev=sel), len(chunk))
-                        cx += len(chunk)
-                    if cx < avail and sel:
-                        put(gy, x + cx, " " * (avail - cx),
-                            C(_PRIO_C.get((tk.get("priority") or "p3").lower(),
-                                          245), rev=True), avail - cx)
-                if start + len(vis) < len(items):
-                    put(top + 1 + body_h, x + colw - 3, "▼", C(_DIM))
+                        idx = start + r
+                        sel = (ci == st.col and idx == st.row)
+                        avail = colw - 2
+                        cx = 0
+                        for stext, scode in task_segments(
+                                tk, st.snapshot.get("ready", [])):
+                            if cx >= avail:
+                                break
+                            chunk = stext[: avail - cx]
+                            put(gy, x + cx, chunk,
+                                C(scode, bold=sel, rev=sel), len(chunk))
+                            cx += len(chunk)
+                        if cx < avail and sel:
+                            put(gy, x + cx, " " * (avail - cx),
+                                C(_PRIO_C.get((tk.get("priority") or "p3").lower(),
+                                              245), rev=True), avail - cx)
+                    if start + len(vis) < len(items):
+                        put(top + 1 + body_h, x + colw - 3, "▼", C(_DIM))
 
-            # ---- inspector for the selected task ----
-            d = st.detail()
-            iy = h - detail_h - 1
-            put(iy, 0, "─" * (w - 1), C(_DIM))
-            if d:
-                put(iy + 1, 1,
-                    f"{d['priority']} {d['slug']}  {d['title']}"[: w - 2],
-                    C(_PRIO_C.get(d['priority'], 245), bold=True))
-                meta = f"status={d['status']}  agent={d['agent'] or '-'}"
-                if d["ready"]:
-                    meta += "  ★ ready"
-                put(iy + 2, 1, meta[: w - 2], C(_DIM))
-                bl = ("blocked on: " + ", ".join(d["blockers"])
-                      if d["blockers"] else "no unmet dependencies")
-                put(iy + 3, 1, bl[: w - 2],
-                    C(203 if d["blockers"] else _FROG_C))
-            # ---- recent strip + help/status ----
-            rec = st.snapshot.get("recent", [])
-            if rec:
-                e = rec[-1]
-                put(h - 2, 1,
-                    f"recent: {e['created_at'][11:19]} {e['kind']} {e['summary']}"[: w - 2],
+                # ---- inspector for the selected task ----
+                d = st.detail()
+                iy = h - detail_h - 1
+                put(iy, 0, "─" * (w - 1), C(_DIM))
+                if d:
+                    put(iy + 1, 1,
+                        f"{d['priority']} {d['slug']}  {d['title']}"[: w - 2],
+                        C(_PRIO_C.get(d['priority'], 245), bold=True))
+                    meta = f"status={d['status']}  agent={d['agent'] or '-'}"
+                    if d["ready"]:
+                        meta += "  ★ ready"
+                    put(iy + 2, 1, meta[: w - 2], C(_DIM))
+                    bl = ("blocked on: " + ", ".join(d["blockers"])
+                          if d["blockers"] else "no unmet dependencies")
+                    put(iy + 3, 1, bl[: w - 2],
+                        C(203 if d["blockers"] else _FROG_C))
+                # ---- recent strip + help/status ----
+                rec = st.snapshot.get("recent", [])
+                if rec:
+                    e = rec[-1]
+                    put(h - 2, 1,
+                        f"recent: {e['created_at'][11:19]} {e['kind']} {e['summary']}"[: w - 2],
+                        C(_DIM))
+                hint = ("?: help  " if not show_help else "")
+                put(h - 1, 1,
+                    f"{hint}q quit  ←/→ col  ↑/↓ task  c claim  f finish  n next  r refresh   | {status}"[: w - 2],
                     C(_DIM))
-            hint = ("?: help  " if not show_help else "")
-            put(h - 1, 1,
-                f"{hint}q quit  ←/→ col  ↑/↓ task  c claim  f finish  n next  r refresh   | {status}"[: w - 2],
-                C(_DIM))
-            if show_help:
-                lines = ["KEYS",
-                         " ←/→ or Tab  switch column",
-                         " ↑/↓         move selection (scrolls)",
-                         " g / G       top / bottom of column",
-                         " c           claim selected task",
-                         " f           finish selected task",
-                         " n           jump to scheduler's next pick",
-                         " r           force refresh   q  quit"]
-                for i, ln in enumerate(lines):
-                    put(top + 2 + i, w // 2 - 18, ln.ljust(36),
-                        C(_ACCENT, bold=(i == 0), rev=True))
+                if show_help:
+                    lines = ["KEYS",
+                             " ←/→ or Tab  switch column",
+                             " ↑/↓         move selection (scrolls)",
+                             " g / G       top / bottom of column",
+                             " c           claim selected task",
+                             " f           finish selected task",
+                             " n           jump to scheduler's next pick",
+                             " r           force refresh   q  quit"]
+                    for i, ln in enumerate(lines):
+                        put(top + 2 + i, w // 2 - 18, ln.ljust(36),
+                            C(_ACCENT, bold=(i == 0), rev=True))
+            else:
+                rows = rv.visible_rows()
+                vis_h = max(1, h - top - 3)
+                off = max(0, min(getattr(rv, "_off", 0),
+                                 max(0, len(rows) - vis_h)))
+                if rv.sel < off:
+                    off = rv.sel
+                elif rv.sel >= off + vis_h:
+                    off = rv.sel - vis_h + 1
+                rv._off = off
+                _kc = {"repo": _REPO_C, "unit": _UNIT_C,
+                       "dir": _DIR_C, "actions": _ACTION_C}
+                if not rows:
+                    put(top, 2, "no registered repos "
+                        "(frog repo register <path>)", C(_DIM))
+                for i, row in enumerate(rows[off:off + vis_h]):
+                    gy = top + i
+                    idx = off + i
+                    sel = idx == rv.sel
+                    marker = ""
+                    if row.get("foldable"):
+                        marker = "v " if row.get("expanded") else "> "
+                    line = ("  " * row["depth"]) + marker + row["text"]
+                    put(gy, 2, line[: w - 4],
+                        C(_kc.get(row["kind"], _DIM),
+                          bold=sel, rev=sel), w - 4)
+                d = rv.selected()
+                iy = h - 2
+                put(iy, 0, "-" * (w - 1), C(_DIM))
+                if d and d["kind"] == "repo":
+                    r = d["repo"]
+                    put(iy + 1, 1, (r["name"] + "  " + r["repo_path"]
+                                    + "  [" + str(r.get("status") or "-")
+                                    + "]  " + str(len(r["units"]))
+                                    + " unit(s)")[: w - 2], C(_REPO_C))
+                elif d:
+                    put(iy + 1, 1, d["text"][: w - 2], C(_DIM))
+                put(h - 1, 1,
+                    ("q quit  v board  t tree  up/dn move  "
+                     "enter/space fold  g/G ends  r refresh"
+                     "   | " + status)[: w - 2], C(_DIM))
             scr.refresh()
 
             try:
@@ -301,6 +439,25 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
             c = chr(ch) if 0 <= ch < 256 else ""
             if c in ("q", "Q") or ch == 3:  # 3 = Ctrl-C (ETX)
                 return 0
+            if c in ("v", "V"):
+                view = "repos" if view == "board" else "board"
+                continue
+            if view == "repos":
+                if c in ("t", "T"):
+                    rv.toggle_tree()
+                elif ch == curses.KEY_UP:
+                    rv.move(-1)
+                elif ch == curses.KEY_DOWN:
+                    rv.move(1)
+                elif ch in (10, 13, curses.KEY_ENTER, 32):
+                    rv.toggle()
+                elif c == "g":
+                    rv.to_edge(True)
+                elif c == "G":
+                    rv.to_edge(False)
+                elif c in ("r", "R"):
+                    last_fp = None
+                continue
             if c == "?":
                 show_help = not show_help
             elif ch in (curses.KEY_LEFT,) or ch == curses.KEY_BTAB:
