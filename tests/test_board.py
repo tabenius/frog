@@ -105,6 +105,10 @@ class Board(unittest.TestCase):
         head = frame.splitlines()[:6]
         self.assertTrue(any("◕" in l for l in head),
                         "ASCII frog should render under the header")
+        self.assertEqual(main_cli._FROG_ART[0], "     ___")
+        self.assertEqual(main_cli._FROG_ART[1], "    ╱◕ ◕╲›")
+        self.assertEqual(main_cli._FROG_ART[2], "   ( ˙ᴥ˙ )")
+        self.assertNotIn("┘___└", "\n".join(main_cli._FROG_ART))
 
 if __name__ == "__main__":
     unittest.main()
