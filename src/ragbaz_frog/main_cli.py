@@ -5,7 +5,6 @@ import contextlib
 import io
 import json
 import os
-import re
 import shutil
 import shlex
 import subprocess
@@ -15,6 +14,9 @@ from pathlib import Path
 
 from ragbaz_frog import DEFAULT_CONFIG_PATH
 from ragbaz_frog import DEFAULT_DB_PATH
+from ragbaz_frog import cli_completion
+from ragbaz_frog import cli_help
+from ragbaz_frog import cli_render
 from ragbaz_frog import config as frog_config
 from ragbaz_frog import mcp_server
 from ragbaz_frog import store
@@ -100,7 +102,7 @@ _ANSI = {
 _COLOR_ENABLED = True
 _PAGE_HUMAN_OUTPUT = False
 _PAGER_ENABLED = True
-_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_ANSI_RE = cli_render.ANSI_RE
 
 
 def _use_color() -> bool:
@@ -166,37 +168,15 @@ def _should_page_for_args(args) -> bool:
 
 
 def _visible_len(value: object) -> int:
-    return len(_ANSI_RE.sub("", str(value)))
+    return cli_render.visible_len(value)
 
 
 def _pad_visible(value: object, width: int) -> str:
-    text = str(value)
-    return text + " " * max(0, width - _visible_len(text))
+    return cli_render.pad_visible(value, width)
 
 
 def _clip_visible(value: object, width: int | None) -> str:
-    text = str(value)
-    if width is None or width <= 0 or _visible_len(text) <= width:
-        return text
-    if width <= 3:
-        return "." * width
-    target = width - 3
-    out = []
-    visible = 0
-    index = 0
-    while index < len(text) and visible < target:
-        match = _ANSI_RE.match(text, index)
-        if match:
-            out.append(match.group(0))
-            index = match.end()
-            continue
-        out.append(text[index])
-        visible += 1
-        index += 1
-    out.append("...")
-    if "\033[" in text:
-        out.append(_ANSI["reset"])
-    return "".join(out)
+    return cli_render.clip_visible(value, width, reset=_ANSI["reset"])
 
 
 def _render_table(
@@ -224,30 +204,7 @@ def _render_table(
 
 
 def _colorize_help(text: str) -> str:
-    if not _use_color():
-        return text
-    section_headers = {
-        "positional arguments:",
-        "options:",
-        "commands:",
-        "subcommands:",
-        "JSON:",
-        "Repo addressing:",
-        "Examples:",
-        "Grammar:",
-    }
-    lines = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if line.startswith("usage:"):
-            lines.append(_color("usage:", "muted") + line[len("usage:"):])
-        elif stripped in section_headers:
-            lines.append(line.replace(stripped, _color(stripped, "meta"), 1))
-        elif stripped.startswith("frog "):
-            lines.append(line.replace(stripped, _color(stripped, "claim"), 1))
-        else:
-            lines.append(line)
-    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    return cli_help.colorize_help(text, use_color=_use_color, color=_color)
 
 
 class FrogArgumentParser(argparse.ArgumentParser):
@@ -365,107 +322,13 @@ def _command_reference(parser, _level: int = 0) -> str:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent box doctor board tui whereis setup provider gh import export hook agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
-    repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
-    repo_names = _repo_name_words()
-    workspace_names = " ".join(_workspace_names())
-    if shell == "bash":
-        return f"""_frog_complete() {{
-  local cur
-  _init_completion || return
-  local top="{top}"
-  local repo_subs="{repo_subs}"
-  local repo_names="{repo_names}"
-  local registered_files="{_registered_file_words()}"
-  if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "$top" -- "$cur") )
-    return
-  fi
-  case "${{COMP_WORDS[1]}}" in
-    completion) COMPREPLY=( $(compgen -W "bash fish" -- "$cur") ) ;;
-    ps|snapshot|status) COMPREPLY=() ;;
-    doctor) COMPREPLY=( $(compgen -W "--no-fix" -- "$cur") ) ;;
-    db) COMPREPLY=( $(compgen -W "migrate schema gc" -- "$cur") ) ;;
-    new|agent-instructions) COMPREPLY=( $(compgen -d -- "$cur") ) ;;
-    config)
-      if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "info host workspace coordinator path" -- "$cur") )
-      elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "host" ]]; then
-        COMPREPLY=( $(compgen -W "add list" -- "$cur") )
-      elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "workspace" ]]; then
-        COMPREPLY=( $(compgen -W "add list use" -- "$cur") )
-      elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "coordinator" ]]; then
-        COMPREPLY=( $(compgen -W "show set" -- "$cur") )
-      elif [[ $COMP_CWORD -eq 4 && "${{COMP_WORDS[2]}}" == "coordinator" && "${{COMP_WORDS[3]}}" == "set" ]]; then
-        COMPREPLY=( $(compgen -W "{workspace_names}" -- "$cur") )
-      elif [[ $COMP_CWORD -eq 4 && "${{COMP_WORDS[2]}}" == "workspace" && "${{COMP_WORDS[3]}}" == "use" ]]; then
-        COMPREPLY=( $(compgen -W "{workspace_names}" -- "$cur") )
-      elif [[ $COMP_CWORD -eq 3 && "${{COMP_WORDS[2]}}" == "path" ]]; then
-        COMPREPLY=( $(compgen -W "bash fish" -- "$cur") )
-      fi
-      ;;
-    mcp)
-      [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "serve tools" -- "$cur") ) ;;
-    repo)
-      if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "$repo_subs" -- "$cur") )
-      elif [[ $COMP_CWORD -eq 3 ]]; then
-        COMPREPLY=( $(compgen -W "$repo_names" -- "$cur") )
-      fi
-      ;;
-    unit) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "discover list" -- "$cur") ) ;;
-    task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list next claim finish info status dependency conflict tag assign" -- "$cur") ) ;;
-    lock) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "check acquire renew release list info" -- "$cur") ) ;;
-    file)
-      if [[ $COMP_CWORD -eq 2 ]]; then
-        COMPREPLY=( $(compgen -W "upsert list info" -- "$cur") )
-      elif [[ "${{COMP_WORDS[2]}}" == "info" ]]; then
-        COMPREPLY=( $(compgen -W "$registered_files" -- "$cur") )
-        [[ ${{#COMPREPLY[@]}} -eq 0 ]] && COMPREPLY=( $(compgen -f -- "$cur") )
-      elif [[ "${{COMP_WORDS[2]}}" == "upsert" ]]; then
-        COMPREPLY=( $(compgen -f -- "$cur") )
-      fi
-      ;;
-    provider) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "pull outbox sync" -- "$cur") ) ;;
-    hook) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "add list remove dispatch digest" -- "$cur") ) ;;
-    box) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "whoami peers join" -- "$cur") ) ;;
-    log) COMPREPLY=( $(compgen -W "why blame --follow --limit --repo --all -f" -- "$cur") ) ;;
-  esac
-}}
-complete -F _frog_complete frog
-"""
-    if shell == "fish":
-        return f"""function __frog_complete_registered_files
-    command frog --no-color --no-pager --json file list 2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); [print(item.get("file_path","")) for item in data.get("files",[]) if item.get("file_path")]' 2>/dev/null
-end
-
-complete -c frog -f
-complete -c frog -n '__fish_use_subcommand' -a '{top}'
-complete -c frog -n '__fish_seen_subcommand_from completion' -a 'bash fish'
-complete -c frog -n '__fish_seen_subcommand_from doctor' -a '--no-fix'
-complete -c frog -n '__fish_seen_subcommand_from db' -a 'migrate schema gc'
-complete -c frog -n '__fish_seen_subcommand_from new agent-instructions' -a '(__fish_complete_directories)'
-complete -c frog -n '__fish_seen_subcommand_from config' -a 'info host workspace coordinator path'
-complete -c frog -n '__fish_seen_subcommand_from path' -a 'bash fish'
-complete -c frog -n '__fish_seen_subcommand_from mcp' -a 'serve tools'
-complete -c frog -n '__fish_seen_subcommand_from host' -a 'add list'
-complete -c frog -n '__fish_seen_subcommand_from workspace' -a 'add list use'
-complete -c frog -n '__fish_seen_subcommand_from coordinator' -a 'show set'
-complete -c frog -n '__fish_seen_subcommand_from repo' -a '{repo_subs}'
-complete -c frog -n '__fish_seen_subcommand_from {" ".join(sorted(REPO_ACTIONS))} info' -a '{repo_names}'
-complete -c frog -n '__fish_seen_subcommand_from unit' -a 'discover list'
-complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list next claim finish info status dependency conflict tag assign'
-complete -c frog -n '__fish_seen_subcommand_from lock' -a 'check acquire renew release list info'
-complete -c frog -n '__fish_seen_subcommand_from file; and not __fish_seen_subcommand_from upsert list info' -a 'upsert list info'
-complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from info' -a '(__frog_complete_registered_files)'
-complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from info' -F
-complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from upsert' -F
-complete -c frog -n '__fish_seen_subcommand_from provider' -a 'pull outbox sync'
-complete -c frog -n '__fish_seen_subcommand_from hook' -a 'add list remove dispatch digest'
-complete -c frog -n '__fish_seen_subcommand_from box' -a 'whoami peers join'
-complete -c frog -n '__fish_seen_subcommand_from log' -a 'why blame --follow --limit --repo --all -f'
-"""
-    raise ValueError(f"unsupported shell: {shell}")
+    return cli_completion.completion_script(
+        shell,
+        repo_actions=REPO_ACTIONS,
+        repo_names=_repo_name_words(),
+        workspace_names=_workspace_names(),
+        registered_files=_registered_file_words(),
+    )
 
 
 def _emit(payload: dict, as_json: bool) -> int:
