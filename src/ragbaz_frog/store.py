@@ -764,8 +764,177 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
                 repairable=True,
             )
 
+    # schema drift
+    drift = schema_drift(conn)
+    if drift.get("behind"):
+        detail = (
+            f"database is missing {len(drift['behind'])} migration(s): "
+            + ", ".join(drift["behind"][:5])
+        )
+        if fix and db_path:
+            migrated = migrate(db_path)
+            if migrated.get("ok"):
+                repair(
+                    "schema_behind",
+                    f"applied {len(migrated.get('applied', []))} migration(s)",
+                    count=len(migrated.get("applied", [])),
+                )
+            else:
+                add("warn", "schema_behind", f"{detail}; migrate failed: {migrated.get('error')}")
+        else:
+            add("warn", "schema_behind", detail, repairable=bool(db_path))
+    if drift.get("ahead"):
+        add(
+            "warn",
+            "schema_ahead",
+            f"database has {len(drift['ahead'])} migration(s) unknown to this frog build: "
+            + ", ".join(drift["ahead"][:5]),
+        )
+
+    # done tasks should not keep active owners or task locks.
+    done_active_assignments = conn.execute(
+        """
+        SELECT ta.id, ta.task_slug, ta.agent_name
+        FROM task_assignments ta
+        JOIN tasks t ON t.slug = ta.task_slug
+        WHERE ta.active = 1 AND LOWER(t.workflow_status) IN ('done','finished')
+        """
+    ).fetchall()
+    if done_active_assignments:
+        ids = [r["id"] for r in done_active_assignments]
+        if fix:
+            conn.executemany(
+                "UPDATE task_assignments SET active = 0 WHERE id = ?",
+                [(item_id,) for item_id in ids],
+            )
+            record_event(
+                conn,
+                kind="doctor.repair",
+                summary=f"deactivated {len(ids)} assignment(s) for done task(s)",
+                payload={
+                    "code": "done_task_active_assignments",
+                    "assignment_ids": ids,
+                    "assignments": [dict(r) for r in done_active_assignments],
+                },
+            )
+            conn.commit()
+            repair(
+                "done_task_active_assignments",
+                f"deactivated {len(ids)} assignment(s) for done task(s)",
+                count=len(ids),
+                ids=ids,
+            )
+        else:
+            add(
+                "warn",
+                "done_task_active_assignments",
+                f"{len(ids)} done task assignment(s) are still active",
+                repairable=True,
+            )
+
+    done_task_locks = conn.execute(
+        """
+        SELECT l.id, l.scope_key, l.agent_name
+        FROM locks l
+        JOIN tasks t ON l.scope_key = 'task:' || t.slug
+        WHERE l.status = 'active' AND LOWER(t.workflow_status) IN ('done','finished')
+        """
+    ).fetchall()
+    if done_task_locks:
+        ids = [r["id"] for r in done_task_locks]
+        if fix:
+            now = utc_now_iso()
+            conn.executemany(
+                """
+                UPDATE locks
+                SET status = 'released',
+                    released_at = COALESCE(released_at, ?),
+                    updated_at = ?
+                WHERE id = ? AND status = 'active'
+                """,
+                [(now, now, lock_id) for lock_id in ids],
+            )
+            record_event(
+                conn,
+                kind="doctor.repair",
+                summary=f"released {len(ids)} active lock(s) for done task(s)",
+                payload={
+                    "code": "done_task_active_locks",
+                    "lock_ids": ids,
+                    "locks": [dict(r) for r in done_task_locks],
+                },
+            )
+            conn.commit()
+            repair(
+                "done_task_active_locks",
+                f"released {len(ids)} active lock(s) for done task(s)",
+                count=len(ids),
+                ids=ids,
+            )
+        else:
+            add(
+                "warn",
+                "done_task_active_locks",
+                f"{len(ids)} active task lock(s) belong to done tasks",
+                repairable=True,
+            )
+
+    # repo key/alias consistency on this box.
+    if table_exists(conn, "repo_aliases"):
+        missing_alias = []
+        for r in conn.execute(
+            "SELECT repo_path, repo_key FROM repos WHERE COALESCE(status,'active') != 'archived'"
+        ).fetchall():
+            repo_path = r["repo_path"]
+            repo_key = r["repo_key"]
+            alias = None
+            if repo_key:
+                alias = conn.execute(
+                    "SELECT 1 FROM repo_aliases WHERE repo_key = ? AND box = ? AND repo_path = ?",
+                    (repo_key, _box_id(), repo_path),
+                ).fetchone()
+            if not repo_key or not alias:
+                missing_alias.append(repo_path)
+        if missing_alias:
+            if fix:
+                for repo_path in missing_alias:
+                    ensure_repo_key(conn, repo_path)
+                record_event(
+                    conn,
+                    kind="doctor.repair",
+                    summary=f"restored {len(missing_alias)} repo key/alias mapping(s)",
+                    payload={"code": "repo_alias_missing", "repo_paths": missing_alias},
+                )
+                conn.commit()
+                repair(
+                    "repo_alias_missing",
+                    f"restored {len(missing_alias)} repo key/alias mapping(s)",
+                    count=len(missing_alias),
+                )
+            else:
+                add(
+                    "warn",
+                    "repo_alias_missing",
+                    f"{len(missing_alias)} repo(s) lack a local repo_key/repo_alias mapping",
+                    repairable=True,
+                )
+
+    missing_paths = []
+    for r in conn.execute(
+        "SELECT repo_path, name FROM repos WHERE COALESCE(status,'active') != 'archived'"
+    ).fetchall():
+        if r["repo_path"] and not Path(r["repo_path"]).exists():
+            missing_paths.append(r["repo_path"])
+    if missing_paths:
+        add(
+            "warn",
+            "repo_path_missing",
+            f"{len(missing_paths)} registered repo path(s) do not exist: "
+            + ", ".join(missing_paths[:5]),
+        )
+
     # tasks whose deps are ALL done but task is still blocked-ish (drift)
-    drift = []
+    ready = []
     for r in conn.execute(
         "SELECT slug, workflow_status FROM tasks "
         "WHERE LOWER(workflow_status) IN ('blocked','idea')"
@@ -786,11 +955,11 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
                 all_done = False
                 break
         if all_done:
-            drift.append(r["slug"])
-    if drift:
+            ready.append(r["slug"])
+    if ready:
         add("info", "ready_tasks",
-            f"{len(drift)} task(s) have all deps done and are takeable: "
-            + ", ".join(drift[:10]))
+            f"{len(ready)} task(s) have all deps done and are takeable: "
+            + ", ".join(ready[:10]))
 
     # mirror lag
     for r in conn.execute(
