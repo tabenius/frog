@@ -277,37 +277,102 @@ def record_event(
     )
 
 
+def _split_sql(text: str) -> list[str]:
+    """Split a migration into individual statements. Handles `--` line
+    comments and single-quoted strings (incl. '' escapes) so a `;` in a
+    default literal is never a false boundary. frog migrations are plain
+    DDL -- no triggers, no /* */ -- which this covers exactly."""
+    stmts, buf, i, n = [], [], 0, len(text)
+    in_str = False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            buf.append(ch)
+            if ch == "'":
+                if i + 1 < n and text[i + 1] == "'":
+                    buf.append("'")
+                    i += 2
+                    continue
+                in_str = False
+            i += 1
+            continue
+        if ch == "-" and i + 1 < n and text[i + 1] == "-":
+            j = text.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        if ch == "'":
+            in_str = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ";":
+            s = "".join(buf).strip()
+            if s:
+                stmts.append(s)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        stmts.append(tail)
+    return stmts
+
+
 def migrate(db_path: str) -> dict:
     conn = connect(db_path)
+    prev_iso = conn.isolation_level
+    conn.isolation_level = None  # explicit transaction control
     try:
-        applied = {
-            row["name"]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
-        }
-        if applied:
-            rows = conn.execute("SELECT name FROM schema_migrations").fetchall()
-            applied = {row["name"] for row in rows}
-        else:
-            applied = set()
         newly_applied = []
         for sql_file in sorted(migration_dir().glob("*.sql")):
-            if sql_file.name in applied:
-                continue
-            conn.executescript(sql_file.read_text())
-            conn.execute(
-                "INSERT OR REPLACE INTO schema_migrations(name, applied_at) VALUES(?, ?)",
-                (sql_file.name, utc_now_iso()),
-            )
-            record_event(
-                conn,
-                kind="migration.applied",
-                summary=f"applied {sql_file.name}",
-                payload={"migration": sql_file.name},
-            )
-            conn.commit()
-            newly_applied.append(sql_file.name)
-        ensure_box_identity(conn)
-        conn.commit()
+            # BEGIN IMMEDIATE serializes concurrent migrators (the whole
+            # premise is many agents) and is re-checked inside the lock,
+            # so a parallel `db migrate` cannot double-apply. The apply +
+            # its schema_migrations bookkeeping share ONE transaction, so
+            # a migration that fails partway rolls back entirely and can
+            # be retried cleanly (the old executescript auto-committed,
+            # leaving an unrecoverable half-applied schema).
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                has_tbl = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='schema_migrations'").fetchone()
+                applied = ({r[0] for r in conn.execute(
+                    "SELECT name FROM schema_migrations")}
+                    if has_tbl else set())
+                if sql_file.name in applied:
+                    conn.execute("ROLLBACK")
+                    continue
+                for stmt in _split_sql(sql_file.read_text()):
+                    conn.execute(stmt)
+                conn.execute(
+                    "INSERT OR REPLACE INTO schema_migrations"
+                    "(name, applied_at) VALUES(?, ?)",
+                    (sql_file.name, utc_now_iso()))
+                record_event(
+                    conn, kind="migration.applied",
+                    summary=f"applied {sql_file.name}",
+                    payload={"migration": sql_file.name})
+                conn.execute("COMMIT")
+                newly_applied.append(sql_file.name)
+            except Exception as e:
+                conn.execute("ROLLBACK")
+                return {
+                    "ok": False,
+                    "error": f"migration {sql_file.name} failed "
+                             f"(rolled back, schema unchanged): {e}",
+                    "db_path": db_path,
+                    "applied": newly_applied,
+                }
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            ensure_box_identity(conn)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         return {
             "ok": True,
             "message": f"applied {len(newly_applied)} migration(s)",
@@ -315,6 +380,7 @@ def migrate(db_path: str) -> dict:
             "applied": newly_applied,
         }
     finally:
+        conn.isolation_level = prev_iso
         conn.close()
 
 
