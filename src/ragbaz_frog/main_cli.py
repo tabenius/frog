@@ -314,7 +314,7 @@ def _registered_file_words() -> str:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent box doctor board tui whereis setup provider gh import export hook agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    top = "db new agent box join doctor board tui whereis setup provider gh import export hook agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -1803,8 +1803,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_cmd = sub.add_parser("agent", help="Acting-agent identity")
     box_cmd = sub.add_parser("box", help="This machine federation identity")
+    join_cmd = sub.add_parser("join", help="Federate with a peer box over SSH ([user@]host[:/path/AGENTS.db])")
+    join_cmd.add_argument("ssh_target", help="[user@]host[:/path/to/AGENTS.db]")
+    join_cmd.add_argument("--db", dest="remote_db", help="Remote AGENTS.db path (overrides :path in target)")
+    join_cmd.add_argument("--remote-frog", default="frog", help="frog executable on the peer (default: frog)")
     box_sub = box_cmd.add_subparsers(dest="box_command", required=True)
     box_sub.add_parser("whoami", help="Show this box id, hostname, and every box this AGENTS.db has seen")
+    box_sub.add_parser("peers", help="List federated peer boxes")
     agent_sub = agent_cmd.add_subparsers(dest="agent_command", required=True)
     agent_sub.add_parser("whoami", help="Show the resolved acting agent + session")
     ag_reg = agent_sub.add_parser("register", help="Register/update an agent")
@@ -2595,6 +2600,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "box":
             if args.box_command == "whoami":
                 return _emit(store.box_whoami(conn), args.json)
+            if args.box_command == "peers":
+                return _emit(store.peers_list(conn), args.json)
+        if args.command == "join":
+            return _emit(store.federation_join(
+                conn, args.ssh_target, remote_db=args.remote_db,
+                remote_frog=args.remote_frog), args.json)
         if args.command == "agent":
             if args.agent_command == "whoami":
                 return _emit(store.agent_whoami(conn), args.json)

@@ -951,6 +951,113 @@ def box_whoami(conn) -> dict:
     }
 
 
+def _parse_ssh_target(ssh_target: str) -> tuple[str, str | None]:
+    """`[user@]host[:/path/to/AGENTS.db]` -> (host, remote_db|None)."""
+    s = ssh_target.strip()
+    # split only on the first ':' that follows the host (after any '@')
+    at = s.rfind("@")
+    head = s[at + 1:] if at != -1 else s
+    if ":" in head:
+        hostpart, db = head.split(":", 1)
+        host = (s[: at + 1] + hostpart) if at != -1 else hostpart
+        return host, (db or None)
+    return s, None
+
+
+def _remote_exec(host: str, remote_db: str | None, remote_frog: str,
+                  argv: list[str]) -> dict:  # pragma: no cover - real SSH
+    cmd = ["ssh", host, remote_frog]
+    if remote_db:
+        cmd += ["--db", remote_db]
+    cmd += ["--json", *argv]
+    proc = subprocess.run(cmd, text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"remote frog on {host} failed ({proc.returncode}): "
+            f"{proc.stderr.strip() or proc.stdout.strip()}")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"remote frog on {host} returned non-JSON: {e}") from e
+
+
+def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
+                     remote_frog: str = "frog", exec=_remote_exec) -> dict:
+    """Federate with a peer box over SSH (no daemon, no shared file).
+
+    Learns the peer's box_id and its (repo_key -> path) map, records
+    reciprocal repo_aliases for every repo_key both boxes share, and
+    registers the peer so `whereis`/sync can resolve it later. Pure
+    coordination metadata -- no code or data is moved."""
+    host, parsed_db = _parse_ssh_target(ssh_target)
+    rdb = remote_db or parsed_db
+
+    who = exec(host, rdb, remote_frog, ["box", "whoami"])
+    if not who.get("box_id"):
+        return {"ok": False, "error": "peer did not report a box_id",
+                "raw": who}
+    peer_box = who["box_id"]
+    peer_host = who.get("hostname")
+    if peer_box == _box_id():
+        return {"ok": False,
+                "error": f"refusing to join self (box_id {peer_box})"}
+
+    rl = exec(host, rdb, remote_frog, ["repo", "list"])
+    remote_repos = {r["repo_key"]: r["repo_path"]
+                    for r in rl.get("repos", []) if r.get("repo_key")}
+    local = repo_list(conn, include_third_party=True)
+    local_keys = {r["repo_key"] for r in local["repos"] if r.get("repo_key")}
+
+    matched, added = [], 0
+    now = utc_now_iso()
+    for key, rpath in remote_repos.items():
+        if key in local_keys:
+            matched.append(key)
+            cur = conn.execute(
+                "SELECT 1 FROM repo_aliases WHERE repo_key=? AND box=? "
+                "AND repo_path=?", (key, peer_box, rpath)).fetchone()
+            if not cur:
+                conn.execute(
+                    "INSERT OR IGNORE INTO repo_aliases"
+                    "(repo_key, box, repo_path, created_at) VALUES(?,?,?,?)",
+                    (key, peer_box, rpath, now))
+                added += 1
+
+    conn.execute(
+        """INSERT INTO peers(box_id, hostname, ssh_target, remote_db,
+                             added_at, last_join_at)
+           VALUES(?,?,?,?,?,?)
+           ON CONFLICT(box_id) DO UPDATE SET
+             hostname=excluded.hostname, ssh_target=excluded.ssh_target,
+             remote_db=excluded.remote_db, last_join_at=excluded.last_join_at""",
+        (peer_box, peer_host, host, rdb, now, now))
+    record_event(
+        conn, kind="federation.join",
+        summary=f"joined peer {peer_box} ({host}): {len(matched)} shared repo(s)",
+        payload={"peer_box": peer_box, "host": host,
+                 "matched": matched, "aliases_added": added})
+    conn.commit()
+    return {
+        "ok": True,
+        "message": f"joined {peer_box} via {host}: "
+                   f"{len(matched)} shared repo(s), {added} alias(es) added",
+        "peer_box": peer_box,
+        "peer_hostname": peer_host,
+        "matched": sorted(matched),
+        "unmatched_remote": sorted(set(remote_repos) - set(matched)),
+        "unmatched_local": sorted(local_keys - set(matched)),
+        "aliases_added": added,
+    }
+
+
+def peers_list(conn) -> dict:
+    rows = [dict(r) for r in conn.execute(
+        "SELECT box_id, hostname, ssh_target, remote_db, added_at, "
+        "last_join_at FROM peers ORDER BY last_join_at DESC")]
+    return {"ok": True, "peers": rows, "count": len(rows)}
+
+
 def compute_repo_key(repo_path: str) -> str:
     """Stable identity that is identical on every box:
       1. a committed `.frogid` file at the repo root (authoritative), else
