@@ -717,6 +717,23 @@ def _emit(payload: dict, as_json: bool) -> int:
                         f"not on this box -- lives on {where}", "warn"))
         if not payload["tasks"]:
             print("  " + _color("(nothing unblocked)", "muted"))
+            summary = payload.get("skipped_summary") or {}
+            labels = [
+                ("deps", "blocked by dependencies"),
+                ("owner", "owned by another agent"),
+                ("lock", "blocked by locks"),
+                ("conflict", "conflicting task in progress"),
+                ("status", "blocked status"),
+                ("done", "already done"),
+                ("other_repo", "outside this repo"),
+            ]
+            parts = [
+                f"{count} {label}"
+                for key, label in labels
+                if (count := int(summary.get(key) or 0))
+            ]
+            if parts:
+                print("  " + _color("why:", "muted") + " " + "; ".join(parts))
         for s in payload.get("skipped", []):
             print(f"  {_color('skip', 'warn')} {_color(s['slug'], 'claim')}: {s['reason']}")
         return 0

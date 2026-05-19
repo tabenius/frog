@@ -138,6 +138,24 @@ class CliRender(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("\x1b[", buf.getvalue())
 
+    def test_task_next_empty_renders_reason_summary(self):
+        rc, out = render({
+            "ok": True,
+            "agent": "codex",
+            "tasks": [],
+            "considered": 4,
+            "eligible": 0,
+            "skipped": [{"slug": "owned", "reason": "owned by claude"}],
+            "skipped_summary": {"owner": 1, "deps": 2, "done": 1},
+        })
+        self.assertEqual(rc, 0)
+        text = plain(out)
+        self.assertIn("0 eligible of 4 considered", text)
+        self.assertIn("blocked by dependencies", text)
+        self.assertIn("owned by another agent", text)
+        self.assertIn("already done", text)
+        self.assertIn("skip owned: owned by claude", text)
+
     def test_lock_release_help_includes_force_and_audit_metadata(self):
         parser = main_cli.build_parser()
         buf = io.StringIO()

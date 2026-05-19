@@ -2241,16 +2241,29 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
     active_locks = _lock_rows(conn, include_inactive=False)
 
     eligible, skipped = [], []
+    skipped_summary = {
+        "other_repo": 0,
+        "done": 0,
+        "status": 0,
+        "deps": 0,
+        "conflict": 0,
+        "owner": 0,
+        "lock": 0,
+    }
     for r in rows:
         task = dict(r)
         wf = (task["workflow_status"] or "").lower()
         if repo_path and task["repo_path"] != repo_path:
+            skipped_summary["other_repo"] += 1
             continue
         if wf in _WF_DONE:
+            skipped_summary["done"] += 1
             continue
         reason = None
+        reason_kind = None
         if wf in _WF_BLOCKED or (task["git_status"] or "") == "done":
             reason = f"status {wf or task['git_status']}"
+            reason_kind = "status"
         if reason is None:
             unmet = []
             for d in conn.execute(
@@ -2266,6 +2279,7 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
                     unmet.append(d["depends_on_slug"])
             if unmet:
                 reason = "deps not done: " + ", ".join(unmet)
+                reason_kind = "deps"
         if reason is None:
             conflicting = []
             for c in conn.execute(
@@ -2277,10 +2291,12 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
                     conflicting.append(c["o"])
             if conflicting:
                 reason = "conflicts in progress: " + ", ".join(conflicting)
+                reason_kind = "conflict"
         if reason is None:
             owner = task["assigned_agent"]
             if owner and owner != agent:
                 reason = f"owned by {owner}"
+                reason_kind = "owner"
         if reason is None:
             other = conn.execute(
                 "SELECT agent_name FROM task_assignments WHERE task_slug = ? "
@@ -2289,6 +2305,7 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
             ).fetchone()
             if other:
                 reason = f"owned by {other['agent_name']}"
+                reason_kind = "owner"
         if reason is None:
             conflicts = [
                 lk for lk in active_locks
@@ -2299,9 +2316,11 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
             if conflicts:
                 scopes = ", ".join(sorted({lk["scope_key"] for lk in conflicts}))
                 reason = "lock conflict: " + scopes
+                reason_kind = "lock"
         if reason is None:
             eligible.append(task)
         else:
+            skipped_summary[reason_kind or "status"] += 1
             skipped.append({"slug": task["slug"], "reason": reason})
 
     eligible.sort(key=lambda x: (_priority_rank(x["priority"]),
@@ -2311,7 +2330,7 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
         tk["location"] = _task_location(conn, tk)
     return {"ok": True, "agent": agent, "tasks": chosen,
             "considered": len(rows), "eligible": len(eligible),
-            "skipped": skipped[:20]}
+            "skipped": skipped[:20], "skipped_summary": skipped_summary}
 
 
 def _task_location(conn, task: dict) -> dict | None:

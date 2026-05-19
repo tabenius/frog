@@ -61,6 +61,7 @@ class Scheduler(unittest.TestCase):
         store.task_assign(self.conn, "x", "codex", None)
         r = store.task_next(self.conn, agent="claude", limit=5)
         self.assertNotIn("x", [t["slug"] for t in r["tasks"]])
+        self.assertEqual(r["skipped_summary"]["owner"], 1)
         # the owner can still take it
         r2 = store.task_next(self.conn, agent="codex", limit=5)
         self.assertIn("x", [t["slug"] for t in r2["tasks"]])
@@ -77,6 +78,20 @@ class Scheduler(unittest.TestCase):
         self.assertIn("scheduler-fix", [t["slug"] for t in r["tasks"]])
         skipped = {s["slug"]: s["reason"] for s in r["skipped"]}
         self.assertEqual(skipped.get("gh-sync"), "owned by claude")
+
+    def test_zero_eligible_explains_skipped_categories(self):
+        self._mk("done", "p0", wf="done")
+        self._mk("base", "p2")
+        self._mk("dependent", "p0")
+        store.task_add_dependency(self.conn, "dependent", "base", "depends_on")
+        store.task_assign(self.conn, "base", "claude", None)
+
+        r = store.task_next(self.conn, agent="codex", limit=5)
+        self.assertEqual(r["tasks"], [])
+        self.assertEqual(r["eligible"], 0)
+        self.assertEqual(r["skipped_summary"]["done"], 1)
+        self.assertEqual(r["skipped_summary"]["owner"], 1)
+        self.assertEqual(r["skipped_summary"]["deps"], 1)
 
 
 if __name__ == "__main__":
