@@ -314,7 +314,7 @@ def _registered_file_words() -> str:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent doctor board tui whereis setup provider gh import export agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    top = "db new agent box doctor board tui whereis setup provider gh import export hook agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -376,6 +376,7 @@ def _completion_script(shell: str) -> str:
       fi
       ;;
     provider) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "pull outbox sync" -- "$cur") ) ;;
+    hook) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "add list remove dispatch digest" -- "$cur") ) ;;
     log) COMPREPLY=( $(compgen -W "why blame --follow --limit --repo --all -f" -- "$cur") ) ;;
   esac
 }}
@@ -408,6 +409,7 @@ complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcomman
 complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from info' -F
 complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from upsert' -F
 complete -c frog -n '__fish_seen_subcommand_from provider' -a 'pull outbox sync'
+complete -c frog -n '__fish_seen_subcommand_from hook' -a 'add list remove dispatch digest'
 complete -c frog -n '__fish_seen_subcommand_from log' -a 'why blame --follow --limit --repo --all -f'
 """
     raise ValueError(f"unsupported shell: {shell}")
@@ -445,6 +447,25 @@ def _emit(payload: dict, as_json: bool) -> int:
     if "tools" in payload:
         for tool in payload["tools"]:
             print(f"{tool['name']}  {tool['description']}")
+        return 0
+    if "hooks" in payload:
+        rows = []
+        for hook in payload["hooks"]:
+            rows.append([
+                _color(hook["id"], "lock"),
+                _status_text("enabled" if hook.get("enabled") else "disabled"),
+                _color(hook.get("kind") or "-", "meta"),
+                _path_text(hook["url"]),
+                _color("last=" + str(hook.get("last_event_id") or 0), "muted"),
+                _status_text(hook.get("last_status") or "-"),
+            ])
+        _render_table(rows)
+        return 0
+    if "dispatches" in payload:
+        _render_hook_dispatches(payload)
+        return 0 if payload.get("ok", True) else 1
+    if "markdown" in payload:
+        print(payload["markdown"])
         return 0
     if "snippet" in payload:
         print(payload["snippet"])
@@ -786,6 +807,26 @@ def _render_file_errors(payload: dict) -> int:
         if error.get("path") and error.get("path") != input_path:
             print(f"      {_color('resolved', 'muted')}: {_path_text(error['path'])}")
     return 0 if payload.get("ok", True) else 1
+
+
+def _render_hook_dispatches(payload: dict) -> None:
+    rows = []
+    for item in payload["dispatches"]:
+        hook = item["hook"]
+        status = item.get("status") if item.get("status") is not None else "-"
+        sent = item.get("sent", 0)
+        attempted = item.get("attempted", sent)
+        rows.append([
+            _color(hook["id"], "lock"),
+            _status_text("sent" if item.get("ok") else "failed"),
+            _color(str(sent) + "/" + str(attempted), "meta"),
+            _status_text(status),
+            _path_text(hook["url"]),
+        ])
+    _render_table(rows)
+    for item in payload["dispatches"]:
+        if item.get("error"):
+            print(f"  {_color('error', 'error')} hook {item['hook']['id']}: {item['error']}")
 
 
 def _render_repo_info(payload: dict) -> None:
@@ -1528,7 +1569,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,gh,import,export,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,gh,import,export,hook,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
     )
 
     db_cmd = sub.add_parser(
@@ -1639,6 +1680,22 @@ def build_parser() -> argparse.ArgumentParser:
     psync.add_argument("--source", required=True, choices=["asana", "linear", "jira"])
     psync.add_argument("--config-file", required=True, help="Provider adapter JSON config")
     psync.add_argument("--direction", choices=["pull", "push", "both"], default="both")
+    hook = sub.add_parser("hook", help="Manage event webhooks and event digests")
+    hook_sub = hook.add_subparsers(dest="hook_command", required=True)
+    hook_add = hook_sub.add_parser("add", help="Add or update an event webhook URL")
+    hook_add.add_argument("url")
+    hook_add.add_argument("--kind", default="webhook", choices=["webhook", "slack", "discord"])
+    hook_add.add_argument("--disabled", action="store_true", help="Create the hook disabled")
+    hook_list = hook_sub.add_parser("list", help="List event webhooks")
+    hook_list.add_argument("--include-disabled", action="store_true")
+    hook_remove = hook_sub.add_parser("remove", help="Remove an event webhook")
+    hook_remove.add_argument("hook_id", type=int)
+    hook_dispatch = hook_sub.add_parser("dispatch", help="POST new event-log batches to enabled hooks")
+    hook_dispatch.add_argument("--id", dest="hook_id", type=int, help="Dispatch only one hook")
+    hook_dispatch.add_argument("--limit", type=int, default=50, help="Max events per hook")
+    hook_digest = hook_sub.add_parser("digest", help="Emit a markdown event digest")
+    hook_digest.add_argument("--limit", type=int, default=20)
+    hook_digest.add_argument("--repo", dest="repo_ref", metavar="REPO")
     tui_cmd = sub.add_parser("tui", help="Interactive curses kanban (claim/finish/next)")
     tui_cmd.add_argument("--agent")
     board_cmd = sub.add_parser("board", help="Realtime colored task lifecycle board")
@@ -1745,6 +1802,9 @@ def build_parser() -> argparse.ArgumentParser:
     sync_list.add_argument("--limit", type=int, default=20)
 
     agent_cmd = sub.add_parser("agent", help="Acting-agent identity")
+    box_cmd = sub.add_parser("box", help="This machine federation identity")
+    box_sub = box_cmd.add_subparsers(dest="box_command", required=True)
+    box_sub.add_parser("whoami", help="Show this box id, hostname, and every box this AGENTS.db has seen")
     agent_sub = agent_cmd.add_subparsers(dest="agent_command", required=True)
     agent_sub.add_parser("whoami", help="Show the resolved acting agent + session")
     ag_reg = agent_sub.add_parser("register", help="Register/update an agent")
@@ -2278,6 +2338,42 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     args.json,
                 )
+        if args.command == "hook":
+            if args.hook_command == "add":
+                return _emit(
+                    store.event_hook_add(
+                        conn,
+                        args.url,
+                        kind=args.kind,
+                        enabled=not args.disabled,
+                    ),
+                    args.json,
+                )
+            if args.hook_command == "list":
+                return _emit(
+                    store.event_hook_list(conn, include_disabled=args.include_disabled),
+                    args.json,
+                )
+            if args.hook_command == "remove":
+                return _emit(store.event_hook_remove(conn, args.hook_id), args.json)
+            if args.hook_command == "dispatch":
+                return _emit(
+                    store.event_hook_dispatch(
+                        conn,
+                        hook_id=args.hook_id,
+                        limit=args.limit,
+                    ),
+                    args.json,
+                )
+            if args.hook_command == "digest":
+                return _emit(
+                    store.event_digest_markdown(
+                        conn,
+                        limit=args.limit,
+                        repo_ref=args.repo_ref,
+                    ),
+                    args.json,
+                )
         if args.command == "tui":
             from ragbaz_frog import tui
             return tui.run(conn, agent=(args.agent or store.current_agent()))
@@ -2496,6 +2592,9 @@ def main(argv: list[str] | None = None) -> int:
                     store.event_mirror_list(conn, workspace=args.workspace, limit=args.limit),
                     args.json,
                 )
+        if args.command == "box":
+            if args.box_command == "whoami":
+                return _emit(store.box_whoami(conn), args.json)
         if args.command == "agent":
             if args.agent_command == "whoami":
                 return _emit(store.agent_whoami(conn), args.json)

@@ -11,6 +11,8 @@ import socket
 import sqlite3
 import subprocess
 import tomllib
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2679,6 +2681,166 @@ def lock_reap(conn) -> dict:
         "message": f"reaped {len(newly)} stale lock(s)",
         "reaped": newly,
     }
+
+
+def event_hook_add(conn, url: str, *, kind: str = "webhook", enabled: bool = True) -> dict:
+    url = (url or "").strip()
+    kind = (kind or "webhook").strip() or "webhook"
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return {"ok": False, "error": "hook url must start with http:// or https://"}
+    now = utc_now_iso()
+    conn.execute(
+        """
+        INSERT INTO event_hooks(url, kind, enabled, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?)
+        ON CONFLICT(url) DO UPDATE SET
+          kind = excluded.kind,
+          enabled = excluded.enabled,
+          updated_at = excluded.updated_at
+        """,
+        (url, kind, 1 if enabled else 0, now, now),
+    )
+    record_event(conn, kind="hook.added", summary=f"added {kind} event hook", payload={"url": url, "kind": kind})
+    conn.commit()
+    row = conn.execute("SELECT * FROM event_hooks WHERE url = ?", (url,)).fetchone()
+    return {"ok": True, "message": f"hook added: {url}", "hook": dict(row)}
+
+
+def event_hook_list(conn, *, include_disabled: bool = False) -> dict:
+    query = "SELECT * FROM event_hooks"
+    params = []
+    if not include_disabled:
+        query += " WHERE enabled = ?"
+        params.append(1)
+    query += " ORDER BY id"
+    return {"ok": True, "hooks": dicts(conn.execute(query, tuple(params)).fetchall())}
+
+
+def event_hook_remove(conn, hook_id: int) -> dict:
+    row = conn.execute("SELECT * FROM event_hooks WHERE id = ?", (hook_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"hook not found: {hook_id}"}
+    conn.execute("DELETE FROM event_hooks WHERE id = ?", (hook_id,))
+    record_event(conn, kind="hook.removed", summary=f"removed event hook {hook_id}", payload={"hook": dict(row)})
+    conn.commit()
+    return {"ok": True, "message": f"hook removed: {hook_id}", "hook": dict(row)}
+
+
+def _event_payload(row) -> dict:
+    payload = dict(row)
+    payload["payload"] = json.loads(payload.pop("payload_json"))
+    return payload
+
+
+def _hook_events(conn, after_id: int, limit: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM event_log WHERE id > ? ORDER BY id LIMIT ?",
+        (after_id, limit),
+    ).fetchall()
+    return [_event_payload(row) for row in rows]
+
+
+def _post_json(url: str, body: dict, *, timeout: float = 5.0) -> tuple[int, str]:
+    data = json.dumps(body, sort_keys=True).encode()
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "frog/1"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", "replace")
+            return int(resp.status), text
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", "replace")
+        return int(exc.code), text
+
+
+def event_hook_dispatch(conn, *, hook_id: int | None = None, limit: int = 50,
+                        request_fn=None) -> dict:
+    request_fn = request_fn or _post_json
+    clauses = ["enabled = 1"]
+    params = []
+    if hook_id is not None:
+        clauses.append("id = ?")
+        params.append(hook_id)
+    hooks = dicts(conn.execute(
+        "SELECT * FROM event_hooks WHERE " + " AND ".join(clauses) + " ORDER BY id",
+        tuple(params),
+    ).fetchall())
+    if hook_id is not None and not hooks:
+        return {"ok": False, "error": f"enabled hook not found: {hook_id}"}
+    dispatches = []
+    ok = True
+    for hook in hooks:
+        events = _hook_events(conn, int(hook["last_event_id"] or 0), limit)
+        if not events:
+            dispatches.append({"hook": hook, "sent": 0, "status": None, "ok": True})
+            continue
+        body = {"hook_id": hook["id"], "kind": hook["kind"], "events": events}
+        try:
+            status, text = request_fn(hook["url"], body)
+            success = 200 <= int(status) < 300
+            if success:
+                max_id = max(event["id"] for event in events)
+                conn.execute(
+                    """
+                    UPDATE event_hooks
+                    SET last_event_id = ?, last_status = ?, last_error = NULL,
+                        last_sent_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (max_id, int(status), utc_now_iso(), utc_now_iso(), hook["id"]),
+                )
+                dispatches.append({"hook": hook, "sent": len(events), "status": int(status), "ok": True})
+            else:
+                ok = False
+                conn.execute(
+                    "UPDATE event_hooks SET last_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                    (int(status), text[:500], utc_now_iso(), hook["id"]),
+                )
+                dispatches.append({
+                    "hook": hook,
+                    "sent": 0,
+                    "attempted": len(events),
+                    "status": int(status),
+                    "ok": False,
+                    "error": text[:500],
+                })
+        except Exception as exc:
+            ok = False
+            err = str(exc)
+            conn.execute(
+                "UPDATE event_hooks SET last_error = ?, updated_at = ? WHERE id = ?",
+                (err[:500], utc_now_iso(), hook["id"]),
+            )
+            dispatches.append({
+                "hook": hook,
+                "sent": 0,
+                "attempted": len(events),
+                "status": None,
+                "ok": False,
+                "error": err,
+            })
+    conn.commit()
+    return {
+        "ok": ok,
+        "dispatches": dispatches,
+        "error": None if ok else "one or more hook dispatches failed",
+    }
+
+
+def event_digest_markdown(conn, *, limit: int = 20, repo_ref: str | None = None) -> dict:
+    events = log_tail(conn, limit=limit, repo_ref=repo_ref)
+    if not events.get("ok"):
+        return events
+    lines = ["# frog event digest", ""]
+    for event in events["events"]:
+        task = f" `{event['task_slug']}`" if event.get("task_slug") else ""
+        actor = f" @{event['actor']}" if event.get("actor") else ""
+        lines.append(f"- {event['created_at']} `{event['kind']}`{task}{actor}: {event['summary']}")
+    return {"ok": True, "markdown": "\n".join(lines), "events": events["events"]}
 
 
 def _git_dirty_files(repo_path: str) -> list[str]:
