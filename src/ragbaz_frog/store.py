@@ -4155,6 +4155,64 @@ def repo_artifacts_stale(conn, repo_ref: str) -> dict:
     return {"ok": True, "repo": repo, "artifacts": stale, "source_latest_mtime": latest_source}
 
 
+def repo_doctor(conn, repo_ref: str) -> dict:
+    repo = resolve_repo(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}"}
+    if not conn.execute(
+        "SELECT 1 FROM repo_targets WHERE repo_path = ? LIMIT 1",
+        (repo["repo_path"],),
+    ).fetchone():
+        scan = repo_scan(conn, repo_ref)
+        if not scan.get("ok"):
+            return scan
+    rows = conn.execute(
+        """
+        SELECT target_kind, COUNT(*) AS count
+        FROM repo_targets
+        WHERE repo_path = ?
+        GROUP BY target_kind
+        """,
+        (repo["repo_path"],),
+    ).fetchall()
+    target_counts = {row["target_kind"]: row["count"] for row in rows}
+    advice: list[str] = []
+    if not target_counts:
+        advice.append(
+            "no runnable targets detected; add a Makefile, Taskfile, justfile, "
+            "mise.toml, package.json, Cargo.toml, pyproject.toml, or compose file"
+        )
+    if target_counts and not any(kind in target_counts for kind in ("check", "test", "verify")):
+        advice.append(
+            "no verification target detected; add a check, test, or verify target"
+        )
+    stale = repo_artifacts_stale(conn, repo_ref)
+    raw_stale_artifacts = stale.get("artifacts", []) if stale.get("ok") else []
+    stale_artifacts = []
+    seen_artifact_paths: set[str] = set()
+    for artifact in sorted(
+        raw_stale_artifacts,
+        key=lambda item: (item.get("path_hint") or "", item.get("target_kind") == "clean"),
+    ):
+        path_hint = artifact.get("path_hint") or ""
+        if path_hint in seen_artifact_paths:
+            continue
+        seen_artifact_paths.add(path_hint)
+        stale_artifacts.append(artifact)
+    if stale_artifacts:
+        advice.append(
+            f"{len(stale_artifacts)} artifact path(s) are stale or missing; "
+            "run `frog repo artifacts` or `frog repo artifact-stale` for details"
+        )
+    return {
+        "ok": True,
+        "repo": repo,
+        "advice": advice,
+        "target_counts": target_counts,
+        "stale_artifacts": stale_artifacts,
+    }
+
+
 def _targets_for_kind(conn, repo_path: str, target_kind: str) -> list[dict]:
     rows = conn.execute(
         """

@@ -1,9 +1,16 @@
 """Shared test helpers: a throwaway migrated DB, zero external deps."""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
+
+# Keep the test suite hermetic: _box_id() persists a pinned id under
+# FROG_HOME (default ~/.config/frog). Point it at a throwaway dir so
+# running tests never writes to the developer's real home and box
+# identity stays deterministic across the run.
+os.environ.setdefault("FROG_HOME", tempfile.mkdtemp(prefix="frog-home-"))
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
