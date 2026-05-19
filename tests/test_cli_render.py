@@ -165,6 +165,53 @@ class CliRender(unittest.TestCase):
         self.assertIn("--json file list", script)
         self.assertIn("__fish_seen_subcommand_from info' -F", script)
 
+    def test_completion_prefers_box_join_subcommand(self):
+        bash = main_cli._completion_script("bash")
+        fish = main_cli._completion_script("fish")
+        first_line = bash.splitlines()[3]
+        self.assertNotIn(" join ", first_line)
+        self.assertIn("box) [[ $COMP_CWORD -eq 2 ]]", bash)
+        self.assertIn("whoami peers join", fish)
+
+    def test_box_identity_render_is_human_readable(self):
+        rc, out = render({
+            "ok": True,
+            "box_id": "boxA",
+            "hostname": "hostA",
+            "pinned_at": "/tmp/frog/box-id",
+            "source": "file",
+            "known_boxes": [{
+                "box_id": "boxA",
+                "hostname": "hostA",
+                "first_seen": "2026-05-19T08:00:00+00:00",
+                "last_seen": "2026-05-19T08:01:00+00:00",
+            }],
+        })
+        self.assertEqual(rc, 0)
+        text = plain(out)
+        self.assertIn("box_id: boxA", text)
+        self.assertIn("known boxes", text)
+        self.assertNotIn('"box_id"', text)
+
+    def test_peers_render_as_table(self):
+        rc, out = render({
+            "ok": True,
+            "count": 1,
+            "peers": [{
+                "box_id": "boxB",
+                "hostname": "hostB",
+                "ssh_target": "user@hostB",
+                "remote_db": "/srv/AGENTS.db",
+                "added_at": "2026-05-19T08:00:00+00:00",
+                "last_join_at": "2026-05-19T08:05:00+00:00",
+            }],
+        })
+        self.assertEqual(rc, 0)
+        text = plain(out)
+        self.assertIn("boxB", text)
+        self.assertIn("user@hostB", text)
+        self.assertIn("/srv/AGENTS.db", text)
+
     def test_help_output_is_colorized(self):
         main_cli._COLOR_ENABLED = True
         text = main_cli._colorize_help("usage: frog [-h]\noptions:\n")

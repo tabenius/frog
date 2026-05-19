@@ -40,6 +40,9 @@ shorthand. A repo is always addressed under `frog repo …`.
 - `frog unit discover [--repo REPO]` / `frog unit list`
 - `frog config info` / `frog config host …` / `frog config workspace …`
 - `frog config coordinator show` / `frog config coordinator set WORKSPACE`
+- `frog box whoami` — show the stable identity stamped onto locks and aliases
+- `frog box join [user@]host[:/path/AGENTS.db]` — learn a peer box over SSH
+- `frog box peers` — list registered peer boxes
 - `frog whereis REPO_KEY` — resolve a logical repo key to paths on configured boxes
 - `frog config path fish`
 - `frog completion bash` / `frog completion fish`
@@ -91,6 +94,10 @@ frog's differentiator is the coordination/scheduling/forensics layer:
 - `frog whereis REPO_KEY` resolves the local path and asks configured remote
   workspaces in non-recursive local-only mode, so agents can find the same
   logical repo on different boxes.
+- `frog box join [user@]host[:/path/AGENTS.db]` asks the peer for its
+  `box_id` and repo-key map over SSH, records shared repo aliases locally, and
+  registers the peer for later sync/scheduling flows. It does not share a DB,
+  move source code, or start a daemon.
 - `frog provider sync` runs concrete Asana, Linear, and Jira adapters on top of
   the normalized provider contract. `--direction pull|push|both` controls sync
   direction; provider JSON supplies credentials and status round-trip mappings

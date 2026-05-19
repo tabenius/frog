@@ -80,6 +80,20 @@ class FederationJoin(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("self", r["error"])
 
+    def test_remote_errors_are_reported(self):
+        def boom(host, rdb, rfrog, argv):
+            raise RuntimeError("ssh failed")
+
+        r = store.federation_join(self.conn, "hostB", exec=boom)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["host"], "hostB")
+        self.assertIn("ssh failed", r["error"])
+
+    def test_empty_target_is_rejected(self):
+        r = store.federation_join(self.conn, "   ", exec=self._fake_exec())
+        self.assertFalse(r["ok"])
+        self.assertIn("empty", r["error"])
+
     def test_rejoin_is_idempotent(self):
         store.federation_join(self.conn, "hostB", exec=self._fake_exec())
         store.federation_join(self.conn, "hostB", exec=self._fake_exec())
@@ -88,6 +102,17 @@ class FederationJoin(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(n_alias, 1)
         self.assertEqual(store.peers_list(self.conn)["count"], 1)
+
+    def test_peers_list_reports_missing_migration(self):
+        db = Path(tempfile.mkdtemp(prefix="frog-fed-old-")) / "AGENTS.db"
+        conn = store.connect(str(db))
+        try:
+            r = store.peers_list(conn)
+        finally:
+            conn.close()
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["needs_migration"])
+        self.assertIn("frog db migrate", r["error"])
 
 
 if __name__ == "__main__":

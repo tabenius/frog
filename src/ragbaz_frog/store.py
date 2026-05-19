@@ -150,6 +150,14 @@ def dicts(rows) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def table_exists(conn, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone()
+    return bool(row)
+
+
 def current_agent() -> str:
     """Resolved acting-agent identity. FROG_AGENT lets a Claude/Codex
     session declare itself distinctly even when many run as the same OS
@@ -991,9 +999,14 @@ def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
     registers the peer so `whereis`/sync can resolve it later. Pure
     coordination metadata -- no code or data is moved."""
     host, parsed_db = _parse_ssh_target(ssh_target)
+    if not host:
+        return {"ok": False, "error": "empty SSH target"}
     rdb = remote_db or parsed_db
 
-    who = exec(host, rdb, remote_frog, ["box", "whoami"])
+    try:
+        who = exec(host, rdb, remote_frog, ["box", "whoami"])
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "host": host}
     if not who.get("box_id"):
         return {"ok": False, "error": "peer did not report a box_id",
                 "raw": who}
@@ -1003,7 +1016,11 @@ def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
         return {"ok": False,
                 "error": f"refusing to join self (box_id {peer_box})"}
 
-    rl = exec(host, rdb, remote_frog, ["repo", "list"])
+    try:
+        rl = exec(host, rdb, remote_frog, ["repo", "list"])
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "host": host,
+                "peer_box": peer_box}
     remote_repos = {r["repo_key"]: r["repo_path"]
                     for r in rl.get("repos", []) if r.get("repo_key")}
     local = repo_list(conn, include_third_party=True)
@@ -1052,6 +1069,12 @@ def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
 
 
 def peers_list(conn) -> dict:
+    if not table_exists(conn, "peers"):
+        return {
+            "ok": False,
+            "error": "peers table is not initialized; run `frog db migrate`",
+            "needs_migration": True,
+        }
     rows = [dict(r) for r in conn.execute(
         "SELECT box_id, hostname, ssh_target, remote_db, added_at, "
         "last_join_at FROM peers ORDER BY last_join_at DESC")]

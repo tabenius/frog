@@ -314,7 +314,7 @@ def _registered_file_words() -> str:
 
 
 def _completion_script(shell: str) -> str:
-    top = "db new agent box join doctor board tui whereis setup provider gh import export hook agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    top = "db new agent box doctor board tui whereis setup provider gh import export hook agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
     repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(REPO_ACTIONS))
     repo_names = _repo_name_words()
     workspace_names = " ".join(_workspace_names())
@@ -377,6 +377,7 @@ def _completion_script(shell: str) -> str:
       ;;
     provider) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "pull outbox sync" -- "$cur") ) ;;
     hook) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "add list remove dispatch digest" -- "$cur") ) ;;
+    box) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "whoami peers join" -- "$cur") ) ;;
     log) COMPREPLY=( $(compgen -W "why blame --follow --limit --repo --all -f" -- "$cur") ) ;;
   esac
 }}
@@ -410,6 +411,7 @@ complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcomman
 complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from upsert' -F
 complete -c frog -n '__fish_seen_subcommand_from provider' -a 'pull outbox sync'
 complete -c frog -n '__fish_seen_subcommand_from hook' -a 'add list remove dispatch digest'
+complete -c frog -n '__fish_seen_subcommand_from box' -a 'whoami peers join'
 complete -c frog -n '__fish_seen_subcommand_from log' -a 'why blame --follow --limit --repo --all -f'
 """
     raise ValueError(f"unsupported shell: {shell}")
@@ -458,6 +460,37 @@ def _emit(payload: dict, as_json: bool) -> int:
                 _path_text(hook["url"]),
                 _color("last=" + str(hook.get("last_event_id") or 0), "muted"),
                 _status_text(hook.get("last_status") or "-"),
+            ])
+        _render_table(rows)
+        return 0
+    if "box_id" in payload and "known_boxes" in payload:
+        print(f"{_color('box_id', 'muted')}: {_color(payload['box_id'], 'claim')}")
+        print(f"{_color('hostname', 'muted')}: {_color(payload.get('hostname') or '-', 'meta')}")
+        print(f"{_color('source', 'muted')}: {_status_text(payload.get('source') or '-')}")
+        print(f"{_color('pinned_at', 'muted')}: {_path_text(payload.get('pinned_at') or '-')}")
+        rows = []
+        for box in payload.get("known_boxes", []):
+            rows.append([
+                _color(box["box_id"], "claim"),
+                _color(box.get("hostname") or "-", "meta"),
+                _color(box.get("last_seen") or "-", "muted"),
+            ])
+        if rows:
+            print(_color("known boxes", "muted") + ":")
+            _render_table(rows, indent="  ")
+        return 0
+    if "peers" in payload:
+        if not payload["peers"]:
+            print(_color("no federated peers registered", "muted"))
+            return 0
+        rows = []
+        for peer in payload["peers"]:
+            rows.append([
+                _color(peer["box_id"], "claim"),
+                _color(peer.get("hostname") or "-", "meta"),
+                _path_text(peer.get("ssh_target") or "-"),
+                _path_text(peer.get("remote_db") or "-"),
+                _color(peer.get("last_join_at") or "-", "muted"),
             ])
         _render_table(rows)
         return 0
@@ -1803,13 +1836,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_cmd = sub.add_parser("agent", help="Acting-agent identity")
     box_cmd = sub.add_parser("box", help="This machine federation identity")
-    join_cmd = sub.add_parser("join", help="Federate with a peer box over SSH ([user@]host[:/path/AGENTS.db])")
-    join_cmd.add_argument("ssh_target", help="[user@]host[:/path/to/AGENTS.db]")
-    join_cmd.add_argument("--db", dest="remote_db", help="Remote AGENTS.db path (overrides :path in target)")
-    join_cmd.add_argument("--remote-frog", default="frog", help="frog executable on the peer (default: frog)")
     box_sub = box_cmd.add_subparsers(dest="box_command", required=True)
     box_sub.add_parser("whoami", help="Show this box id, hostname, and every box this AGENTS.db has seen")
     box_sub.add_parser("peers", help="List federated peer boxes")
+    box_join = box_sub.add_parser("join", help="Federate with a peer box over SSH")
+    box_join.add_argument("ssh_target", help="[user@]host[:/path/to/AGENTS.db]")
+    box_join.add_argument("--db", dest="remote_db", help="Remote AGENTS.db path (overrides :path in target)")
+    box_join.add_argument("--remote-frog", default="frog", help="frog executable on the peer (default: frog)")
     agent_sub = agent_cmd.add_subparsers(dest="agent_command", required=True)
     agent_sub.add_parser("whoami", help="Show the resolved acting agent + session")
     ag_reg = agent_sub.add_parser("register", help="Register/update an agent")
@@ -2602,10 +2635,10 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.box_whoami(conn), args.json)
             if args.box_command == "peers":
                 return _emit(store.peers_list(conn), args.json)
-        if args.command == "join":
-            return _emit(store.federation_join(
-                conn, args.ssh_target, remote_db=args.remote_db,
-                remote_frog=args.remote_frog), args.json)
+            if args.box_command == "join":
+                return _emit(store.federation_join(
+                    conn, args.ssh_target, remote_db=args.remote_db,
+                    remote_frog=args.remote_frog), args.json)
         if args.command == "agent":
             if args.agent_command == "whoami":
                 return _emit(store.agent_whoami(conn), args.json)
