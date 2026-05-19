@@ -1171,7 +1171,13 @@ def _event_kind_text(kind: str) -> str:
 def _print_event(event: dict) -> None:
     color = _event_color(event["kind"])
     reset = "\033[0m" if color else ""
-    print(f"{_color(event['created_at'], 'muted')}  {color}{event['kind']}{reset}  {event['summary']}", flush=True)
+    origin = event.get("origin_box_id")
+    origin_text = f" {_color('@' + origin, 'claim')}" if origin else ""
+    print(
+        f"{_color(event['created_at'], 'muted')}  "
+        f"{color}{event['kind']}{reset}{origin_text}  {event['summary']}",
+        flush=True,
+    )
 
 
 def _record_command(conn, argv: list[str]) -> None:

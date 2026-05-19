@@ -158,6 +158,13 @@ def table_exists(conn, name: str) -> bool:
     return bool(row)
 
 
+def table_columns(conn, name: str) -> set[str]:
+    try:
+        return {row["name"] for row in conn.execute(f"PRAGMA table_info({name})")}
+    except sqlite3.Error:
+        return set()
+
+
 def current_agent() -> str:
     """Resolved acting-agent identity. FROG_AGENT lets a Claude/Codex
     session declare itself distinctly even when many run as the same OS
@@ -230,6 +237,29 @@ def record_event(
     actor: str | None = None,
     payload: dict | None = None,
 ) -> None:
+    payload_json = json.dumps(payload or {}, sort_keys=True)
+    columns = table_columns(conn, "event_log")
+    if {"origin_box_id", "origin_host"} <= columns:
+        conn.execute(
+            """
+            INSERT INTO event_log(created_at, kind, repo_path, task_slug,
+                                  actor, summary, payload_json,
+                                  origin_box_id, origin_host)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now_iso(),
+                kind,
+                repo_path,
+                task_slug,
+                actor,
+                summary,
+                payload_json,
+                _box_id(),
+                socket.gethostname(),
+            ),
+        )
+        return
     conn.execute(
         """
         INSERT INTO event_log(created_at, kind, repo_path, task_slug, actor, summary, payload_json)
@@ -242,7 +272,7 @@ def record_event(
             task_slug,
             actor,
             summary,
-            json.dumps(payload or {}, sort_keys=True),
+            payload_json,
         ),
     )
 

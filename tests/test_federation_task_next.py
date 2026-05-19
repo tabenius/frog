@@ -95,30 +95,35 @@ class FederationTaskNext(unittest.TestCase):
         info = store.task_info(self.conn, "t4")
         self.assertIn("location", info)
 
-    def test_cli_next_renders_remote_hint(self):
-        import shutil, sqlite3
-        d = tempfile.mkdtemp(); db = Path(d) / "AGENTS.db"
-        repo = _repo("ro:1")               # real repo so registration works
-        env = dict(os.environ, FROG_BOX_ID="boxA")
-        run = lambda *a: subprocess.run(
-            ["python3", "bin/frog", "--db", str(db), *a],
-            capture_output=True, text=True, env=env)
-        run("db", "migrate")
-        run("repo", "register", repo)
-        run("task", "create", "--slug", "rt", "--title", "RT",
-            "--repo", repo)
-        # the repo now lives only on a peer + is gone from this box
-        c = sqlite3.connect(db)
-        c.execute("UPDATE repos SET repo_key='ro:1' WHERE repo_path=?",
-                  (repo,))
-        c.execute("INSERT INTO repo_aliases(repo_key,box,repo_path,"
-                  "created_at) VALUES('ro:1','boxB','/peer/x','now')")
-        c.commit(); c.close()
-        shutil.rmtree(repo)
-        out = run("task", "next").stdout
-        self.assertIn("not on this box", out)
-        self.assertIn("boxB:/peer/x", out)
+    def test_renderer_shows_remote_and_also_hints(self):
+        # Exercise the real _emit rendering path in-process (deterministic;
+        # the data paths are covered by the store-level tests above).
+        import io, contextlib
+        from ragbaz_frog import main_cli
 
+        def render(loc):
+            payload = {"ok": True, "agent": "claude", "considered": 1,
+                       "eligible": 1, "skipped": [],
+                       "tasks": [{"slug": "rt", "priority": "p2",
+                                  "title": "RT", "location": loc}]}
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                main_cli._emit(payload, False)
+            return buf.getvalue()
+
+        remote = render({"repo_key": "ro:1", "is_local": False,
+                         "local_path": None, "boxes": [],
+                         "elsewhere": [{"box": "boxB",
+                                        "repo_path": "/peer/x"}]})
+        self.assertIn("not on this box", remote)
+        self.assertIn("boxB:/peer/x", remote)
+
+        also = render({"repo_key": "k", "is_local": True,
+                       "local_path": "/here", "boxes": [],
+                       "elsewhere": [{"box": "boxB",
+                                      "repo_path": "/peer/x"}]})
+        self.assertIn("also on boxB:/peer/x", also)
+        self.assertNotIn("not on this box", also)
 
 if __name__ == "__main__":
     unittest.main()
