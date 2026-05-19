@@ -660,6 +660,15 @@ def _emit(payload: dict, as_json: bool) -> int:
               f"of {_color(payload['considered'], 'meta')} considered")
         for tk in payload["tasks"]:
             print(f"  {_color('->', 'claim')} {_color(tk['slug'], 'claim')}  {_priority_text(tk['priority'])}  {tk['title']}")
+            loc = tk.get("location")
+            if loc and loc.get("elsewhere"):
+                where = ", ".join(f"{b['box']}:{b['repo_path']}"
+                                  for b in loc["elsewhere"])
+                if loc.get("is_local"):
+                    print("     " + _color(f"also on {where}", "muted"))
+                else:
+                    print("     " + _color(
+                        f"not on this box -- lives on {where}", "warn"))
         if not payload["tasks"]:
             print("  " + _color("(nothing unblocked)", "muted"))
         for s in payload.get("skipped", []):

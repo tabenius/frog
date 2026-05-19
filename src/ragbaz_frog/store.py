@@ -2033,9 +2033,47 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
     eligible.sort(key=lambda x: (_priority_rank(x["priority"]),
                                  x["created_at"], x["slug"]))
     chosen = eligible[: max(1, limit)]
+    for tk in chosen:
+        tk["location"] = _task_location(conn, tk)
     return {"ok": True, "agent": agent, "tasks": chosen,
             "considered": len(rows), "eligible": len(eligible),
             "skipped": skipped[:20]}
+
+
+def _task_location(conn, task: dict) -> dict | None:
+    """Federation locator for a task's repo: its repo_key and every box
+    that hosts it (from repo_aliases), flagging whether it is present on
+    this box. None when the task has no repo. This is what turns
+    `task next` from box-local visibility into cross-machine work
+    assignment -- an agent can be handed a task whose repo lives on a
+    peer and told exactly where it is."""
+    rp = task.get("repo_path")
+    if not rp:
+        return None
+    row = conn.execute(
+        "SELECT repo_key FROM repos WHERE repo_path = ?", (rp,)).fetchone()
+    key = row["repo_key"] if row else None
+    local = _box_id()
+    boxes = []
+    if key:
+        boxes = [{"box": a["box"], "repo_path": a["repo_path"]}
+                 for a in conn.execute(
+                     "SELECT box, repo_path FROM repo_aliases "
+                     "WHERE repo_key = ? ORDER BY box", (key,))]
+    here = next((b["repo_path"] for b in boxes if b["box"] == local), None)
+    here_exists = bool(here) and Path(here).exists()
+    # Local means: an alias for this box that still exists on disk, or
+    # the registered path exists on disk here. A stale local alias must
+    # not make a peer-only repo look claimable on this box.
+    on_disk = bool(row) and Path(rp).exists()
+    is_local = here_exists or on_disk
+    return {
+        "repo_key": key,
+        "is_local": is_local,
+        "local_path": here if here_exists else (rp if on_disk else None),
+        "boxes": boxes,
+        "elsewhere": [b for b in boxes if b["box"] != local],
+    }
 
 
 def _task_file_paths(conn, slug: str) -> list[str]:
@@ -2376,6 +2414,7 @@ def task_info(conn, slug: str) -> dict:
                 (slug,),
             ).fetchall()
         ),
+        "location": _task_location(conn, dict(task)),
     }
 
 
