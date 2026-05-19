@@ -202,6 +202,11 @@ Interactive curses kanban (claim/finish/next)
 
 - `--agent`
 
+## `frog init`
+
+One-command bootstrap: create + migrate AGENTS.db and report box identity
+
+
 ## `frog docs`
 
 Generate the Markdown command reference from the live CLI

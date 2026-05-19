@@ -1833,6 +1833,7 @@ def build_parser() -> argparse.ArgumentParser:
     hook_digest.add_argument("--limit", type=int, default=20)
     hook_digest.add_argument("--repo", dest="repo_ref", metavar="REPO")
     tui_cmd = sub.add_parser("tui", help="Interactive curses kanban (claim/finish/next)")
+    init_cmd = sub.add_parser("init", help="One-command bootstrap: create + migrate AGENTS.db and report box identity")
     docs_cmd = sub.add_parser("docs", help="Generate the Markdown command reference from the live CLI")
     docs_cmd.add_argument("--out", help="Write to FILE instead of stdout")
     tui_cmd.add_argument("--agent")
@@ -2287,6 +2288,37 @@ def main(argv: list[str] | None = None) -> int:
             return _emit({"ok": True, "markdown": md}, args.json)
         print(md)
         return 0
+    if args.command == "init":
+        mig = store.migrate(args.db)
+        conn = store.connect(args.db)
+        try:
+            drift = store.schema_drift(conn)
+            box = store.box_whoami(conn)
+        finally:
+            conn.close()
+        result = {
+            "ok": mig.get("ok", True),
+            "db": args.db,
+            "applied_now": mig.get("applied", []),
+            "migrations": f"{drift['applied']}/{drift['available']}",
+            "current": drift["current"],
+            "box_id": box["box_id"],
+            "hostname": box["hostname"],
+            "next": ["frog task create --slug <s> --title <t>",
+                     "frog board", "frog mcp serve"],
+        }
+        if not args.json:
+            print(f"{_color('initialized', 'success')} "
+                  f"{_path_text(args.db)}")
+            print(f"  {_color('migrations', 'muted')}: "
+                  f"{result['migrations']}"
+                  + ("" if result["current"] else " (behind!)"))
+            print(f"  {_color('box', 'muted')}: "
+                  f"{_color(box['box_id'], 'meta')} ({box['hostname']})")
+            print(f"  {_color('next', 'muted')}: "
+                  + " | ".join(result["next"]))
+            return 0
+        return _emit(result, args.json)
     if args.command == "mcp":
         if args.mcp_command == "serve" and args.json:
             return _emit(

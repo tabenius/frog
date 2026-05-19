@@ -2,7 +2,7 @@
 
 ## Install
 
-frog is stdlib-only Python 3.13, one package. From the repo:
+frog is stdlib-only Python 3.11+, one package. From the repo:
 
     pipx install .            # or: pip install .
     frog --help

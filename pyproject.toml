@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "ragbaz-frog"
 version = "0.2.0"
 description = "Multi-agent workspace coordination toolkit for /data/src"
-requires-python = ">=3.10"
+requires-python = ">=3.11"  # tomllib
 readme = "README.md"
 dependencies = []
 
