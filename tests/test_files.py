@@ -8,8 +8,10 @@ class FileInfoMany(unittest.TestCase):
     def setUp(self):
         self.conn = store.connect(fresh_db())
         self.d = tempfile.mkdtemp(prefix="frog-files-")
-        self.a = os.path.join(self.d, "a.py"); open(self.a, "w").write("a")
-        self.b = os.path.join(self.d, "b.py"); open(self.b, "w").write("b")
+        self.a = os.path.join(self.d, "a.py")
+        self.b = os.path.join(self.d, "b.py")
+        Path(self.a).write_text("a")
+        Path(self.b).write_text("b")
         store.upsert_file(self.conn, file_path=self.a, repo_path=None,
                           file_type="py", source_of_truth=None, notes=None)
 
@@ -25,6 +27,21 @@ class FileInfoMany(unittest.TestCase):
         r = store.file_info_many(self.conn, [self.d])
         self.assertFalse(r["ok"])
         self.assertEqual(r["file_errors"][0]["kind"], "directory")
+        self.assertEqual(r["file_errors"][0]["input"], self.d)
+        self.assertIn("expected a file", r["file_errors"][0]["error"])
+
+    def test_relative_directory_keeps_user_input(self):
+        old = os.getcwd()
+        try:
+            os.chdir(self.d)
+            r = store.file_info_many(self.conn, ["."])
+        finally:
+            os.chdir(old)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["file_errors"][0]["input"], ".")
+        self.assertEqual(r["file_errors"][0]["kind"], "directory")
+        self.assertEqual(r["file_errors"][0]["path"], self.d)
+        self.assertIn(". is a directory", r["file_errors"][0]["error"])
 
     def test_missing_vs_unregistered(self):
         r = store.file_info_many(self.conn, [self.b, "/nope/x.py"])

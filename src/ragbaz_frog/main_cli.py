@@ -431,6 +431,8 @@ def _emit(payload: dict, as_json: bool) -> int:
         return rc
     if "findings" in payload and "summary" in payload and "warn" in payload["summary"]:
         return _render_doctor(payload)
+    if "file_errors" in payload:
+        return _render_file_errors(payload)
     if not payload.get("ok", True):
         print(f"{_color('error', 'error')}: {payload.get('error', 'unknown error')}", file=sys.stderr)
         return 1
@@ -672,13 +674,6 @@ def _emit(payload: dict, as_json: bool) -> int:
         for path in lock["file_paths"]:
             print(f"{_color('file', 'muted')}: {_path_text(path)}")
         return 0
-    if "file_errors" in payload:
-        for f in payload.get("files", []):
-            print(f"{f['file_path']}  repo={f.get('repo_path') or '-'}  "
-                  f"type={f.get('file_type') or '-'}")
-        for e in payload["file_errors"]:
-            print(f"  [{e['kind']}] {e['error']}")
-        return 0 if payload.get("ok", True) else 1
     if "files" in payload:
         rows = []
         for item in payload["files"]:
@@ -778,6 +773,18 @@ def _render_doctor(payload: dict) -> int:
         print(f"  {_color('findings', 'muted')}: {_color('none', 'success')}")
     elif repair_count and not findings:
         print(f"  {_color('remaining', 'muted')}: {_color('none', 'success')}")
+    return 0 if payload.get("ok", True) else 1
+
+
+def _render_file_errors(payload: dict) -> int:
+    for item in payload.get("files", []):
+        print(f"{_path_text(item['file_path'])}  {_color('repo', 'muted')}={_path_text(item.get('repo_path') or '-')}  "
+              f"{_color('type', 'muted')}={_color(item.get('file_type') or '-', 'meta')}")
+    for error in payload["file_errors"]:
+        input_path = error.get("input") or error.get("path") or "-"
+        print(f"  [{_status_text(error['kind'])}] {_path_text(input_path)}: {error['error']}")
+        if error.get("path") and error.get("path") != input_path:
+            print(f"      {_color('resolved', 'muted')}: {_path_text(error['path'])}")
     return 0 if payload.get("ok", True) else 1
 
 

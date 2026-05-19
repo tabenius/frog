@@ -1329,12 +1329,33 @@ def file_list(conn, *, repo_ref: str | None, file_type: str | None) -> dict:
 
 
 def file_info(conn, file_path: str) -> dict:
-    file_path = str(Path(file_path).expanduser().resolve())
-    if Path(file_path).is_dir():
-        return {"ok": False, "error": f"{file_path} is a directory; expected a file"}
-    row = conn.execute("SELECT * FROM files WHERE file_path = ?", (file_path,)).fetchone()
+    original = file_path
+    resolved = str(Path(file_path).expanduser().resolve())
+    if Path(resolved).is_dir():
+        return {
+            "ok": False,
+            "error": f"{original} is a directory; expected a file",
+            "input": original,
+            "path": resolved,
+            "kind": "directory",
+        }
+    row = conn.execute("SELECT * FROM files WHERE file_path = ?", (resolved,)).fetchone()
     if not row:
-        return {"ok": False, "error": f"file not found: {file_path}"}
+        if Path(resolved).exists():
+            return {
+                "ok": False,
+                "error": f"{original} is a file, but is not registered in AGENTS.db",
+                "input": original,
+                "path": resolved,
+                "kind": "unregistered",
+            }
+        return {
+            "ok": False,
+            "error": f"file not found: {original}",
+            "input": original,
+            "path": resolved,
+            "kind": "missing",
+        }
     return {"ok": True, "file": dict(row)}
 
 
@@ -1346,6 +1367,7 @@ def _expand_file_info_args(file_paths: list[str]) -> tuple[list[str], list[dict]
             matches = sorted(glob.glob(item))
             if not matches:
                 errors.append({
+                    "input": item,
                     "path": item,
                     "kind": "glob_empty",
                     "error": f"glob matched no files: {item}",
@@ -1362,6 +1384,7 @@ def file_info_many(conn, file_paths: list[str]) -> dict:
     rows = []
     seen = set()
     for item in expanded:
+        original = item
         path = Path(item).expanduser()
         try:
             resolved = str(path.resolve())
@@ -1372,9 +1395,10 @@ def file_info_many(conn, file_paths: list[str]) -> dict:
         seen.add(resolved)
         if Path(resolved).is_dir():
             errors.append({
+                "input": original,
                 "path": resolved,
                 "kind": "directory",
-                "error": f"{resolved} is a directory; expected a file",
+                "error": f"{original} is a directory; expected a file",
             })
             continue
         row = conn.execute("SELECT * FROM files WHERE file_path = ?", (resolved,)).fetchone()
@@ -1382,15 +1406,17 @@ def file_info_many(conn, file_paths: list[str]) -> dict:
             rows.append(dict(row))
         elif Path(resolved).exists():
             errors.append({
+                "input": original,
                 "path": resolved,
                 "kind": "unregistered",
-                "error": f"file is not registered in AGENTS.db: {resolved}",
+                "error": f"{original} is a file, but is not registered in AGENTS.db",
             })
         else:
             errors.append({
+                "input": original,
                 "path": resolved,
                 "kind": "missing",
-                "error": f"file not found: {resolved}",
+                "error": f"file not found: {original}",
             })
     if len(file_paths) == 1 and len(rows) == 1 and not errors and not glob.has_magic(file_paths[0]):
         return {"ok": True, "file": rows[0]}
