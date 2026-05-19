@@ -132,3 +132,10 @@ suite (`python3 -m unittest discover -s tests`).
   by a multiprocessing stress test. `--db` now overrides the workspace
   DB (was silently ignored). SSH path testable via an injectable seam.
 - `pip install -e .` (pyproject + console_scripts frog / frog-mcp).
+
+## Documentation
+
+- [docs/COMMANDS.md](docs/COMMANDS.md) — full command reference (generated; run `frog docs`)
+- [docs/FEDERATION.md](docs/FEDERATION.md) — multi-box model: box identity, join, whereis, cross-box locks
+- [docs/MCP.md](docs/MCP.md) — using frog as an MCP server for agents
+- [docs/DEPLOY.md](docs/DEPLOY.md) — install, the DB, schema-skew guard, backups, repo move
