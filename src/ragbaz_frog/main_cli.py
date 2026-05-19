@@ -1622,6 +1622,43 @@ def _run_board(conn, *, once: bool, interval: float, poll: float = 0.3) -> int:
         return 0
 
 
+def _run_sync(conn, args, sync_command):
+    if sync_command == "pull":
+        ws = frog_config.resolve_workspace(args.workspace, args.config)
+        if not ws:
+            return _emit({"ok": False,
+                          "error": f"unknown workspace: {args.workspace}"},
+                         args.json)
+        if ws["host"].get("transport", "local") == "local":
+            return _emit({"ok": True,
+                          "message": f"workspace {args.workspace} is "
+                          "local; nothing to mirror"}, args.json)
+        remote = _dispatch_workspace(
+            ws, ["log", "--limit", str(args.limit)])
+        if not remote.get("ok", True):
+            return _emit(remote, args.json)
+        return _emit(store.event_mirror_pull(
+            conn, workspace=args.workspace,
+            events=remote.get("events", [])), args.json)
+    if sync_command == "list":
+        return _emit(store.event_mirror_list(
+            conn, workspace=args.workspace, limit=args.limit), args.json)
+    return _emit({"ok": False,
+                  "error": f"unknown sync op: {sync_command}"}, args.json)
+
+
+def _add_sync_ops(subparsers) -> None:
+    """Shared pull/list ops for event-log mirroring -- used by both the
+    top-level `sync` alias and the grouped `box sync`."""
+    sp = subparsers.add_parser("pull", help="Pull new events from a workspace")
+    sp.add_argument("workspace")
+    sp.add_argument("--limit", type=int, default=500,
+                    help="Max remote events to fetch per pull")
+    sl = subparsers.add_parser("list", help="Show mirrored events")
+    sl.add_argument("workspace", nargs="?")
+    sl.add_argument("--limit", type=int, default=20)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = FrogArgumentParser(
         prog="frog",
@@ -1893,14 +1930,8 @@ def build_parser() -> argparse.ArgumentParser:
         "sync",
         help="Mirror another workspace's event log locally (read-only)",
     )
-    sync_sub = sync_cmd.add_subparsers(dest="sync_command", required=True)
-    sync_pull = sync_sub.add_parser("pull", help="Pull new events from a workspace")
-    sync_pull.add_argument("workspace")
-    sync_pull.add_argument("--limit", type=int, default=500,
-                           help="Max remote events to fetch per pull")
-    sync_list = sync_sub.add_parser("list", help="Show mirrored events")
-    sync_list.add_argument("workspace", nargs="?")
-    sync_list.add_argument("--limit", type=int, default=20)
+    _add_sync_ops(sync_cmd.add_subparsers(
+        dest="sync_command", required=True))
 
     agent_cmd = sub.add_parser("agent", help="Acting-agent identity")
     box_cmd = sub.add_parser("box", help="This machine federation identity")
@@ -1908,6 +1939,8 @@ def build_parser() -> argparse.ArgumentParser:
     box_sub.add_parser("whoami", help="Show this box id, hostname, and every box this AGENTS.db has seen")
     box_sub.add_parser("peers", help="List federated peer boxes")
     box_join = box_sub.add_parser("join", help="Federate with a peer box over SSH")
+    _add_sync_ops(box_sub.add_parser("sync",
+        help="Mirror another workspace's event log (read-only)").add_subparsers(dest="box_sync_command", required=True))
     box_join.add_argument("ssh_target", help="[user@]host[:/path/to/AGENTS.db]")
     box_join.add_argument("--db", dest="remote_db", help="Remote AGENTS.db path (overrides :path in target)")
     box_join.add_argument("--remote-frog", default="frog", help="frog executable on the peer (default: frog)")
@@ -2723,26 +2756,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.file_command == "info":
                 return _emit(store.file_info_many(conn, args.file_path), args.json)
         if args.command == "sync":
-            if args.sync_command == "pull":
-                ws = frog_config.resolve_workspace(args.workspace, args.config)
-                if not ws:
-                    return _emit({"ok": False, "error": f"unknown workspace: {args.workspace}"}, args.json)
-                if ws["host"].get("transport", "local") == "local":
-                    return _emit({"ok": True, "message": f"workspace {args.workspace} is local; nothing to mirror"}, args.json)
-                remote = _dispatch_workspace(ws, ["log", "--limit", str(args.limit)])
-                if not remote.get("ok", True):
-                    return _emit(remote, args.json)
-                return _emit(
-                    store.event_mirror_pull(conn, workspace=args.workspace,
-                                            events=remote.get("events", [])),
-                    args.json,
-                )
-            if args.sync_command == "list":
-                return _emit(
-                    store.event_mirror_list(conn, workspace=args.workspace, limit=args.limit),
-                    args.json,
-                )
+            return _run_sync(conn, args, args.sync_command)
         if args.command == "box":
+            if args.box_command == "sync":
+                return _run_sync(conn, args, args.box_sync_command)
             if args.box_command == "whoami":
                 return _emit(store.box_whoami(conn), args.json)
             if args.box_command == "peers":

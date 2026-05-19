@@ -410,6 +410,25 @@ Federate with a peer box over SSH
 - `--db` — Remote AGENTS.db path (overrides :path in target)
 - `--remote-frog` — frog executable on the peer (default: frog)
 
+### `frog box sync`
+
+Mirror another workspace's event log (read-only)
+
+
+#### `frog box sync pull`
+
+Pull new events from a workspace
+
+- `workspace`
+- `--limit` — Max remote events to fetch per pull
+
+#### `frog box sync list`
+
+Show mirrored events
+
+- `workspace`
+- `--limit`
+
 ## `frog repo`
 
 Repo registry, target discovery, and repo-level actions
