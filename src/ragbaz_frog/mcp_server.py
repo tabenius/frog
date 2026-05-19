@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -17,6 +18,16 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     "2024-11-05",
 )
 SERVER_INFO = {"name": "ragbaz-frog", "version": "0.1.0"}
+_LOG_LEVELS = {"debug": 10, "info": 20, "warn": 30, "error": 40}
+
+
+def _log(level: str, message: str, **fields) -> None:
+    configured = os.environ.get("FROG_MCP_LOG", "warn").lower()
+    if _LOG_LEVELS.get(level, 99) < _LOG_LEVELS.get(configured, 30):
+        return
+    payload = {"level": level, "message": message, **fields}
+    sys.stderr.write(json.dumps(payload, sort_keys=True) + "\n")
+    sys.stderr.flush()
 
 
 def _tool_specs() -> list[dict]:
@@ -461,28 +472,20 @@ def call_tool(tool_name: str, arguments: dict | None, *, config_path: str | None
     return _call_local(tool_name, args, workspace)
 
 
-def _read_message() -> dict | None:
-    headers: dict[str, str] = {}
+def _read_message() -> dict | list | None:
     while True:
         line = sys.stdin.buffer.readline()
         if not line:
             return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, _, value = line.decode("utf-8").partition(":")
-        headers[key.strip().lower()] = value.strip()
-    length = int(headers.get("content-length", "0"))
-    if length <= 0:
-        return None
-    payload = sys.stdin.buffer.read(length)
-    return json.loads(payload.decode("utf-8"))
+        line = line.strip()
+        if line:
+            return json.loads(line.decode("utf-8"))
 
 
-def _write_message(payload: dict) -> None:
-    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    sys.stdout.buffer.write(f"Content-Length: {len(blob)}\r\n\r\n".encode("ascii"))
-    sys.stdout.buffer.write(blob)
-    sys.stdout.buffer.flush()
+def _write_message(payload: dict | list) -> None:
+    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    sys.stdout.write(blob + "\n")
+    sys.stdout.flush()
 
 
 def _response(message_id, result=None, error=None) -> dict:
@@ -492,6 +495,13 @@ def _response(message_id, result=None, error=None) -> dict:
     else:
         payload["result"] = result or {}
     return payload
+
+
+def _error(message_id, code: int, message: str, data=None) -> dict:
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return _response(message_id, error=error)
 
 
 def _negotiate_protocol_version(message: dict) -> str:
@@ -578,70 +588,96 @@ def _get_prompt(name: str, arguments: dict) -> dict:
             "content": {"type": "text", "text": text}}]}
 
 
-def serve(*, config_path: str | None = None) -> int:
-    while True:
-        message = _read_message()
-        if message is None:
-            return 0
+def _handle_message(message: dict, *, config_path: str | None = None) -> dict | str | None:
+    if not isinstance(message, dict):
+        return _error(None, -32600, "invalid request")
+    message_id = message.get("id")
+    method = message.get("method")
+    _log("debug", "received", method=method, id=message_id)
+    try:
         method = message.get("method")
         if method == "initialize":
-            _write_message(
-                _response(
-                    message.get("id"),
-                    {
-                        "protocolVersion": _negotiate_protocol_version(message),
-                        "capabilities": {"tools": {"listChanged": False}, "resources": {"listChanged": False}, "prompts": {"listChanged": False}},
-                        "serverInfo": SERVER_INFO,
+            return _response(
+                message_id,
+                {
+                    "protocolVersion": _negotiate_protocol_version(message),
+                    "capabilities": {
+                        "tools": {"listChanged": False},
+                        "resources": {"listChanged": False},
+                        "prompts": {"listChanged": False},
                     },
-                )
+                    "serverInfo": SERVER_INFO,
+                },
             )
-            continue
         if method == "notifications/initialized":
-            continue
+            return None
         if method == "ping":
-            _write_message(_response(message.get("id"), {}))
-            continue
+            return _response(message_id, {})
         if method == "tools/list":
-            _write_message(_response(message.get("id"), {"tools": _tool_specs()}))
-            continue
+            return _response(message_id, {"tools": _tool_specs()})
         if method == "tools/call":
             params = message.get("params", {})
             name = params.get("name")
             arguments = params.get("arguments") or {}
             result = call_tool(name, arguments, config_path=config_path)
-            _write_message(_response(message.get("id"), _tool_result(result)))
-            continue
+            return _response(message_id, _tool_result(result))
         if method == "resources/list":
-            _write_message(_response(message.get("id"), {"resources": _resource_specs()}))
-            continue
+            return _response(message_id, {"resources": _resource_specs()})
         if method == "resources/read":
             uri = (message.get("params") or {}).get("uri", "")
             try:
                 body = _read_resource(uri)
-                _write_message(_response(message.get("id"),
-                    {"contents": [{"uri": uri, **body}]}))
+                return _response(message_id, {"contents": [{"uri": uri, **body}]})
             except KeyError:
-                _write_message(_response(message["id"],
-                    error={"code": -32602, "message": f"unknown resource: {uri}"}))
-            continue
+                return _error(message_id, -32602, f"unknown resource: {uri}")
         if method == "prompts/list":
-            _write_message(_response(message.get("id"), {"prompts": _prompt_specs()}))
-            continue
+            return _response(message_id, {"prompts": _prompt_specs()})
         if method == "prompts/get":
             params = message.get("params") or {}
             try:
-                _write_message(_response(message.get("id"),
-                    _get_prompt(params.get("name"), params.get("arguments") or {})))
-            except KeyError:
-                _write_message(_response(message["id"],
-                    error={"code": -32602, "message": "unknown prompt"}))
-            continue
-        if method == "exit":
-            return 0
-        if "id" in message:
-            _write_message(
-                _response(
-                    message["id"],
-                    error={"code": -32601, "message": f"method not found: {method}"},
+                return _response(
+                    message_id,
+                    _get_prompt(params.get("name"), params.get("arguments") or {}),
                 )
-            )
+            except KeyError:
+                return _error(message_id, -32602, "unknown prompt")
+        if method == "exit":
+            return "exit"
+        if "id" in message:
+            return _error(message_id, -32601, f"method not found: {method}")
+        return None
+    except Exception as exc:
+        _log("error", "request failed", method=method, id=message_id, error=str(exc))
+        if "id" in message:
+            return _error(message_id, -32603, "internal error", {"detail": str(exc)})
+        return None
+
+
+def serve(*, config_path: str | None = None) -> int:
+    while True:
+        try:
+            message = _read_message()
+        except json.JSONDecodeError as exc:
+            _log("warn", "parse error", error=str(exc))
+            _write_message(_error(None, -32700, "parse error", {"detail": str(exc)}))
+            continue
+        if message is None:
+            return 0
+        if isinstance(message, list):
+            responses = []
+            for item in message:
+                response = _handle_message(item, config_path=config_path)
+                if response == "exit":
+                    if responses:
+                        _write_message(responses)
+                    return 0
+                if response is not None:
+                    responses.append(response)
+            if responses:
+                _write_message(responses)
+            continue
+        response = _handle_message(message, config_path=config_path)
+        if response == "exit":
+            return 0
+        if response is not None:
+            _write_message(response)
