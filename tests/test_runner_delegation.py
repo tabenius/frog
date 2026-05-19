@@ -81,9 +81,13 @@ class RunnerDelegation(unittest.TestCase):
         kinds = {t["target_kind"] for t in ts}
         package = [t for t in ts if t["target_kind"] == "package"]
         clean = [t for t in ts if t["target_kind"] == "clean"]
+        check = [t for t in ts if t["target_kind"] == "check"]
         self.assertIn("check", kinds)
         self.assertIn("clean", kinds)
         self.assertNotIn("build", kinds)
+        self.assertIn("compileall -q", check[0]["command"])
+        self.assertIn("-x", check[0]["command"])
+        self.assertIn(".git", check[0]["command"])
         self.assertEqual(package[0]["command"], "uv build")
         self.assertEqual(clean[0]["command"], "rm -rf build dist *.egg-info src/*.egg-info")
 

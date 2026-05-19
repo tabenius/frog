@@ -3957,7 +3957,11 @@ def _detect_from_pyproject(conn, repo_root: Path, path: Path) -> None:
         repo_path=str(repo_root),
         target_kind="check",
         name=_make_target_name(repo_root, path.parent, "compileall"),
-        command="python3 -m compileall .",
+        command=(
+            "python3 -m compileall -q "
+            "-x '(^|/)(\\.git|\\.hg|\\.svn|\\.venv|venv|build|dist|"
+            "node_modules|__pycache__)/' ."
+        ),
         workdir=str(path.parent),
         runner="python",
         source=str(path),
