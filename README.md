@@ -78,6 +78,9 @@ frog's differentiator is the coordination/scheduling/forensics layer:
 - `frog lock audit [--repo R] [--agent N]` — flag working-tree changes
   not covered by your active lock (advisory → *noticed*).
 - `frog lock reap` / `frog lock list --status {active,stale,released,all}`.
+- Lock kinds are freeform labels, not an enum. Use stable conventional names
+  such as `edit`, `docs`, `build`, `test`, `scan`, or `deploy` so humans can
+  read lock lists quickly.
 - `frog repo affected [--since REF]` / `frog repo build --affected`
   (input-fingerprinted `target_runs` cache: unchanged targets are skipped).
 - `frog repo dep add DEPENDENT DEPENDENCY` — declared cross-repo edges;

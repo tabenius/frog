@@ -75,6 +75,11 @@ REPO_ACTION_HELP = {
     "artifact-stale": "List artifact paths that appear stale or missing.",
 }
 
+LOCK_KIND_HELP = (
+    "Freeform lock label; conventional values include edit, docs, build, "
+    "test, scan, deploy."
+)
+
 
 _ANSI = {
     "reset": "\033[0m",
@@ -1991,7 +1996,12 @@ def build_parser() -> argparse.ArgumentParser:
     task_claim = task_sub.add_parser("claim", help="Take ownership + lock + mark in_progress")
     task_claim.add_argument("slug")
     task_claim.add_argument("--agent")
-    task_claim.add_argument("--lock-kind", default="edit")
+    task_claim.add_argument(
+        "--lock-kind",
+        metavar="KIND",
+        default="edit",
+        help=LOCK_KIND_HELP + " Default: edit.",
+    )
     task_claim.add_argument("--file", action="append", default=[],
                             help="Add and lock a file scope while claiming; repeatable")
     task_claim.add_argument("--force", action="store_true")
@@ -2034,7 +2044,12 @@ def build_parser() -> argparse.ArgumentParser:
     lock_acquire = lock_sub.add_parser("acquire", help="Acquire a coordination lock")
     lock_acquire.add_argument("--scope-key", required=True)
     lock_acquire.add_argument("--repo", dest="repo_ref", metavar="REPO")
-    lock_acquire.add_argument("--lock-kind", required=True)
+    lock_acquire.add_argument(
+        "--lock-kind",
+        metavar="KIND",
+        required=True,
+        help=LOCK_KIND_HELP,
+    )
     lock_acquire.add_argument("--file", action="append", default=[])
     lock_acquire.add_argument("--agent", required=True)
     lock_acquire.add_argument(

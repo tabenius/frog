@@ -54,6 +54,18 @@ class HelpDescriptions(unittest.TestCase):
         self.assertIn("Show repo metadata and counts", text)
         self.assertIn("--repo REPO", text)
 
+    def test_lock_kind_help_says_freeform(self):
+        parser = main_cli.build_parser()
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as caught:
+            with redirect_stdout(out):
+                parser.parse_args(["lock", "acquire", "--help"])
+        self.assertEqual(caught.exception.code, 0)
+        text = out.getvalue().replace("\x1b[90m", "").replace("\x1b[36m", "").replace("\x1b[0m", "")
+        self.assertIn("--lock-kind KIND", text)
+        self.assertIn("Freeform lock label", text)
+        self.assertIn("edit, docs, build", " ".join(text.split()))
+
 
 if __name__ == "__main__":
     unittest.main()
