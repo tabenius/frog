@@ -118,6 +118,19 @@ class CliRender(unittest.TestCase):
         self.assertIn("dist [missing stale]", text)
         self.assertNotIn("/data/src/frog/dist", text)
 
+    def test_repo_doctor_advice_renders(self):
+        rc, out = render({
+            "ok": True,
+            "repo": {"name": "frog", "repo_path": "/data/src/frog"},
+            "advice": ["no runnable targets detected"],
+            "target_counts": {},
+            "stale_artifacts": [],
+        })
+        self.assertEqual(rc, 0)
+        text = plain(out)
+        self.assertIn("frog", text)
+        self.assertIn("no runnable targets detected", text)
+
     def test_json_payloads_stay_plain(self):
         buf = io.StringIO()
         with redirect_stdout(buf):

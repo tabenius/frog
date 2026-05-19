@@ -32,6 +32,16 @@ def _python_repo() -> str:
     return d
 
 
+def _empty_repo() -> str:
+    d = tempfile.mkdtemp(prefix="frog-empty-")
+    subprocess.run(["git", "-C", d, "init", "-q"], check=True)
+    (Path(d) / "README.md").write_text("# empty\n")
+    subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", d, "-c", "user.email=t@t", "-c",
+                     "user.name=t", "commit", "-q", "-m", "i"], check=True)
+    return d
+
+
 class TargetCache(unittest.TestCase):
     def setUp(self):
         self.db = fresh_db()
@@ -83,6 +93,32 @@ class TargetCache(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         self.assertEqual(r["status"], "not_applicable")
         self.assertEqual(r["results"], [])
+
+    def test_repo_doctor_reports_missing_targets(self):
+        empty = _empty_repo()
+        store.register_repo(self.conn, repo_path=empty, name="empty",
+                            kind=None, status="active", third_party=False,
+                            notes=None)
+        r = store.repo_doctor(self.conn, empty)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["target_counts"], {})
+        self.assertTrue(any("no runnable targets" in item for item in r["advice"]))
+
+    def test_repo_doctor_reports_verification_gap(self):
+        r = store.repo_doctor(self.conn, self.repo)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["target_counts"].get("build"), 1)
+        self.assertTrue(any("no verification target" in item for item in r["advice"]))
+
+    def test_repo_doctor_dedupes_stale_artifact_paths(self):
+        pyrepo = _python_repo()
+        store.register_repo(self.conn, repo_path=pyrepo, name="py", kind=None,
+                            status="active", third_party=False, notes=None)
+        r = store.repo_doctor(self.conn, pyrepo)
+        self.assertTrue(r["ok"], r)
+        path_hints = [artifact["path_hint"] for artifact in r["stale_artifacts"]]
+        self.assertEqual(len(path_hints), len(set(path_hints)))
+        self.assertTrue(any("4 artifact path" in item for item in r["advice"]))
 
 
 if __name__ == "__main__":
