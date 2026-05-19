@@ -620,6 +620,12 @@ def _emit(payload: dict, as_json: bool) -> int:
         print(f"{_color('priority', 'muted')}: {_priority_text(task['priority'])}")
         print(f"{_color('workflow_status', 'muted')}: {_status_text(task['workflow_status'])}")
         print(f"{_color('git_status', 'muted')}: {_status_text(task['git_status'])}")
+        if "changed" in payload:
+            changed = "yes" if payload["changed"] else "no"
+            print(f"{_color('changed', 'muted')}: {_color(changed, 'success' if payload['changed'] else 'muted')}")
+            if payload.get("changes"):
+                fields = ", ".join(sorted(payload["changes"]))
+                print(f"{_color('fields', 'muted')}: {_color(fields, 'meta')}")
         return 0
     if "findings" in payload and "agent" in payload:
         repo = payload.get("repo", {})
@@ -2012,6 +2018,15 @@ def build_parser() -> argparse.ArgumentParser:
     task_create.add_argument("--parent-task-slug")
     task_create.add_argument("--file", action="append", default=[],
                              help="File this task intends to touch; repeatable")
+    task_edit = task_sub.add_parser("edit", help="Edit task title, priority, repo, and notes")
+    task_edit.add_argument("slug")
+    task_edit.add_argument("--repo", dest="repo_ref", metavar="REPO")
+    task_edit.add_argument("--title")
+    task_edit.add_argument("--why")
+    task_edit.add_argument("--what")
+    task_edit.add_argument("--roi-note")
+    task_edit.add_argument("--priority")
+    task_edit.add_argument("--actor", help="Acting agent recorded in the task.edited event")
     task_list = task_sub.add_parser("list", help="List tasks")
     task_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     task_list.add_argument("--workflow-status")
@@ -2644,6 +2659,21 @@ def main(argv: list[str] | None = None) -> int:
                         workflow_status=args.workflow_status,
                         assigned_agent=args.assigned_agent,
                         include_done=args.json or args.all or bool(args.workflow_status),
+                    ),
+                    args.json,
+                )
+            if args.task_command == "edit":
+                return _emit(
+                    store.task_edit(
+                        conn,
+                        args.slug,
+                        repo_ref=args.repo_ref,
+                        title=args.title,
+                        why=args.why,
+                        what_text=args.what,
+                        roi_note=args.roi_note,
+                        priority=args.priority,
+                        actor=args.actor or store.current_agent(),
                     ),
                     args.json,
                 )

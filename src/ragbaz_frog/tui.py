@@ -129,6 +129,8 @@ class TuiState:
             return ("claim", tk["slug"])
         if key in ("f", "F"):
             return ("finish", tk["slug"])
+        if key in ("e", "E"):
+            return ("edit", tk["slug"])
         return None
 
 
@@ -409,7 +411,7 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                         C(_DIM))
                 hint = ("?: help  " if not show_help else "")
                 put(h - 1, 1,
-                    f"{hint}q quit  ←/→ col  ↑/↓ task  c claim  f finish  n next  r refresh   | {status}"[: w - 2],
+                    f"{hint}q quit  ←/→ col  ↑/↓ task  c claim  e edit  f finish  n next  r refresh   | {status}"[: w - 2],
                     C(_DIM))
                 if show_help:
                     lines = ["KEYS",
@@ -417,6 +419,7 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                              " ↑/↓         move selection (scrolls)",
                              " g / G       top / bottom of column",
                              " c           claim selected task",
+                             " e           edit selected title/priority",
                              " f           finish selected task",
                              " n           jump to scheduler's next pick",
                              " r           force refresh   q  quit"]
@@ -524,12 +527,48 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                         if verb == "claim":
                             store.task_claim(conn, slug=slug, agent=agent)
                             status = f"claimed {slug}"
-                        else:
+                        elif verb == "finish":
                             store.task_finish(conn, slug=slug, agent=agent,
                                               verify=False)
                             status = f"finished {slug}"
+                        else:
+                            tk = st.selected() or {}
+                            old_title = tk.get("title") or ""
+                            old_priority = tk.get("priority") or "p3"
+                            scr.nodelay(False)
+                            curses.echo()
+                            try:
+                                curses.curs_set(1)
+                            except curses.error:
+                                pass
+                            y = max(2, h - 7)
+                            put(y, 1, "Edit title (blank keeps current):".ljust(w - 2), C(_ACCENT, bold=True))
+                            put(y + 1, 1, old_title[: w - 2], C(_DIM))
+                            title_raw = scr.getstr(y + 2, 1, max(1, w - 3)).decode("utf-8", "replace").strip()
+                            put(y + 3, 1, f"Edit priority p0/p1/p2/p3 (blank keeps {old_priority}):".ljust(w - 2), C(_ACCENT, bold=True))
+                            prio_raw = scr.getstr(y + 4, 1, 8).decode("utf-8", "replace").strip()
+                            curses.noecho()
+                            try:
+                                curses.curs_set(0)
+                            except curses.error:
+                                pass
+                            scr.nodelay(True)
+                            r = store.task_edit(
+                                conn,
+                                slug,
+                                title=title_raw or None,
+                                priority=prio_raw or None,
+                                actor=agent,
+                            )
+                            status = f"edited {slug}" if r.get("ok") else r.get("error", f"edit {slug} failed")
                     except Exception as e:
                         status = f"{verb} {slug} failed: {e}"
+                        try:
+                            curses.noecho()
+                            curses.curs_set(0)
+                            scr.nodelay(True)
+                        except curses.error:
+                            pass
                     last_fp = None
 
     try:

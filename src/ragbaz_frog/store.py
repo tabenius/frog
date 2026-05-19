@@ -2380,12 +2380,81 @@ _WF_DONE = {"done", "cancelled", "abandoned", "archived"}
 _WF_BLOCKED = {"blocked"}
 _WF_INPROG = {"in_progress", "in-progress", "doing", "wip", "active",
               "review", "started"}
+_TASK_PRIORITIES = {"p0", "p1", "p2", "p3"}
 
 
 def _priority_rank(p: str | None) -> int:
     if p and len(p) >= 2 and p[0] in "pP" and p[1:].isdigit():
         return int(p[1:])
     return 9
+
+
+def task_edit(
+    conn,
+    slug: str,
+    *,
+    title: str | None = None,
+    why: str | None = None,
+    what_text: str | None = None,
+    roi_note: str | None = None,
+    priority: str | None = None,
+    repo_ref: str | None = None,
+    actor: str | None = None,
+) -> dict:
+    row = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"task not found: {slug}"}
+    task = dict(row)
+    updates: dict[str, str | None] = {}
+    candidates = {
+        "title": title,
+        "why": why,
+        "what_text": what_text,
+        "roi_note": roi_note,
+        "priority": priority.lower() if isinstance(priority, str) else priority,
+    }
+    if candidates["priority"] is not None and candidates["priority"] not in _TASK_PRIORITIES:
+        return {"ok": False, "error": "priority must be one of p0, p1, p2, p3"}
+    if repo_ref is not None:
+        repo = resolve_repo(conn, repo_ref)
+        if not repo or not conn.execute(
+            "SELECT 1 FROM repos WHERE repo_path = ?", (repo["repo_path"],)
+        ).fetchone():
+            return {"ok": False, "error": f"repo not found: {repo_ref}"}
+        candidates["repo_path"] = repo["repo_path"]
+    for field, value in candidates.items():
+        if value is not None and value != task.get(field):
+            updates[field] = value
+    if not updates:
+        result = task_info(conn, slug)
+        result["changed"] = False
+        result["changes"] = {}
+        return result
+    now = utc_now_iso()
+    assignments = ", ".join(f"{field} = ?" for field in updates)
+    params = list(updates.values()) + [now, slug]
+    conn.execute(
+        f"UPDATE tasks SET {assignments}, updated_at = ? WHERE slug = ?",
+        tuple(params),
+    )
+    changes = {
+        field: {"before": task.get(field), "after": value}
+        for field, value in updates.items()
+    }
+    record_event(
+        conn,
+        kind="task.edited",
+        summary=f"edited task {slug}",
+        repo_path=updates.get("repo_path", task["repo_path"]),
+        task_slug=slug,
+        actor=actor or task.get("assigned_agent"),
+        payload={"changes": changes},
+    )
+    conn.commit()
+    result = task_info(conn, slug)
+    result["changed"] = True
+    result["changes"] = changes
+    return result
 
 
 def _task_is_inprogress(conn, slug: str) -> bool:

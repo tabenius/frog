@@ -41,6 +41,7 @@ class TuiStateTests(unittest.TestCase):
         self.assertIsNotNone(tk)
         self.assertEqual(self.st.action("c"), ("claim", tk["slug"]))
         self.assertEqual(self.st.action("f"), ("finish", tk["slug"]))
+        self.assertEqual(self.st.action("e"), ("edit", tk["slug"]))
         self.assertIsNone(self.st.action("z"))
 
     def test_jump_to_next_selects_ready(self):

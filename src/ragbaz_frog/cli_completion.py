@@ -62,7 +62,7 @@ def completion_script(
       fi
       ;;
     unit) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "discover list" -- "$cur") ) ;;
-    task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create list next claim finish info status dependency conflict tag assign" -- "$cur") ) ;;
+    task) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "create edit list next claim finish info status dependency conflict tag assign" -- "$cur") ) ;;
     lock) [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "check acquire renew release list info" -- "$cur") ) ;;
     file)
       if [[ $COMP_CWORD -eq 2 ]]; then
@@ -102,7 +102,7 @@ complete -c frog -n '__fish_seen_subcommand_from coordinator' -a 'show set'
 complete -c frog -n '__fish_seen_subcommand_from repo' -a '{repo_subs}'
 complete -c frog -n '__fish_seen_subcommand_from {" ".join(sorted(repo_actions))} info' -a '{repo_names}'
 complete -c frog -n '__fish_seen_subcommand_from unit' -a 'discover list'
-complete -c frog -n '__fish_seen_subcommand_from task' -a 'create list next claim finish info status dependency conflict tag assign'
+complete -c frog -n '__fish_seen_subcommand_from task' -a 'create edit list next claim finish info status dependency conflict tag assign'
 complete -c frog -n '__fish_seen_subcommand_from lock' -a 'check acquire renew release list info'
 complete -c frog -n '__fish_seen_subcommand_from file; and not __fish_seen_subcommand_from upsert list info' -a 'upsert list info'
 complete -c frog -n '__fish_seen_subcommand_from file; and __fish_seen_subcommand_from info' -a '(__frog_complete_registered_files)'

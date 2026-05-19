@@ -228,6 +228,36 @@ class CliRender(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertIn("--all", plain(buf.getvalue()))
 
+    def test_task_edit_help_exposes_editable_fields(self):
+        parser = main_cli.build_parser()
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(buf):
+            parser.parse_args(["task", "edit", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        text = plain(buf.getvalue())
+        self.assertIn("--title", text)
+        self.assertIn("--what", text)
+        self.assertIn("--priority", text)
+
+    def test_task_edit_result_renders_changed_fields(self):
+        rc, out = render({
+            "ok": True,
+            "task": {
+                "slug": "editable",
+                "title": "Edited",
+                "repo_path": None,
+                "priority": "p1",
+                "workflow_status": "idea",
+                "git_status": "not_started",
+            },
+            "changed": True,
+            "changes": {"title": {"before": "Old", "after": "Edited"}},
+        })
+        self.assertEqual(rc, 0)
+        text = plain(out)
+        self.assertIn("changed: yes", text)
+        self.assertIn("fields: title", text)
+
     def test_no_color_disables_ansi(self):
         main_cli._COLOR_ENABLED = False
         rc, out = render({

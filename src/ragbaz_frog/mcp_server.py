@@ -179,6 +179,17 @@ def _tool_specs() -> list[dict]:
                 "required": ["slug", "title"]},
         },
         {
+            "name": "frog_task_edit",
+            "description": "Edit mutable task fields and record an audited before/after diff.",
+            "inputSchema": {"type": "object", "properties": {
+                "workspace": {"type": "string"}, "slug": {"type": "string"},
+                "title": {"type": "string"}, "repo_ref": {"type": "string"},
+                "why": {"type": "string"}, "what": {"type": "string"},
+                "roi_note": {"type": "string"}, "priority": {"type": "string"},
+                "actor": {"type": "string"}},
+                "required": ["slug"]},
+        },
+        {
             "name": "frog_task_dependency",
             "description": "Declare task A depends_on task B.",
             "inputSchema": {"type": "object", "properties": {
@@ -362,6 +373,18 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
                 delegation_current=None, delegation_other=None,
                 parent_task_slug=arguments.get("parent_task_slug"),
                 files=arguments.get("files", []))
+        if tool_name == "frog_task_edit":
+            return store.task_edit(
+                conn,
+                arguments["slug"],
+                repo_ref=arguments.get("repo_ref"),
+                title=arguments.get("title"),
+                why=arguments.get("why"),
+                what_text=arguments.get("what"),
+                roi_note=arguments.get("roi_note"),
+                priority=arguments.get("priority"),
+                actor=arguments.get("actor"),
+            )
         if tool_name == "frog_task_dependency":
             return store.task_add_dependency(
                 conn, arguments["slug"], arguments["depends_on"],

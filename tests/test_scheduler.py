@@ -106,6 +106,50 @@ class Scheduler(unittest.TestCase):
         self.assertEqual([t["slug"] for t in r["tasks"]], ["todo"])
         self.assertFalse(r["include_done"])
 
+    def test_task_edit_updates_fields_and_records_diff(self):
+        self._mk("edit-me", "p3")
+        r = store.task_edit(
+            self.conn,
+            "edit-me",
+            title="Edited title",
+            what_text="Changed scope",
+            priority="P1",
+            actor="codex",
+        )
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["changed"])
+        self.assertEqual(r["task"]["title"], "Edited title")
+        self.assertEqual(r["task"]["priority"], "p1")
+        self.assertEqual(r["changes"]["title"]["before"], "edit-me")
+        event = self.conn.execute(
+            "SELECT actor, payload_json FROM event_log "
+            "WHERE kind = 'task.edited' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(event["actor"], "codex")
+        self.assertIn('"title"', event["payload_json"])
+
+    def test_task_edit_is_idempotent(self):
+        self._mk("stable", "p2")
+        before = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM event_log WHERE kind = 'task.edited'"
+        ).fetchone()["n"]
+        r = store.task_edit(self.conn, "stable", title="stable", priority="p2")
+        after = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM event_log WHERE kind = 'task.edited'"
+        ).fetchone()["n"]
+        self.assertTrue(r["ok"], r)
+        self.assertFalse(r["changed"])
+        self.assertEqual(before, after)
+
+    def test_task_edit_validates_priority_and_repo(self):
+        self._mk("bad", "p2")
+        r = store.task_edit(self.conn, "bad", priority="p9")
+        self.assertFalse(r["ok"])
+        self.assertIn("priority", r["error"])
+        r = store.task_edit(self.conn, "bad", repo_ref="missing")
+        self.assertFalse(r["ok"])
+        self.assertIn("repo not found", r["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

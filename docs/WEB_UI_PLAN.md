@@ -6,7 +6,7 @@ Status: **plan for approval — no implementation yet.**
 
 A browser UI with the same capabilities as the curses TUI: the task
 board, the repo view (fold/expand, directory-tree and box/federation
-navigation), claim/finish actions, and live updates — served locally
+navigation), claim/finish/edit actions, and live updates — served locally
 with zero new dependencies.
 
 ## Command surface
@@ -35,7 +35,9 @@ cannot drift:
   — the browser holds the equivalent client-side; the server stays
   stateless and just serves snapshots + accepts actions.
 - Actions reuse existing store functions (`task_claim`,
-  `task_finish`) — identical semantics to CLI/TUI/MCP.
+  `task_finish`, `task_edit`) — identical semantics to CLI/TUI/MCP.
+  Slug rename remains a separate future operation; the edit form only
+  changes mutable task fields.
 
 ## Transport (stdlib only — honour the no-deps constraint)
 
@@ -44,6 +46,8 @@ cannot drift:
   - `GET /api/board` → `board_snapshot`
   - `GET /api/repos` → `repo_tree_snapshot`
   - `POST /api/task/{slug}/claim` · `/finish` (agent from query/header)
+  - `PATCH /api/task/{slug}` with `title`, `why`, `what`, `roi_note`,
+    `priority`, and `repo_ref`, backed by `store.task_edit`
   - `GET /api/events?since=<id>` → tail for live updates
 - **Live updates:** Server-Sent Events (`text/event-stream`) driven by
   the existing DB-fingerprint change detection (same signal the TUI’s
@@ -72,7 +76,8 @@ cannot drift:
 2. Read-only server: `/api/board`, `/api/repos`, static `index.html`
    rendering the board + repo view (fold/expand, tree, boxes).
 3. Live updates via SSE off the DB fingerprint.
-4. Actions: claim/finish (POST), reusing store fns + audit events.
+4. Actions: claim/finish (POST) plus task edit (PATCH), reusing store
+   fns + audit events.
 5. Polish: palette, keyboard parity with the TUI, error toasts.
 6. Docs: a section in `docs/DEPLOY.md` + link from README.
 
