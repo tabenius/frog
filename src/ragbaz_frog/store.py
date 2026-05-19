@@ -1251,6 +1251,82 @@ def repo_key_info(conn, repo_ref: str, *, set_key: str | None = None,
                 "ORDER BY box", (key,)).fetchall())}
 
 
+def repo_move(conn, old_path: str, new_path: str, *,
+              agent: str | None = None) -> dict:
+    """Re-point a registered repo to a new path, safely. repos.repo_path
+    is a referenced PRIMARY KEY with no ON UPDATE CASCADE, so a naive
+    UPDATE either fails or dangles children. This does the correct
+    transactional rename: FK off, update repos + every table carrying a
+    repo_path, re-enable FK, and assert `foreign_key_check` is clean
+    (rolling back otherwise). This is the safe form of the hand-written
+    SQL the stale-path fix needed."""
+    old = old_path.rstrip("/")
+    new = new_path.rstrip("/")
+    if old == new:
+        return {"ok": False, "error": "old and new paths are identical"}
+    row = conn.execute(
+        "SELECT repo_key FROM repos WHERE repo_path = ?", (old,)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"no registered repo at {old}"}
+    if conn.execute("SELECT 1 FROM repos WHERE repo_path = ?",
+                    (new,)).fetchone():
+        return {"ok": False,
+                "error": f"a repo is already registered at {new}"}
+    repo_key = row["repo_key"]
+    tables = []
+    for (tname,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"):
+        cols = [c[1] for c in conn.execute(
+            f"PRAGMA table_info({tname})")]
+        if "repo_path" in cols:
+            tables.append(tname)
+    now = utc_now_iso()
+    prev_iso = conn.isolation_level
+    conn.commit()
+    try:
+        conn.isolation_level = None
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN")
+        conn.execute(
+            "UPDATE repos SET repo_path=?, updated_at=? WHERE repo_path=?",
+            (new, now, old))
+        updated = {}
+        for tname in tables:
+            if tname == "repos":
+                continue
+            cur = conn.execute(
+                f"UPDATE {tname} SET repo_path=? WHERE repo_path=?",
+                (new, old))
+            if cur.rowcount:
+                updated[tname] = cur.rowcount
+        conn.execute(
+            "INSERT INTO event_log(created_at,kind,repo_path,task_slug,"
+            "actor,summary,payload_json) VALUES(?,?,?,?,?,?,?)",
+            (now, "repo.moved", new, None, agent,
+             f"moved repo {old} -> {new}",
+             json.dumps({"old": old, "new": new, "repo_key": repo_key},
+                        sort_keys=True)))
+        conn.execute("COMMIT")
+        conn.execute("PRAGMA foreign_keys=ON")
+        fk = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk:
+            return {"ok": False,
+                    "error": "foreign_key_check failed after move",
+                    "violations": [tuple(x) for x in fk]}
+        return {"ok": True, "message": f"moved {old} -> {new}",
+                "old": old, "new": new, "repo_key": repo_key,
+                "updated": updated}
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        conn.execute("PRAGMA foreign_keys=ON")
+        return {"ok": False, "error": f"repo move failed: {e}"}
+    finally:
+        conn.isolation_level = prev_iso
+
+
 def resolve_repo(conn, repo_ref: str | None) -> dict | None:
     if repo_ref is None:
         return None

@@ -1903,6 +1903,9 @@ def build_parser() -> argparse.ArgumentParser:
     repo_register.add_argument("--status", default="active")
     repo_register.add_argument("--third-party", action="store_true")
     repo_register.add_argument("--notes")
+    repo_move = repo_sub.add_parser("move", help="Re-point a registered repo to a new path (safe transactional rename)")
+    repo_move.add_argument("old_path")
+    repo_move.add_argument("new_path")
     repo_discover = repo_sub.add_parser("discover", help="Find repos under a root path and update AGENTS.db")
     repo_discover.add_argument("--root")
     repo_discover.add_argument("--no-scan", action="store_true", help="Register repos without scanning targets")
@@ -2508,6 +2511,10 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     args.json,
                 )
+            if args.repo_command == "move":
+                return _emit(store.repo_move(
+                    conn, args.old_path, args.new_path,
+                    agent=store.current_agent()), args.json)
             if args.repo_command in {"discover", "sync"}:
                 root = args.root or (workspace["root"] if workspace else "/data/src")
                 return _emit(store.discover_repos(conn, root=root, scan=not args.no_scan), args.json)
