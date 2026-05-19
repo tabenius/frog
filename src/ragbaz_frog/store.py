@@ -268,6 +268,8 @@ def migrate(db_path: str) -> dict:
             )
             conn.commit()
             newly_applied.append(sql_file.name)
+        ensure_box_identity(conn)
+        conn.commit()
         return {
             "ok": True,
             "message": f"applied {len(newly_applied)} migration(s)",
@@ -878,8 +880,75 @@ def path_metadata(path: str) -> dict:
     }
 
 
+def _box_id_path() -> Path:
+    """Where the pinned box id lives -- outside the DB so it is reachable
+    without a connection. FROG_HOME overrides the directory (used by
+    tests and by operators who want it alongside the workspace)."""
+    home = os.environ.get("FROG_HOME")
+    base = Path(home) if home else Path.home() / ".config" / "frog"
+    return base / "box-id"
+
+
 def _box_id() -> str:
-    return socket.gethostname()
+    """Stable identity for this machine.
+
+    Precedence: FROG_BOX_ID env > pinned file > hostname. The first time
+    it is resolved with no override it is pinned to the current hostname
+    (preserving continuity with existing repo_aliases/lock data) and
+    persisted, so a later hostname change does not silently fork this
+    box's federation identity."""
+    env = os.environ.get("FROG_BOX_ID")
+    if env:
+        return env
+    path = _box_id_path()
+    try:
+        v = path.read_text().strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    bid = socket.gethostname()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(bid + "\n")
+    except OSError:
+        pass
+    return bid
+
+
+def ensure_box_identity(conn) -> dict:
+    """Record (or refresh last_seen for) this box in the DB. Idempotent;
+    safe to call on every connect/migrate."""
+    bid = _box_id()
+    host = socket.gethostname()
+    now = utc_now_iso()
+    conn.execute(
+        """INSERT INTO box_identity(box_id, hostname, first_seen, last_seen)
+           VALUES(?,?,?,?)
+           ON CONFLICT(box_id) DO UPDATE SET
+             hostname = excluded.hostname,
+             last_seen = excluded.last_seen""",
+        (bid, host, now, now),
+    )
+    return {"box_id": bid, "hostname": host}
+
+
+def box_whoami(conn) -> dict:
+    """This box's identity plus every box this AGENTS.db has seen."""
+    bid = _box_id()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT box_id, hostname, first_seen, last_seen "
+        "FROM box_identity ORDER BY last_seen DESC")]
+    return {
+        "ok": True,
+        "box_id": bid,
+        "hostname": socket.gethostname(),
+        "pinned_at": str(_box_id_path()),
+        "source": ("env" if os.environ.get("FROG_BOX_ID")
+                   else "file" if _box_id_path().exists()
+                   else "hostname"),
+        "known_boxes": rows,
+    }
 
 
 def compute_repo_key(repo_path: str) -> str:
@@ -2561,9 +2630,9 @@ def lock_acquire(
             """
             INSERT INTO locks(
                 scope_key, repo_path, repo_key, lock_kind, file_paths_json,
-                rel_files_json, agent_name, pid, host, reason,
+                rel_files_json, agent_name, pid, host, box_id, reason,
                 status, lease_seconds, started_at, updated_at, eta_finish_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
             """,
             (
                 scope_key,
@@ -2575,6 +2644,7 @@ def lock_acquire(
                 agent,
                 pid,
                 socket.gethostname(),
+                _box_id(),
                 reason,
                 lease_seconds,
                 now,
