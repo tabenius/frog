@@ -53,6 +53,10 @@ path-hash fallback) — not their absolute path, which differs per box.
 - **`frog log why` / `frog log blame`** events carry origin box +
   host, so causality answers cross-box questions.
 
+## Browsing the federation
+
+`frog tui` -> press `v` for the repo view, then `b` to group by box: this box plus every federated peer, each foldable to the repos that live there (peer repos show their path on that box; units are known only on the owning box). `t` toggles the local directory-tree view.
+
 ## Mirroring
 
 `frog sync pull` mirrors another workspace's event log read-only

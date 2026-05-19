@@ -131,5 +131,108 @@ class RepoViewTree(unittest.TestCase):
         self.assertIn("/p/sub/g", rv.expanded)  # key survives
 
 
+class RepoTreeBoxes(unittest.TestCase):
+    def test_snapshot_has_local_and_peer_boxes(self):
+        import os, subprocess
+        d = tempfile.mkdtemp()
+        c = store.connect(fresh_db())
+        r = _mk_repo(d, "repo")
+        store.register_repo(c, repo_path=r, name="rr", kind=None,
+                            status="active", third_party=False, notes=None)
+        store.ensure_repo_key(c, r)
+        c.execute("INSERT INTO peers(box_id,hostname,ssh_target,"
+                  "remote_db,added_at,last_join_at) VALUES"
+                  "('boxB','hB','hB',NULL,'t','t')")
+        key = c.execute("SELECT repo_key FROM repos WHERE repo_path=?",
+                        (r,)).fetchone()[0]
+        c.execute("INSERT INTO repo_aliases(repo_key,box,repo_path,"
+                  "created_at) VALUES(?, 'boxB','/srv/rr','now')", (key,))
+        c.commit()
+        s = store.repo_tree_snapshot(c)
+        ids = [(b["box_id"], b["is_local"]) for b in s["boxes"]]
+        self.assertIn((store._box_id(), True), ids)
+        peer = [b for b in s["boxes"] if b["box_id"] == "boxB"][0]
+        self.assertFalse(peer["is_local"])
+        self.assertEqual(peer["repos"][0]["on_path"], "/srv/rr")
+        self.assertTrue(peer["repos"][0]["remote"])
+        c.close()
+
+
+class RepoViewBoxMode(unittest.TestCase):
+    def _snap(self):
+        local = {"repo_path": "/p/a", "name": "a", "repo_key": "k",
+                 "status": "active", "third_party": False,
+                 "units": ["u1"], "actions": ["build"]}
+        remote = {"repo_path": "/srv/a", "on_path": "/srv/a",
+                  "name": "a", "repo_key": "k", "status": "active",
+                  "third_party": False, "units": [],
+                  "actions": ["build"], "remote": True}
+        return {
+            "repos": [local],
+            "tree": {"name": "/p", "path": "/p", "dirs": [],
+                     "repos": [local]},
+            "boxes": [
+                {"box_id": "boxA", "hostname": "hA", "is_local": True,
+                 "ssh_target": None,
+                 "repos": [dict(local, on_path="/p/a")]},
+                {"box_id": "boxB", "hostname": "hB", "is_local": False,
+                 "ssh_target": "hB", "repos": [remote]},
+            ],
+            "local_box": "boxA",
+        }
+
+    def test_box_mode_lists_boxes_folded(self):
+        rv = RepoView(self._snap())
+        rv.toggle_boxes()
+        rows = rv.visible_rows()
+        self.assertEqual([r["kind"] for r in rows], ["box", "box"])
+        self.assertFalse(rows[0]["expanded"])
+
+    def test_expand_box_reveals_its_repos(self):
+        rv = RepoView(self._snap())
+        rv.toggle_boxes()
+        rv.sel = 1                       # boxB (peer)
+        rv.toggle()
+        rows = rv.visible_rows()
+        self.assertEqual([r["kind"] for r in rows],
+                         ["box", "box", "repo"])
+        self.assertIn("(remote)", rows[2]["text"])
+        # expand the remote repo -> @path info + actions, no units
+        rv.sel = 2
+        rv.toggle()
+        kinds = [r["kind"] for r in rv.visible_rows()]
+        self.assertEqual(kinds, ["box", "box", "repo", "unit",
+                                 "actions"])
+        info = rv.visible_rows()[3]["text"]
+        self.assertIn("/srv/a", info)
+
+    def _expand_named(self, rv, kind, needle):
+        for i, r in enumerate(rv.visible_rows()):
+            if r["kind"] == kind and needle in r["key"]:
+                rv.sel = i
+                rv.toggle()
+                return
+        raise AssertionError(f"no {kind} row matching {needle}")
+
+    def test_same_repo_under_two_boxes_folds_independently(self):
+        rv = RepoView(self._snap())
+        rv.toggle_boxes()
+        self._expand_named(rv, "box", "boxA")   # expand boxA
+        self._expand_named(rv, "box", "boxB")   # expand boxB
+        # box-prefixed fold keys: expand only boxA's copy of the repo
+        self._expand_named(rv, "repo", "boxA::/p/a")
+        rows = rv.visible_rows()
+        self.assertTrue(any(r["kind"] == "unit" and "u1" in r["text"]
+                            for r in rows))     # boxA repo expanded
+        b_repo = next(r for r in rows if r["kind"] == "repo"
+                      and "boxB::" in r["key"])
+        self.assertFalse(b_repo["expanded"])    # boxB copy still folded
+
+    def test_box_mode_independent_of_tree_flag(self):
+        rv = RepoView(self._snap())
+        rv.tree = True
+        rv.toggle_boxes()                 # box_mode wins
+        self.assertEqual(rv.visible_rows()[0]["kind"], "box")
+
 if __name__ == "__main__":
     unittest.main()

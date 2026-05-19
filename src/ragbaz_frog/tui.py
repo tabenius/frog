@@ -133,6 +133,7 @@ class TuiState:
 
 
 _REPO_C, _UNIT_C, _DIR_C, _ACTION_C = 78, 245, 39, 208
+_BOX_C = 220
 
 
 class RepoView:
@@ -144,6 +145,7 @@ class RepoView:
     def __init__(self, snapshot: dict):
         self.load(snapshot)
         self.tree = False
+        self.box_mode = False
         self.expanded: set[str] = set()
         self.sel = 0
 
@@ -152,19 +154,29 @@ class RepoView:
                                      {"dirs": [], "repos": [], "path": "/"}}
 
     # ---- row model -------------------------------------------------
-    def _repo_rows(self, repo: dict, depth: int) -> list[dict]:
+    def _repo_rows(self, repo: dict, depth: int,
+                   key_prefix: str = "") -> list[dict]:
         rp = repo["repo_path"]
-        exp = rp in self.expanded
-        out = [{"kind": "repo", "key": rp, "depth": depth,
-                "text": repo["name"], "repo": repo, "expanded": exp,
+        k = key_prefix + rp
+        exp = k in self.expanded
+        label = repo["name"]
+        if repo.get("remote"):
+            label += "  (remote)"
+        out = [{"kind": "repo", "key": k, "depth": depth,
+                "text": label, "repo": repo, "expanded": exp,
                 "foldable": True}]
         if exp:
+            if repo.get("remote"):
+                out.append({"kind": "unit", "key": k + "::@at",
+                            "depth": depth + 1, "foldable": False,
+                            "text": "@ " + rp + " (units known on "
+                                    "that box only)"})
             for u in repo["units"]:
-                out.append({"kind": "unit", "key": rp + "::" + u,
+                out.append({"kind": "unit", "key": k + "::" + u,
                             "depth": depth + 1, "text": u,
                             "foldable": False})
             out.append({"kind": "actions",
-                        "key": rp + "::@actions", "depth": depth + 1,
+                        "key": k + "::@actions", "depth": depth + 1,
                         "text": "actions: " + " ".join(repo["actions"]),
                         "foldable": False})
         return out
@@ -182,7 +194,26 @@ class RepoView:
             out.extend(self._repo_rows(r, depth))
         return out
 
+    def _box_rows(self) -> list[dict]:
+        out = []
+        for b in self.snapshot.get("boxes", []):
+            key = "box::" + b["box_id"]
+            exp = key in self.expanded
+            tag = "local" if b.get("is_local") else "peer"
+            label = (f"{b['box_id']} ({b.get('hostname') or '?'}) "
+                     f"[{tag}]  {len(b['repos'])} repo(s)")
+            out.append({"kind": "box", "key": key, "depth": 0,
+                        "text": label, "expanded": exp,
+                        "foldable": True, "box": b})
+            if exp:
+                for r in b["repos"]:
+                    out.extend(self._repo_rows(
+                        r, 1, key_prefix=b["box_id"] + "::"))
+        return out
+
     def visible_rows(self) -> list[dict]:
+        if self.box_mode:
+            return self._box_rows()
         if self.tree:
             return self._walk_tree(self.snapshot["tree"], 0)
         rows = []
@@ -220,6 +251,10 @@ class RepoView:
 
     def toggle_tree(self) -> None:
         self.tree = not self.tree
+        self.sel = 0
+
+    def toggle_boxes(self) -> None:
+        self.box_mode = not self.box_mode
         self.sel = 0
 
 
@@ -303,9 +338,11 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
             # ---- header: RAGBAZ/frog + ASCII frog + TASK BOARD ----
             put(0, 2, "RAGBAZ", C(_ACCENT, bold=True))
             put(0, 8, "/frog", C(39, bold=True))
+            _rlabel = ("  REPOS (boxes)" if rv.box_mode
+                       else "  REPOS (tree)" if rv.tree
+                       else "  REPOS")
             put(0, 14, "  TASK BOARD" if view == "board"
-                else ("  REPOS (tree)" if rv.tree else "  REPOS"),
-                C(_DIM))
+                else _rlabel, C(_DIM))
             for i, ln in enumerate(_FROG_ART):
                 put(1 + i, 2, ln, C(_FROG_C))
             top = 1 + len(_FROG_ART) + 1
@@ -397,7 +434,8 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                     off = rv.sel - vis_h + 1
                 rv._off = off
                 _kc = {"repo": _REPO_C, "unit": _UNIT_C,
-                       "dir": _DIR_C, "actions": _ACTION_C}
+                       "dir": _DIR_C, "actions": _ACTION_C,
+                       "box": _BOX_C}
                 if not rows:
                     put(top, 2, "no registered repos "
                         "(frog repo register <path>)", C(_DIM))
@@ -424,7 +462,7 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                 elif d:
                     put(iy + 1, 1, d["text"][: w - 2], C(_DIM))
                 put(h - 1, 1,
-                    ("q quit  v board  t tree  up/dn move  "
+                    ("q quit  v board  t tree  b boxes  up/dn move  "
                      "enter/space fold  g/G ends  r refresh"
                      "   | " + status)[: w - 2], C(_DIM))
             scr.refresh()
@@ -445,6 +483,8 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
             if view == "repos":
                 if c in ("t", "T"):
                     rv.toggle_tree()
+                elif c in ("b", "B"):
+                    rv.toggle_boxes()
                 elif ch == curses.KEY_UP:
                     rv.move(-1)
                 elif ch == curses.KEY_DOWN:

@@ -3773,8 +3773,52 @@ def repo_tree_snapshot(conn, *, include_third_party: bool = True) -> dict:
                             key=lambda x: x["repo_path"]),
         }
 
+    # Box dimension: this box + every federated peer, each with the
+    # repos known to live there (local repos carry units/actions;
+    # peer repos come from repo_aliases -> path on that box, units
+    # unknown from here).
+    local_box = _box_id()
+    local_host = socket.gethostname()
+    by_key = {it["repo_key"]: it for it in items if it.get("repo_key")}
+    boxes = [{
+        "box_id": local_box, "hostname": local_host, "is_local": True,
+        "ssh_target": None,
+        "repos": [dict(it, on_path=it["repo_path"]) for it in items],
+    }]
+    try:
+        peers = conn.execute(
+            "SELECT box_id, hostname, ssh_target FROM peers "
+            "ORDER BY box_id").fetchall()
+    except sqlite3.OperationalError:
+        peers = []
+    for pr in peers:
+        pbox = pr["box_id"]
+        prepos = []
+        for a in conn.execute(
+                "SELECT repo_key, repo_path FROM repo_aliases "
+                "WHERE box = ? ORDER BY repo_path", (pbox,)):
+            base = by_key.get(a["repo_key"])
+            prepos.append({
+                "repo_path": a["repo_path"],
+                "on_path": a["repo_path"],
+                "name": (base["name"] if base
+                         else os.path.basename(a["repo_path"])),
+                "repo_key": a["repo_key"],
+                "status": (base["status"] if base else None),
+                "third_party": bool(base["third_party"]) if base else False,
+                "units": [],          # remote units not known from here
+                "actions": list(_REPO_ACTIONS),
+                "remote": True,
+            })
+        boxes.append({
+            "box_id": pbox, "hostname": pr["hostname"],
+            "is_local": False, "ssh_target": pr["ssh_target"],
+            "repos": prepos,
+        })
+
     return {"ok": True, "repos": items, "root": prefix or "/",
-            "tree": _ser(root)}
+            "tree": _ser(root), "boxes": boxes,
+            "local_box": local_box}
 
 
 def board_snapshot(conn, *, recent_limit: int = 14) -> dict:
