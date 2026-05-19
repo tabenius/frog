@@ -25,6 +25,9 @@ _ACCENT, _FROG_C, _DIM = 208, 78, 245
 _READY_C, _AGENT_C, _BLOCK_C = 220, 39, 203  # match frog board
 
 _THEMES = {"ragbaz": True, "mono": False}  # mono => no color
+_TIME_STATUSES = {
+    "done", "finished", "in_progress", "in-progress", "doing", "wip", "active",
+}
 
 
 class TuiState:
@@ -267,17 +270,37 @@ def _use_color() -> bool:
 
 def task_segments(tk: dict, ready: set | list) -> list[tuple[str, int]]:
     """[(text, xterm256_code)] for one task row, colour-coded exactly like
-    `frog board`: base=priority, ★=220, ◆agent=39, ⛓blockers=203."""
+    `frog board`: base=priority, ★=220, ◆agent=39."""
     prio = (tk.get("priority") or "p?")
-    segs = [(f"{prio} {tk['slug']}", _PRIO_C.get(prio.lower(), 245))]
+    timestamp = task_time(tk)
+    prefix = f"{timestamp} " if timestamp else ""
+    segs = [(f"{prefix}{prio} {tk['slug']}", _PRIO_C.get(prio.lower(), 245))]
     if tk["slug"] in (ready or ()):
         segs.append((" ★", _READY_C))
     if tk.get("assigned_agent"):
         segs.append((f" ◆{tk['assigned_agent']}", _AGENT_C))
-    if tk.get("unmet_deps"):
-        d = tk["unmet_deps"]
-        segs.append((f" ⛓{len(d)}←{','.join(d[:2])}", _BLOCK_C))
     return segs
+
+
+def task_time(tk: dict) -> str:
+    status = (tk.get("workflow_status") or "").lower()
+    if status not in _TIME_STATUSES:
+        return ""
+    stamp = (
+        tk.get("status_confidence_at")
+        or tk.get("updated_at")
+        or tk.get("created_at")
+        or ""
+    )
+    return stamp[11:16] if len(stamp) >= 16 else ""
+
+
+def task_lines(tk: dict, ready: set | list) -> list[list[tuple[str, int]]]:
+    lines = [task_segments(tk, ready)]
+    if tk.get("unmet_deps"):
+        for dep in tk["unmet_deps"]:
+            lines.append([(f"  └─ ⛓ {dep}", _BLOCK_C)])
+    return lines
 
 
 def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
@@ -363,26 +386,31 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                     start, vis = st.window(ci, body_h)
                     if start > 0:
                         put(top + 1, x + colw - 3, "▲", C(_DIM))
+                    gy = top + 2
                     for r, tk in enumerate(vis):
-                        gy = top + 2 + r
-                        if gy >= top + 2 + body_h:
-                            break
                         idx = start + r
                         sel = (ci == st.col and idx == st.row)
-                        avail = colw - 2
-                        cx = 0
-                        for stext, scode in task_segments(
-                                tk, st.snapshot.get("ready", [])):
-                            if cx >= avail:
+                        for line_index, segments in enumerate(task_lines(
+                                tk, st.snapshot.get("ready", []))):
+                            if gy >= top + 2 + body_h:
                                 break
-                            chunk = stext[: avail - cx]
-                            put(gy, x + cx, chunk,
-                                C(scode, bold=sel, rev=sel), len(chunk))
-                            cx += len(chunk)
-                        if cx < avail and sel:
-                            put(gy, x + cx, " " * (avail - cx),
-                                C(_PRIO_C.get((tk.get("priority") or "p3").lower(),
-                                              245), rev=True), avail - cx)
+                            avail = colw - 2
+                            cx = 0
+                            line_sel = sel and line_index == 0
+                            for stext, scode in segments:
+                                if cx >= avail:
+                                    break
+                                chunk = stext[: avail - cx]
+                                put(gy, x + cx, chunk,
+                                    C(scode, bold=line_sel, rev=line_sel), len(chunk))
+                                cx += len(chunk)
+                            if cx < avail and line_sel:
+                                put(gy, x + cx, " " * (avail - cx),
+                                    C(_PRIO_C.get((tk.get("priority") or "p3").lower(),
+                                                  245), rev=True), avail - cx)
+                            gy += 1
+                        if gy >= top + 2 + body_h:
+                            break
                     if start + len(vis) < len(items):
                         put(top + 1 + body_h, x + colw - 3, "▼", C(_DIM))
 

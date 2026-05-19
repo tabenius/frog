@@ -4100,7 +4100,8 @@ def board_snapshot(conn, *, recent_limit: int = 14) -> dict:
     cols = {"idea": [], "blocked": [], "in_progress": [], "done": []}
     ready = []
     for r in conn.execute(
-        "SELECT slug,title,priority,workflow_status,assigned_agent,repo_path "
+        "SELECT slug,title,priority,workflow_status,assigned_agent,repo_path, "
+        "created_at,updated_at,status_confidence_at "
         "FROM tasks ORDER BY priority, slug"
     ):
         task = dict(r)

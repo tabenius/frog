@@ -145,19 +145,39 @@ class TuiSegmentColors(unittest.TestCase):
         codes = {c for _, c in segs}
         # base uses the p1 priority colour, NOT a generic one
         self.assertEqual(segs[0][1], tui._PRIO_C["p1"])
-        # board parity: ready=220, agent=39, blockers=203
+        # board parity: ready=220, agent=39
         self.assertIn(tui._READY_C, codes)
         self.assertIn(tui._AGENT_C, codes)
-        self.assertIn(tui._BLOCK_C, codes)
         agent_seg = next(s for s in segs if "◆" in s[0])
         self.assertEqual(agent_seg[1], 39)
         self.assertIn("claude", agent_seg[0])
+        self.assertNotIn("⛓", "".join(text for text, _ in segs))
 
     def test_segments_minimal_when_no_marks(self):
         tk = {"slug": "x", "priority": "p3"}
         segs = tui.task_segments(tk, [])
         self.assertEqual(len(segs), 1)
         self.assertEqual(segs[0][1], tui._PRIO_C["p3"])
+
+    def test_time_prefix_for_done_and_in_progress_tasks(self):
+        for status in ("done", "in_progress"):
+            tk = {
+                "slug": status,
+                "priority": "p2",
+                "workflow_status": status,
+                "status_confidence_at": "2026-05-19T14:37:02+00:00",
+            }
+            self.assertTrue(tui.task_segments(tk, [])[0][0].startswith("14:37 p2"))
+
+    def test_blockers_render_as_multiline_unicode_rows(self):
+        tk = {"slug": "blocked", "priority": "p1", "unmet_deps": ["root", "api"]}
+        lines = tui.task_lines(tk, [])
+        self.assertEqual(len(lines), 3)
+        self.assertIn("blocked", lines[0][0][0])
+        self.assertNotIn("root", lines[0][0][0])
+        self.assertEqual(lines[1][0][1], tui._BLOCK_C)
+        self.assertIn("└─ ⛓ root", lines[1][0][0])
+        self.assertIn("└─ ⛓ api", lines[2][0][0])
 
 if __name__ == "__main__":
     unittest.main()
