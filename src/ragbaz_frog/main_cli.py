@@ -2170,6 +2170,11 @@ def build_parser() -> argparse.ArgumentParser:
     lock_release.add_argument("lock_id", type=int)
     lock_release.add_argument("--agent", help="Acting agent recording the release")
     lock_release.add_argument("--reason", help="Audit note explaining why the lock is released")
+    lock_release.add_argument(
+        "--force",
+        action="store_true",
+        help="Release even if the lock is already stale or released",
+    )
     lock_list = lock_sub.add_parser("list", help="List locks")
     lock_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
     lock_list.add_argument("--include-inactive", action="store_true",
@@ -2751,7 +2756,7 @@ def main(argv: list[str] | None = None) -> int:
                     store.lock_release(
                         conn,
                         args.lock_id,
-                        force=False,
+                        force=args.force,
                         agent=args.agent,
                         reason=args.reason,
                     ),

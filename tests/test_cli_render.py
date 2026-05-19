@@ -138,6 +138,17 @@ class CliRender(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("\x1b[", buf.getvalue())
 
+    def test_lock_release_help_includes_force_and_audit_metadata(self):
+        parser = main_cli.build_parser()
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(buf):
+            parser.parse_args(["lock", "release", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        text = plain(buf.getvalue())
+        self.assertIn("--force", text)
+        self.assertIn("--agent", text)
+        self.assertIn("--reason", text)
+
     def test_no_color_disables_ansi(self):
         main_cli._COLOR_ENABLED = False
         rc, out = render({

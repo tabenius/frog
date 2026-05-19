@@ -113,6 +113,42 @@ class Workflow(unittest.TestCase):
         self.assertEqual(payload["released_by"], "codex")
         self.assertEqual(payload["reason"], "stale after adopted commit")
 
+    def test_force_release_allows_non_active_lock(self):
+        lock = store.lock_acquire(
+            self.conn,
+            scope_key="s",
+            repo_ref=None,
+            lock_kind="edit",
+            files=[],
+            agent="claude",
+            pid=None,
+            reason="work",
+            lease_seconds=1800,
+            eta_minutes=None,
+            force=False,
+        )
+        self.assertTrue(lock["ok"], lock)
+        first = store.lock_release(self.conn, lock["lock"]["id"], force=False)
+        self.assertTrue(first["ok"], first)
+        refused = store.lock_release(self.conn, lock["lock"]["id"], force=False)
+        self.assertFalse(refused["ok"])
+        forced = store.lock_release(
+            self.conn,
+            lock["lock"]["id"],
+            force=True,
+            agent="codex",
+            reason="idempotent recovery",
+        )
+        self.assertTrue(forced["ok"], forced)
+        event = self.conn.execute(
+            "SELECT actor, payload_json FROM event_log "
+            "WHERE kind = 'lock.released' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        self.assertEqual(event["actor"], "codex")
+        self.assertTrue(payload["forced"])
+        self.assertEqual(payload["reason"], "idempotent recovery")
+
 
 if __name__ == "__main__":
     unittest.main()
