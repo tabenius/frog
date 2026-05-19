@@ -521,7 +521,7 @@ def _emit(payload: dict, as_json: bool) -> int:
             print(f"{_color('root', 'muted')}: {_path_text(coord.get('root') or '-')}")
             print(f"{_color('db', 'muted')}: {_path_text(coord.get('db') or '-')}")
         return 0
-    if "workspaces" in payload:
+    if "workspaces" in payload and "repo_key" not in payload:
         _render_workspace_list(payload["workspaces"], payload.get("_view", "default"))
         return 0
     if "repos" in payload:
