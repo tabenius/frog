@@ -2338,7 +2338,7 @@ def task_list(
     conn,
     *,
     repo_ref: str | None,
-    workflow_status: str | None,
+    workflow_status: str | list[str] | None,
     assigned_agent: str | None,
     include_done: bool = True,
 ) -> dict:
@@ -2352,9 +2352,15 @@ def task_list(
         repo_path = repo["repo_path"]
         clauses.append("repo_path = ?")
         params.append(repo_path)
-    if workflow_status:
-        clauses.append("workflow_status = ?")
-        params.append(workflow_status)
+    statuses: list[str] = []
+    if isinstance(workflow_status, str):
+        statuses = [workflow_status]
+    elif workflow_status:
+        statuses = [s for s in workflow_status if s]
+    if statuses:
+        placeholders = ",".join("?" for _ in statuses)
+        clauses.append(f"workflow_status IN ({placeholders})")
+        params.extend(statuses)
     elif not include_done:
         placeholders = ",".join("?" for _ in _WF_DONE)
         clauses.append(f"LOWER(workflow_status) NOT IN ({placeholders})")

@@ -2104,7 +2104,15 @@ def build_parser() -> argparse.ArgumentParser:
     task_edit.add_argument("--actor", help="Acting agent recorded in the task.edited event")
     task_list = task_sub.add_parser("list", help="List tasks")
     task_list.add_argument("--repo", dest="repo_ref", metavar="REPO")
-    task_list.add_argument("--workflow-status")
+    task_list.add_argument(
+        "--workflow-status", "--status", dest="workflow_status",
+        action="append", default=[],
+        help="Filter by workflow status. Repeatable or comma-separated "
+        "(e.g. --status todo,in_progress).")
+    task_list.add_argument(
+        "--not-done", dest="not_done", action="store_true",
+        help="Preset: show all non-terminal statuses (idea, todo, "
+        "in_progress, blocked).")
     task_list.add_argument("--assigned-agent")
     task_list.add_argument("--all", action="store_true",
                            help="Include done/archived task history")
@@ -2300,6 +2308,11 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
 
 _GLOBAL_FLAGS_PASSTHROUGH = ("--json", "--no-color", "--no-pager")
 _GLOBAL_FLAGS_WITH_VALUE = ("--config", "--db", "--workspace")
+
+# Workflow statuses that are NOT terminal -- the `--not-done` preset on
+# `frog task list` expands to this set. Keep in sync with _WF_DONE in
+# store.py (anything not in _WF_DONE is not-done).
+_NOT_DONE_STATUSES = ("idea", "todo", "in_progress", "blocked")
 
 
 def _hoist_global_flags(argv: list[str]) -> list[str]:
@@ -2782,13 +2795,22 @@ def main(argv: list[str] | None = None) -> int:
                     args.json,
                 )
             if args.task_command == "list":
+                statuses: list[str] = []
+                for raw in args.workflow_status or []:
+                    for piece in raw.split(","):
+                        piece = piece.strip()
+                        if piece:
+                            statuses.append(piece)
+                if getattr(args, "not_done", False):
+                    statuses = list(dict.fromkeys(statuses + [
+                        s for s in _NOT_DONE_STATUSES if s not in statuses]))
                 return _emit(
                     store.task_list(
                         conn,
                         repo_ref=args.repo_ref,
-                        workflow_status=args.workflow_status,
+                        workflow_status=statuses or None,
                         assigned_agent=args.assigned_agent,
-                        include_done=args.json or args.all or bool(args.workflow_status),
+                        include_done=args.json or args.all or bool(statuses),
                     ),
                     args.json,
                 )
