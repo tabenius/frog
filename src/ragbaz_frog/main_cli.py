@@ -2260,8 +2260,49 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
     return store.repo_run(conn, repo_ref, run_action, use_cache=use_cache, only_targets=only)
 
 
+_GLOBAL_FLAGS_PASSTHROUGH = ("--json", "--no-color", "--no-pager")
+_GLOBAL_FLAGS_WITH_VALUE = ("--config", "--db", "--workspace")
+
+
+def _hoist_global_flags(argv: list[str]) -> list[str]:
+    """Move top-level flags like --json from anywhere in argv up front.
+
+    argparse requires global options to precede the subcommand, but
+    users naturally type `frog task list --json` (suffix position).
+    Without this preprocessor, the natural form fails with a usage
+    error -- which earlier in this session looked like "json mode is
+    broken for task list" and forced a fallback to ANSI-colored text
+    grep. This is purely a UX repair: behavior is unchanged when the
+    canonical position is used."""
+    hoisted: list[str] = []
+    remaining: list[str] = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _GLOBAL_FLAGS_PASSTHROUGH:
+            hoisted.append(tok)
+            i += 1
+            continue
+        if tok in _GLOBAL_FLAGS_WITH_VALUE and i + 1 < len(argv):
+            hoisted.extend(argv[i:i + 2])
+            i += 2
+            continue
+        for prefix in _GLOBAL_FLAGS_WITH_VALUE:
+            if tok.startswith(prefix + "="):
+                hoisted.append(tok)
+                i += 1
+                break
+        else:
+            remaining.append(tok)
+            i += 1
+            continue
+        # only reached on `--flag=value` path -- already consumed
+    return hoisted + remaining
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    argv = _hoist_global_flags(argv)
     global _COLOR_ENABLED, _PAGE_HUMAN_OUTPUT, _PAGER_ENABLED
     _COLOR_ENABLED = "--no-color" not in argv
     _PAGER_ENABLED = "--no-pager" not in argv
