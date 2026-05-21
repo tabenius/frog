@@ -353,6 +353,8 @@ def _emit(payload: dict, as_json: bool) -> int:
         return _render_file_errors(payload)
     if "claim_outcome" in payload:
         return _render_claim_outcome(payload)
+    if "status" in payload and "covered" in payload and "file_path" in payload:
+        return _render_lock_check_file(payload)
     if not payload.get("ok", True):
         print(f"{_color('error', 'error')}: {payload.get('error', 'unknown error')}", file=sys.stderr)
         return 1
@@ -795,6 +797,28 @@ def _render_file_errors(payload: dict) -> int:
         if error.get("path") and error.get("path") != input_path:
             print(f"      {_color('resolved', 'muted')}: {_path_text(error['path'])}")
     return 0 if payload.get("ok", True) else 1
+
+
+def _render_lock_check_file(payload: dict) -> int:
+    status = payload.get("status") or "unknown"
+    fp = payload.get("file_path") or "-"
+    if status == "covered":
+        print(f"{_color('COVERED', 'success')}  {_path_text(fp)}  "
+              f"({_color(payload.get('agent') or '-', 'meta')})")
+        return 0
+    if status == "conflict":
+        locks = payload.get("conflicting_locks") or []
+        first = locks[0] if locks else {}
+        held = (f"  held by {_color(first.get('holder_agent') or '-', 'warn')}"
+                f"{_color('@' + (first.get('holder_box') or '-'), 'muted')}"
+                f" ({_color('lock ' + str(first.get('lock_id')), 'meta')})")
+        print(f"{_color('CONFLICT', 'error')}  {_path_text(fp)}{held}",
+              file=sys.stderr)
+        return 1
+    print(f"{_color('UNCOVERED', 'warn')}  {_path_text(fp)}  "
+          f"({_color('no active lock covers this file', 'muted')})",
+          file=sys.stderr)
+    return 1
 
 
 def _render_claim_outcome(payload: dict) -> int:
@@ -2185,6 +2209,20 @@ def build_parser() -> argparse.ArgumentParser:
                             help="Repo to audit (defaults to the cwd repo)")
     lock_audit.add_argument("--agent",
                             help="Acting agent name (defaults to $USER)")
+    lock_audit.add_argument(
+        "--warn", action="store_true",
+        help="Advisory mode: report findings but exit 0 (suitable for "
+        "PreToolUse hooks that should not block tool execution)")
+    lock_check_file = lock_sub.add_parser(
+        "check-file",
+        help="Is a given file path covered by an active lock held by "
+        "the current agent? Hook-friendly: exit 0 if covered, exit 1 with "
+        "holder identity if held by another agent, exit 2 if uncovered")
+    lock_check_file.add_argument("file_path")
+    lock_check_file.add_argument("--repo", dest="repo_ref", metavar="REPO",
+                                 help="Repo containing the file (defaults to the cwd repo)")
+    lock_check_file.add_argument("--agent",
+                                 help="Acting agent name (defaults to $USER)")
     lock_info = lock_sub.add_parser("info", help="Show one lock")
     lock_info.add_argument("lock_id", type=int)
 
@@ -2844,10 +2882,21 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.lock_reap(conn), args.json)
             if args.lock_command == "audit":
                 agent = args.agent or store.current_agent()
-                return _emit(
-                    store.lock_audit(conn, repo_ref=args.repo_ref, agent=agent),
-                    args.json,
-                )
+                result = store.lock_audit(conn, repo_ref=args.repo_ref, agent=agent)
+                if args.warn and not result.get("ok", True):
+                    result = dict(result)
+                    result["ok"] = True
+                    result["advisory"] = True
+                return _emit(result, args.json)
+            if args.lock_command == "check-file":
+                agent = args.agent or store.current_agent()
+                result = store.lock_check_file(
+                    conn, repo_ref=args.repo_ref, agent=agent,
+                    file_path=args.file_path)
+                rc = _emit(result, args.json)
+                if args.json or result.get("covered"):
+                    return rc
+                return 1 if result.get("status") == "conflict" else 2
             if args.lock_command == "info":
                 return _emit(store.lock_info(conn, args.lock_id), args.json)
         if args.command == "file":

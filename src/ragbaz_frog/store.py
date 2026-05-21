@@ -3750,6 +3750,73 @@ def _git_dirty_files(repo_path: str) -> list[str]:
     return sorted(set(out))
 
 
+def lock_check_file(conn, *, repo_ref: str | None, agent: str,
+                     file_path: str) -> dict:
+    """Ask: would editing this file conflict with someone else's active
+    lock, and does the current agent hold a covering lock?
+
+    Hook-friendly: returns a structured outcome the PreToolUse hook
+    documented in docs/MCP.md can read. Status is one of:
+      - covered:    current agent holds a lock that includes this file
+      - uncovered:  no active lock covers this file (advisory; not a
+                    block, but a sign the agent forgot to claim)
+      - conflict:   another agent holds a lock that includes this file
+                    (this is the silent-collision class we are guarding
+                    against -- the hook should block tool execution)
+
+    file_path may be a path inside the repo or an absolute path."""
+    repo = _repo_required(conn, repo_ref)
+    if not repo:
+        return {"ok": False, "error": f"repo not found: {repo_ref}",
+                "status": "unknown", "covered": False}
+    repo_path = repo["repo_path"]
+    abs_path = str(Path(file_path).expanduser().resolve())
+    if not abs_path.startswith(repo_path):
+        candidate = str(Path(repo_path, file_path).resolve())
+        if candidate.startswith(repo_path):
+            abs_path = candidate
+    active = list(_lock_rows(conn, include_inactive=False, repo_path=repo_path))
+    # Whole-repo locks count as coverage when they aren't pure task-scope.
+    repo_holders = sorted({
+        lk["agent_name"]
+        for lk in active
+        if not lk["file_paths"] and not _is_task_scope_only(lk)
+    })
+    file_holders: dict[str, set[str]] = {}
+    holding_locks_by_agent: dict[str, list[dict]] = {}
+    for lk in active:
+        for fp in lk["file_paths"]:
+            if fp == abs_path:
+                file_holders.setdefault(fp, set()).add(lk["agent_name"])
+                holding_locks_by_agent.setdefault(
+                    lk["agent_name"], []).append(lk)
+    holders = set(file_holders.get(abs_path, set())) | set(repo_holders)
+    if agent in holders:
+        status = "covered"
+    elif holders:
+        status = "conflict"
+    else:
+        status = "uncovered"
+    conflicting = [
+        {"lock_id": lk["id"], "holder_agent": lk["agent_name"],
+         "holder_box": lk.get("box_id"), "scope_key": lk["scope_key"],
+         "files": lk["file_paths"]}
+        for ag, locks in holding_locks_by_agent.items()
+        for lk in locks
+        if ag != agent
+    ]
+    return {
+        "ok": True,
+        "status": status,
+        "covered": status == "covered",
+        "repo": repo,
+        "agent": agent,
+        "file_path": abs_path,
+        "holders": sorted(holders),
+        "conflicting_locks": conflicting,
+    }
+
+
 def lock_audit(conn, *, repo_ref: str | None, agent: str) -> dict:
     """A1: honest reading of AGENTS.md containment rule 6 -- any working-tree
     change to a file that is NOT covered by an active lock held by the
