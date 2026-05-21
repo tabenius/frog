@@ -2733,19 +2733,46 @@ def _newly_unblocked(conn, finished_slug: str) -> list[str]:
     return sorted(set(out))
 
 
+def _claim_outcome_from_lock(lock: dict | None) -> dict:
+    if not lock:
+        return {}
+    return {
+        "lock_id": lock.get("id"),
+        "holder_agent": lock.get("agent_name"),
+        "holder_box": lock.get("box_id"),
+        "holder_host": lock.get("host"),
+        "files": lock.get("file_paths") or [],
+        "scope_key": lock.get("scope_key"),
+    }
+
+
 def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
                scope_key: str | None = None, force: bool = False,
                files: list[str] | None = None) -> dict:
-    """Atomic-ish: take ownership + the scoped lock + mark in_progress."""
+    """Atomic-ish: take ownership + the scoped lock + mark in_progress.
+
+    Always returns a `claim_outcome` block so the CLI/MCP renderer can
+    lead with an unambiguous one-line verdict (CLAIMED vs NOT CLAIMED
+    held-by AGENT@BOX) before any task fields. Closes the silent-claim
+    collision class observed in real multi-agent sessions."""
     row = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
     if not row:
-        return {"ok": False, "error": f"task not found: {slug}"}
+        return {"ok": False, "error": f"task not found: {slug}",
+                "claim_outcome": {"claimed": False, "reason": "not_found",
+                                   "slug": slug, "agent": agent}}
     task = dict(row)
     if (task["workflow_status"] or "").lower() in _WF_DONE:
-        return {"ok": False, "error": f"task {slug} is already {task['workflow_status']}"}
+        return {"ok": False,
+                "error": f"task {slug} is already {task['workflow_status']}",
+                "claim_outcome": {"claimed": False, "reason": "already_done",
+                                   "slug": slug, "agent": agent,
+                                   "workflow_status": task["workflow_status"]}}
     owner = task["assigned_agent"]
     if owner and owner != agent and not force:
-        return {"ok": False, "error": f"task {slug} is owned by {owner}"}
+        return {"ok": False, "error": f"task {slug} is owned by {owner}",
+                "claim_outcome": {"claimed": False, "reason": "owned_by_other",
+                                   "slug": slug, "agent": agent,
+                                   "holder_agent": owner}}
     scope = scope_key or f"task:{slug}"
     added_files = _attach_task_files(conn, slug, task["repo_path"], files)
     files = _task_file_paths(conn, slug)
@@ -2756,25 +2783,40 @@ def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
         force=force,
     )
     if not lk.get("ok", True):
+        conflicts = lk.get("conflicts") or []
+        first = _claim_outcome_from_lock(conflicts[0] if conflicts else None)
+        outcome = {"claimed": False, "reason": "lock_conflict",
+                    "slug": slug, "agent": agent,
+                    "conflicting_locks": [_claim_outcome_from_lock(c)
+                                          for c in conflicts]}
+        outcome.update({k: v for k, v in first.items() if k != "scope_key"})
         return {"ok": False, "error": "could not lock task scope",
-                "lock": lk}
+                "lock": lk, "claim_outcome": outcome}
     conn.execute("UPDATE tasks SET assigned_agent = ?, updated_at = ? WHERE slug = ?",
                  (agent, utc_now_iso(), slug))
     task_assign(conn, slug, agent, f"claimed by {agent}")
     task_set_status(conn, slug=slug, workflow_status="in_progress",
                     git_status=None, note=f"claimed by {agent}")
+    lock_data = lk.get("lock") or {}
     record_event(conn, kind="task.claimed",
                  summary=f"{agent} claimed {slug}", repo_path=task["repo_path"],
                  task_slug=slug, actor=agent,
                  payload={
-                     "lock": lk.get("lock", {}).get("id"),
+                     "lock": lock_data.get("id"),
                      "files": files,
                      "added_files": added_files,
                  })
     conn.commit()
     return {"ok": True, "task": dict(conn.execute(
         "SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()),
-        "lock": lk.get("lock")}
+        "lock": lock_data,
+        "claim_outcome": {"claimed": True, "reason": "acquired",
+                          "slug": slug, "agent": agent,
+                          "lock_id": lock_data.get("id"),
+                          "holder_agent": agent,
+                          "holder_box": lock_data.get("box_id"),
+                          "files": files,
+                          "added_files": added_files}}
 
 
 def task_finish(conn, *, slug: str, agent: str, verify: bool = True) -> dict:

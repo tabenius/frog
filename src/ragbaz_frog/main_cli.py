@@ -351,6 +351,8 @@ def _emit(payload: dict, as_json: bool) -> int:
         return _render_doctor(payload)
     if "file_errors" in payload:
         return _render_file_errors(payload)
+    if "claim_outcome" in payload:
+        return _render_claim_outcome(payload)
     if not payload.get("ok", True):
         print(f"{_color('error', 'error')}: {payload.get('error', 'unknown error')}", file=sys.stderr)
         return 1
@@ -793,6 +795,56 @@ def _render_file_errors(payload: dict) -> int:
         if error.get("path") and error.get("path") != input_path:
             print(f"      {_color('resolved', 'muted')}: {_path_text(error['path'])}")
     return 0 if payload.get("ok", True) else 1
+
+
+def _render_claim_outcome(payload: dict) -> int:
+    """Lead with an unambiguous CLAIMED / NOT CLAIMED banner before any
+    task fields. Closes the silent-claim collision class -- the earlier
+    failure mode was a benign-looking task field dump that read as
+    success when the claim had actually been refused."""
+    outcome = payload.get("claim_outcome") or {}
+    slug = outcome.get("slug") or (payload.get("task") or {}).get("slug") or "?"
+    if outcome.get("claimed"):
+        lock_id = outcome.get("lock_id")
+        head = (f"{_color('CLAIMED', 'success')} "
+                f"{_color(slug, 'claim')}"
+                + (f"  ({_color('lock ' + str(lock_id), 'meta')})" if lock_id else ""))
+        print(head)
+        files = outcome.get("files") or []
+        if files:
+            shown = ", ".join(files[:3]) + ("..." if len(files) > 3 else "")
+            print(f"  {_color('files', 'muted')}: {_path_text(shown)}")
+        task = payload.get("task")
+        if task:
+            print(f"  {_color('repo', 'muted')}: {_path_text(task.get('repo_path') or '-')}")
+            print(f"  {_color('priority', 'muted')}: {_priority_text(task.get('priority'))}")
+            print(f"  {_color('workflow_status', 'muted')}: {_status_text(task.get('workflow_status'))}")
+        return 0
+    reason = outcome.get("reason") or "unknown"
+    holder = outcome.get("holder_agent")
+    holder_box = outcome.get("holder_box")
+    lock_id = outcome.get("lock_id")
+    held_by = ""
+    if holder:
+        held_by = f"  held by {_color(holder, 'warn')}"
+        if holder_box:
+            held_by += f"{_color('@' + holder_box, 'muted')}"
+        if lock_id:
+            held_by += f" ({_color('lock ' + str(lock_id), 'meta')})"
+    print(f"{_color('NOT CLAIMED', 'error')} "
+          f"{_color(slug, 'claim')}  ({_status_text(reason)}){held_by}",
+          file=sys.stderr)
+    err = payload.get("error")
+    if err:
+        print(f"  {_color('reason', 'muted')}: {err}", file=sys.stderr)
+    extras = outcome.get("conflicting_locks") or []
+    if len(extras) > 1:
+        for lk in extras[1:]:
+            print(f"  also held by {_color(lk.get('holder_agent') or '-', 'warn')}"
+                  f"{_color('@' + (lk.get('holder_box') or '-'), 'muted')}"
+                  f" ({_color('lock ' + str(lk.get('lock_id')), 'meta')})",
+                  file=sys.stderr)
+    return 1
 
 
 def _render_hook_dispatches(payload: dict) -> None:
