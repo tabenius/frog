@@ -125,6 +125,8 @@ suite (`python3 -m unittest discover -s tests`).
 - `frog task claim <slug>` / `frog task finish <slug>` — composed
   workflow: claim = assign+lock+in_progress; finish = affected
   build/test gate → done + release + report unblocked dependents.
+  Claim refuses a second active task for the same agent by default; use
+  `--allow-parallel` only when the extra slice is intentionally disjoint.
 - `frog db gc [--older-than D] [--keep N]` — prune event/target_runs +
   VACUUM. `frog doctor` — self-diagnostic. `frog board [--once]` —
   realtime colored lifecycle board over the event log.

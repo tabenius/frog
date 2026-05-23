@@ -746,6 +746,7 @@ Take ownership + lock + mark in_progress
 - `--agent`
 - `--lock-kind` — Freeform lock label; conventional values include edit, docs, build, test, scan, deploy. Default: edit.
 - `--file` — Add and lock a file scope while claiming; repeatable
+- `--allow-parallel` — Allow this agent to claim another task while one is already in progress.
 - `--force`
 
 ### `frog task finish`

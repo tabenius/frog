@@ -2132,6 +2132,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     task_claim.add_argument("--file", action="append", default=[],
                             help="Add and lock a file scope while claiming; repeatable")
+    task_claim.add_argument(
+        "--allow-parallel",
+        action="store_true",
+        help="Allow this agent to claim another task while one is already in progress.",
+    )
     task_claim.add_argument("--force", action="store_true")
     task_finish = task_sub.add_parser("finish", help="Verify (affected build/test) -> done + release + report unblocks")
     task_finish.add_argument("slug")
@@ -2833,7 +2838,7 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.task_claim(conn, slug=args.slug,
                     agent=(args.agent or store.current_agent()),
                     lock_kind=args.lock_kind, force=args.force,
-                    files=args.file), args.json)
+                    files=args.file, allow_parallel=args.allow_parallel), args.json)
             if args.task_command == "finish":
                 return _emit(store.task_finish(conn, slug=args.slug,
                     agent=(args.agent or store.current_agent()),

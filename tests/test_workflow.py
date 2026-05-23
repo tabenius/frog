@@ -56,6 +56,30 @@ class Workflow(unittest.TestCase):
         self.assertIn("/tmp/frog-task-file-a", locked)
         self.assertIn("/tmp/frog-task-file-b", locked)
 
+    def test_claim_blocks_second_active_task_by_default(self):
+        mk(self.conn, "first")
+        mk(self.conn, "second")
+        claimed = store.task_claim(self.conn, slug="first", agent="codex")
+        self.assertTrue(claimed["ok"], claimed)
+
+        refused = store.task_claim(self.conn, slug="second", agent="codex")
+        self.assertFalse(refused["ok"], refused)
+        self.assertEqual("active_task_limit", refused["claim_outcome"]["reason"])
+        self.assertEqual(["first"], [
+            task["slug"] for task in refused["claim_outcome"]["active_tasks"]
+        ])
+
+    def test_claim_allows_explicit_parallel_override(self):
+        mk(self.conn, "first")
+        mk(self.conn, "second")
+        store.task_claim(self.conn, slug="first", agent="codex")
+
+        claimed = store.task_claim(
+            self.conn, slug="second", agent="codex", allow_parallel=True,
+        )
+        self.assertTrue(claimed["ok"], claimed)
+        self.assertEqual("second", claimed["task"]["slug"])
+
     def test_finish_no_verify_flips_and_reports_unblock(self):
         mk(self.conn, "base")
         mk(self.conn, "dep")

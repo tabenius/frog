@@ -157,6 +157,7 @@ def _tool_specs() -> list[dict]:
                 "workspace": {"type": "string"}, "slug": {"type": "string"},
                 "agent": {"type": "string"}, "lock_kind": {"type": "string"},
                 "files": {"type": "array", "items": {"type": "string"}},
+                "allow_parallel": {"type": "boolean"},
                 "force": {"type": "boolean"}}, "required": ["slug", "agent"]},
         },
         {
@@ -353,7 +354,8 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
                 agent=arguments.get("agent", "unknown"),
                 lock_kind=arguments.get("lock_kind", "edit"),
                 files=arguments.get("files", []),
-                force=bool(arguments.get("force", False)))
+                force=bool(arguments.get("force", False)),
+                allow_parallel=bool(arguments.get("allow_parallel", False)))
         if tool_name == "frog_task_finish":
             return store.task_finish(
                 conn, slug=arguments["slug"],
