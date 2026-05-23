@@ -2752,9 +2752,28 @@ def _claim_outcome_from_lock(lock: dict | None) -> dict:
     }
 
 
+def _active_claims_for_agent(conn, agent: str, *, exclude_slug: str | None = None) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT slug, title, repo_path, workflow_status
+        FROM tasks
+        WHERE assigned_agent = ?
+          AND lower(COALESCE(workflow_status, '')) IN (
+            'in_progress', 'in-progress', 'doing', 'wip', 'active',
+            'review', 'started'
+          )
+          AND (? IS NULL OR slug != ?)
+        ORDER BY updated_at DESC, slug
+        """,
+        (agent, exclude_slug, exclude_slug),
+    ).fetchall()
+    return dicts(rows)
+
+
 def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
                scope_key: str | None = None, force: bool = False,
-               files: list[str] | None = None) -> dict:
+               files: list[str] | None = None,
+               allow_parallel: bool = False) -> dict:
     """Atomic-ish: take ownership + the scoped lock + mark in_progress.
 
     Always returns a `claim_outcome` block so the CLI/MCP renderer can
@@ -2779,6 +2798,24 @@ def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
                 "claim_outcome": {"claimed": False, "reason": "owned_by_other",
                                    "slug": slug, "agent": agent,
                                    "holder_agent": owner}}
+    active_claims = _active_claims_for_agent(conn, agent, exclude_slug=slug)
+    if active_claims and not allow_parallel:
+        active_slugs = [claim["slug"] for claim in active_claims]
+        return {
+            "ok": False,
+            "error": (
+                f"agent {agent} already has active task(s): "
+                f"{', '.join(active_slugs)}; finish one first or pass allow_parallel"
+            ),
+            "claim_outcome": {
+                "claimed": False,
+                "reason": "active_task_limit",
+                "slug": slug,
+                "agent": agent,
+                "active_tasks": active_claims,
+                "max_active": 1,
+            },
+        }
     scope = scope_key or f"task:{slug}"
     added_files = _attach_task_files(conn, slug, task["repo_path"], files)
     files = _task_file_paths(conn, slug)
@@ -4117,9 +4154,11 @@ def repo_tree_snapshot(conn, *, include_third_party: bool = True) -> dict:
     repos = repo_list(conn,
                        include_third_party=include_third_party)["repos"]
     units_by_repo: dict[str, list[str]] = {}
-    for u in unit_list(conn, repo_ref=None)["units"]:
-        units_by_repo.setdefault(u["repo_path"], []).append(
-            u.get("rel_path") or u.get("unit_path") or "?")
+    for row in conn.execute(
+            "SELECT repo_path, rel_path, unit_path FROM units"
+            " ORDER BY repo_path, rel_path").fetchall():
+        units_by_repo.setdefault(row["repo_path"], []).append(
+            row["rel_path"] or row["unit_path"] or "?")
     items = []
     for r in repos:
         items.append({
