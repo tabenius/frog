@@ -134,6 +134,67 @@ class TuiRichTests(unittest.TestCase):
         self.assertEqual(st.offset[st.col], 0)
         self.assertEqual(st.row, 0)
 
+    def test_sort_alpha_and_direction(self):
+        snap = {
+            "columns": {
+                "idea": [
+                    {"slug": "beta", "priority": "p2", "workflow_status": "idea"},
+                    {"slug": "alpha", "priority": "p2", "workflow_status": "idea"},
+                    {"slug": "gamma", "priority": "p2", "workflow_status": "idea"},
+                ],
+                "blocked": [],
+                "in_progress": [],
+                "done": [],
+            },
+            "ready": [],
+        }
+        st = tui.TuiState(snap, "codex")
+        st.sort_key = "alpha"
+        st.load(snap)
+        self.assertEqual([tk["slug"] for tk in st.grid[0]], ["alpha", "beta", "gamma"])
+        st.toggle_sort_direction()
+        self.assertEqual([tk["slug"] for tk in st.grid[0]], ["gamma", "beta", "alpha"])
+
+    def test_sort_created_started_and_completed_times(self):
+        snap = {
+            "columns": {
+                "idea": [
+                    {"slug": "new", "priority": "p2", "workflow_status": "idea",
+                     "created_at": "2026-05-24T10:00:00Z"},
+                    {"slug": "old", "priority": "p2", "workflow_status": "idea",
+                     "created_at": "2026-05-24T09:00:00Z"},
+                ],
+                "blocked": [],
+                "in_progress": [
+                    {"slug": "later", "priority": "p2", "workflow_status": "in_progress",
+                     "status_confidence_at": "2026-05-24T11:00:00Z"},
+                    {"slug": "earlier", "priority": "p2", "workflow_status": "in_progress",
+                     "status_confidence_at": "2026-05-24T08:00:00Z"},
+                    {"slug": "missing", "priority": "p2", "workflow_status": "idea"},
+                ],
+                "done": [
+                    {"slug": "done-later", "priority": "p2", "workflow_status": "done",
+                     "status_confidence_at": "2026-05-24T12:00:00Z"},
+                    {"slug": "done-earlier", "priority": "p2", "workflow_status": "done",
+                     "status_confidence_at": "2026-05-24T07:00:00Z"},
+                ],
+            },
+            "ready": [],
+        }
+        st = tui.TuiState(snap, "codex")
+        st.sort_key = "created"
+        st.load(snap)
+        self.assertEqual([tk["slug"] for tk in st.grid[0]], ["old", "new"])
+        st.sort_key = "started"
+        st.load(snap)
+        self.assertEqual(
+            [tk["slug"] for tk in st.grid[2]],
+            ["earlier", "later", "missing"],
+        )
+        st.sort_key = "completed"
+        st.load(snap)
+        self.assertEqual([tk["slug"] for tk in st.grid[3]], ["done-earlier", "done-later"])
+
 
 class TuiSegmentColors(unittest.TestCase):
     def test_segments_match_board_color_coding(self):
@@ -190,6 +251,17 @@ class TuiSegmentColors(unittest.TestCase):
         self.assertEqual(lines[1][0][1], tui._BLOCK_C)
         self.assertIn("└─ ⛓ root", lines[1][0][0])
         self.assertIn("└─ ⛓ api", lines[2][0][0])
+
+    def test_help_overlay_lines_are_boxed_and_padded(self):
+        lines = tui.help_overlay_lines("created desc")
+        widths = {len(line) for line in lines}
+        self.assertEqual(len(widths), 1)
+        self.assertTrue(lines[0].startswith("┌"))
+        self.assertTrue(lines[0].endswith("┐"))
+        for line in lines[1:-1]:
+            self.assertTrue(line.startswith("│  "))
+            self.assertTrue(line.endswith("  │"))
+        self.assertIn("sort now", "\n".join(lines))
 
 if __name__ == "__main__":
     unittest.main()

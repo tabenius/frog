@@ -33,6 +33,15 @@ _THEMES = {"ragbaz": True, "mono": False}  # mono => no color
 _TIME_STATUSES = {
     "done", "finished", "in_progress", "in-progress", "doing", "wip", "active",
 }
+_DONE_STATUSES = {"done", "finished"}
+_STARTED_STATUSES = {"in_progress", "in-progress", "doing", "wip", "active"}
+_SORT_KEYS = ("priority", "created", "started", "completed", "alpha")
+_PRIO_RANK = {
+    "p0": 0, "critical": 0, "urgent": 0,
+    "p1": 1, "high": 1,
+    "p2": 2, "medium": 2, "normal": 2,
+    "p3": 3, "low": 3,
+}
 
 
 class TuiState:
@@ -44,13 +53,79 @@ class TuiState:
         self.col = 0
         self.row = 0
         self.offset = [0] * len(_COLS)
+        self.sort_key = "priority"
+        self.sort_desc = False
         self.load(snapshot)
 
     def load(self, snapshot: dict) -> None:
+        selected_slug = None
+        if hasattr(self, "grid"):
+            selected = self.selected()
+            selected_slug = selected["slug"] if selected else None
         self.snapshot = snapshot
-        self.grid = [snapshot["columns"].get(key, []) for key, _ in _COLS]
+        self.grid = [self._sorted(snapshot["columns"].get(key, []))
+                     for key, _ in _COLS]
         self.col = max(0, min(self.col, len(_COLS) - 1))
+        self._restore_selection(selected_slug)
+
+    def _sort_value(self, tk: dict):
+        if self.sort_key == "priority":
+            return _PRIO_RANK.get(str(tk.get("priority") or "p3").lower(), 99)
+        if self.sort_key == "alpha":
+            return str(tk.get("slug") or "").lower()
+        if self.sort_key == "created":
+            return tk.get("created_at") or ""
+        status = (tk.get("workflow_status") or "").lower()
+        if self.sort_key == "started":
+            return (tk.get("status_confidence_at") or ""
+                    if status in _STARTED_STATUSES else "")
+        if self.sort_key == "completed":
+            return (tk.get("status_confidence_at") or ""
+                    if status in _DONE_STATUSES else "")
+        return ""
+
+    def _sorted(self, items: list[dict]) -> list[dict]:
+        present = []
+        missing = []
+        for tk in items:
+            value = self._sort_value(tk)
+            (present if value != "" else missing).append((value, tk))
+        present.sort(
+            key=lambda item: (item[0], str(item[1].get("slug") or "").lower()),
+            reverse=self.sort_desc,
+        )
+        missing.sort(key=lambda item: str(item[1].get("slug") or "").lower())
+        return [tk for _, tk in present + missing]
+
+    def _restore_selection(self, slug: str | None = None) -> None:
+        if slug:
+            for ci, items in enumerate(self.grid):
+                for ri, tk in enumerate(items):
+                    if tk["slug"] == slug:
+                        self.col, self.row = ci, ri
+                        self.offset[self.col] = min(self.offset[self.col], ri)
+                        self._clamp_row()
+                        return
         self._clamp_row()
+
+    def cycle_sort(self) -> None:
+        idx = _SORT_KEYS.index(self.sort_key)
+        self.sort_key = _SORT_KEYS[(idx + 1) % len(_SORT_KEYS)]
+        selected = self.selected()
+        self.grid = [self._sorted(items) for items in self.grid]
+        self.offset = [0] * len(_COLS)
+        self._restore_selection(selected["slug"] if selected else None)
+
+    def toggle_sort_direction(self) -> None:
+        self.sort_desc = not self.sort_desc
+        selected = self.selected()
+        self.grid = [self._sorted(items) for items in self.grid]
+        self.offset = [0] * len(_COLS)
+        self._restore_selection(selected["slug"] if selected else None)
+
+    def sort_label(self) -> str:
+        arrow = "desc" if self.sort_desc else "asc"
+        return f"{self.sort_key} {arrow}"
 
     def _clamp_row(self) -> None:
         n = len(self.grid[self.col])
@@ -312,6 +387,30 @@ def task_lines(tk: dict, ready: set | list) -> list[list[tuple[str, int]]]:
     return lines
 
 
+def help_overlay_lines(sort_label: str) -> list[str]:
+    content = [
+        "KEYS",
+        "←/→ or Tab  switch column",
+        "↑/↓         move selection (scrolls)",
+        "g / G       top / bottom of column",
+        "s           cycle sort key",
+        "S           toggle sort direction",
+        f"sort now    {sort_label}",
+        "c           claim selected task",
+        "e           edit selected title/priority",
+        "f           finish selected task",
+        "n           jump to scheduler's next pick",
+        "r           force refresh   q  quit",
+    ]
+    inner = max(len(line) for line in content) + 4
+    width = inner + 2
+    rows = ["┌" + "─" * inner + "┐"]
+    rows.extend("│  " + line.ljust(inner - 4) + "  │" for line in content)
+    rows.append("└" + "─" * inner + "┘")
+    assert all(len(row) == width for row in rows)
+    return rows
+
+
 def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
     import curses
     from ragbaz_frog.main_cli import _conn_db_path, _db_fingerprint, _FROG_ART
@@ -375,7 +474,7 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
             _rlabel = ("  REPOS (boxes)" if rv.box_mode
                        else "  REPOS (tree)" if rv.tree
                        else "  REPOS")
-            put(0, 14, "  TASK BOARD" if view == "board"
+            put(0, 14, f"  TASK BOARD  sort={st.sort_label()}" if view == "board"
                 else _rlabel, C(_DIM))
             for i, ln in enumerate(_FROG_ART):
                 put(1 + i, 2, ln, C(_FROG_C))
@@ -448,21 +547,15 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                         C(_DIM))
                 hint = ("?: help  " if not show_help else "")
                 put(h - 1, 1,
-                    f"{hint}q quit  ←/→ col  ↑/↓ task  c claim  e edit  f finish  n next  r refresh   | {status}"[: w - 2],
+                    f"{hint}q quit  ←/→ col  ↑/↓ task  s sort  S dir  c claim  e edit  f finish  n next  r refresh   | {status}"[: w - 2],
                     C(_DIM))
                 if show_help:
-                    lines = ["KEYS",
-                             " ←/→ or Tab  switch column",
-                             " ↑/↓         move selection (scrolls)",
-                             " g / G       top / bottom of column",
-                             " c           claim selected task",
-                             " e           edit selected title/priority",
-                             " f           finish selected task",
-                             " n           jump to scheduler's next pick",
-                             " r           force refresh   q  quit"]
+                    lines = help_overlay_lines(st.sort_label())
+                    hx = max(1, min(w - len(lines[0]) - 1, w // 2 - len(lines[0]) // 2))
+                    hy = top + 2
                     for i, ln in enumerate(lines):
-                        put(top + 2 + i, w // 2 - 18, ln.ljust(36),
-                            C(_ACCENT, bold=(i == 0), rev=True))
+                        put(hy + i, hx, ln, C(_ACCENT, bold=(i == 1), rev=True),
+                            len(ln))
             else:
                 rows = rv.visible_rows()
                 vis_h = max(1, h - top - 3)
@@ -556,6 +649,12 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                 last_fp = None
             elif c in ("n", "N"):
                 st.jump_to_next()
+            elif c == "s":
+                st.cycle_sort()
+                status = f"sort={st.sort_label()}"
+            elif c == "S":
+                st.toggle_sort_direction()
+                status = f"sort={st.sort_label()}"
             else:
                 act = st.action(c)
                 if act:
