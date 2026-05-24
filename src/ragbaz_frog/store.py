@@ -1657,6 +1657,15 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
         payload = dict(row)
         if Path(payload["repo_path"]).name == repo_ref:
             return payload
+    # also match any path component, so "mailroute" finds repos whose
+    # path passes through a directory named "mailroute"; when multiple
+    # match, prefer the shallowest (shortest) registered path
+    component_matches = [
+        dict(row) for row in rows
+        if repo_ref in Path(dict(row)["repo_path"]).parts
+    ]
+    if component_matches:
+        return min(component_matches, key=lambda r: len(r["repo_path"]))
     keyed = conn.execute(
         "SELECT * FROM repos WHERE repo_key = ?", (repo_ref,)
     ).fetchone()
@@ -2350,8 +2359,10 @@ def task_list(
         if not repo:
             return {"ok": False, "error": f"repo not found: {repo_ref}"}
         repo_path = repo["repo_path"]
-        clauses.append("repo_path = ?")
-        params.append(repo_path)
+        # prefix match: include tasks registered to sub-repos (e.g. tasks
+        # under mailroute/caas/proton-bridge when querying --repo mailroute)
+        clauses.append("repo_path LIKE ?")
+        params.append(repo_path.rstrip("/") + "%")
     statuses: list[str] = []
     if isinstance(workflow_status, str):
         statuses = [workflow_status]
