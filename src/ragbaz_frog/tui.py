@@ -20,7 +20,12 @@ _COLS = [("idea", "IDEA"), ("blocked", "BLOCKED"),
 
 # xterm-256 codes shared with `frog board` for a consistent palette.
 _COL_C = {"idea": 39, "blocked": 203, "in_progress": 208, "done": 78}
-_PRIO_C = {"p0": 196, "p1": 208, "p2": 214, "p3": 245}
+_PRIO_C = {
+    "p0": 196, "critical": 196, "urgent": 196,
+    "p1": 208, "high": 208,
+    "p2": 214, "medium": 214, "normal": 214,
+    "p3": 245, "low": 245,
+}
 _ACCENT, _FROG_C, _DIM = 208, 78, 245
 _READY_C, _AGENT_C, _BLOCK_C = 220, 39, 203  # match frog board
 
@@ -268,13 +273,17 @@ def _use_color() -> bool:
             and _THEMES.get(os.environ.get("FROG_THEME", "ragbaz"), True))
 
 
+def priority_color(priority: object) -> int:
+    return _PRIO_C.get(str(priority or "p3").lower(), _PRIO_C["p3"])
+
+
 def task_segments(tk: dict, ready: set | list) -> list[tuple[str, int]]:
     """[(text, xterm256_code)] for one task row, colour-coded exactly like
     `frog board`: base=priority, ★=220, ◆agent=39."""
     prio = (tk.get("priority") or "p?")
     timestamp = task_time(tk)
     prefix = f"{timestamp} " if timestamp else ""
-    segs = [(f"{prefix}{prio} {tk['slug']}", _PRIO_C.get(prio.lower(), 245))]
+    segs = [(f"{prefix}{prio} {tk['slug']}", priority_color(prio))]
     if tk["slug"] in (ready or ()):
         segs.append((" ★", _READY_C))
     if tk.get("assigned_agent"):
@@ -406,8 +415,8 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                                 cx += len(chunk)
                             if cx < avail and line_sel:
                                 put(gy, x + cx, " " * (avail - cx),
-                                    C(_PRIO_C.get((tk.get("priority") or "p3").lower(),
-                                                  245), rev=True), avail - cx)
+                                    C(priority_color(tk.get("priority")), rev=True),
+                                    avail - cx)
                             gy += 1
                         if gy >= top + 2 + body_h:
                             break
@@ -421,7 +430,7 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                 if d:
                     put(iy + 1, 1,
                         f"{d['priority']} {d['slug']}  {d['title']}"[: w - 2],
-                        C(_PRIO_C.get(d['priority'], 245), bold=True))
+                        C(priority_color(d["priority"]), bold=True))
                     meta = f"status={d['status']}  agent={d['agent'] or '-'}"
                     if d["ready"]:
                         meta += "  ★ ready"

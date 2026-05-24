@@ -159,6 +159,18 @@ class TuiSegmentColors(unittest.TestCase):
         self.assertEqual(len(segs), 1)
         self.assertEqual(segs[0][1], tui._PRIO_C["p3"])
 
+    def test_named_priority_levels_use_matching_color_bands(self):
+        expected = {
+            "high": tui._PRIO_C["p1"],
+            "medium": tui._PRIO_C["p2"],
+            "low": tui._PRIO_C["p3"],
+        }
+        for priority, color in expected.items():
+            with self.subTest(priority=priority):
+                tk = {"slug": priority, "priority": priority}
+                self.assertEqual(tui.task_segments(tk, [])[0][1], color)
+                self.assertEqual(tui.priority_color(priority.upper()), color)
+
     def test_time_prefix_for_done_and_in_progress_tasks(self):
         for status in ("done", "in_progress"):
             tk = {
