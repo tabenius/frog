@@ -1,0 +1,174 @@
+{
+  "$schema": "../docs/schemas/ragbaz.component.schema.json",
+  "schemaVersion": "0.1.0",
+  "identity": {
+    "id": "ragbaz.frog",
+    "name": "RAGBAZ Frog",
+    "version": "0.1.0",
+    "repoPath": "ragbaz-frog",
+    "owner": "ragbaz",
+    "lifecycle": "production"
+  },
+  "commercial": {
+    "packageTags": ["managed-operations", "agent-coordination"],
+    "personas": ["internal-operator", "agent-team", "platform-owner"],
+    "supportTier": "managed",
+    "salesStatus": "internal",
+    "pricingTags": ["included-platform"]
+  },
+  "capabilities": {
+    "provides": [
+      {
+        "id": "ops.coordination",
+        "label": "Task, lock, repo, and unit coordination",
+        "version": "0.1.0",
+        "supportTier": "production",
+        "description": "Maintains AGENTS.db task slices, locks, repo metadata, unit discovery, event logs, and workspace status."
+      },
+      {
+        "id": "ops.mcp",
+        "label": "Frog MCP tools",
+        "version": "0.1.0",
+        "supportTier": "production",
+        "sensitive": true,
+        "description": "Exposes coordination operations as MCP tools for cooperating agents."
+      }
+    ]
+  },
+  "requires": {
+    "storage": [
+      {
+        "name": "AGENTS.db",
+        "reason": "Shared SQLite coordination state."
+      }
+    ],
+    "approvals": [
+      {
+        "capability": "approval.coordination.write",
+        "reason": "Task and lock writes affect all cooperating agents."
+      }
+    ]
+  },
+  "provides": {
+    "cli": [
+      {
+        "name": "frog",
+        "command": "/data/src/ragbaz-frog/bin/frog",
+        "capabilities": ["ops.coordination"]
+      },
+      {
+        "name": "frog-mcp",
+        "command": "/data/src/ragbaz-frog/bin/frog-mcp",
+        "capabilities": ["ops.mcp"]
+      }
+    ],
+    "mcpTools": [
+      {
+        "name": "frog.repo.list",
+        "capabilities": ["ops.coordination"],
+        "permissions": ["repo:read"],
+        "dryRun": true
+      },
+      {
+        "name": "frog.task.claim",
+        "capabilities": ["ops.coordination"],
+        "permissions": ["task:write", "lock:write"]
+      },
+      {
+        "name": "frog.lock.audit",
+        "capabilities": ["ops.coordination"],
+        "permissions": ["lock:read"],
+        "dryRun": true
+      }
+    ],
+    "events": [
+      {
+        "type": "frog.task.changed",
+        "schemaVersion": "0.1.0",
+        "description": "Task lifecycle, assignment, and status changes."
+      },
+      {
+        "type": "frog.lock.changed",
+        "schemaVersion": "0.1.0",
+        "description": "Lock acquisition, renewal, release, and audit events."
+      }
+    ],
+    "metrics": [
+      {
+        "name": "lock-audit",
+        "description": "Working-tree changes not covered by active locks.",
+        "capabilities": ["ops.coordination"]
+      }
+    ],
+    "adminSurfaces": [
+      {
+        "name": "frog-cli",
+        "description": "Human-facing coordination CLI.",
+        "capabilities": ["ops.coordination"]
+      }
+    ]
+  },
+  "config": {
+    "knobs": [
+      {
+        "name": "workspace-root",
+        "env": "FROG_WORKSPACE",
+        "type": "string",
+        "required": false,
+        "control": "operator",
+        "description": "Workspace root used for repo and unit resolution."
+      },
+      {
+        "name": "agent-name",
+        "env": "FROG_AGENT",
+        "type": "string",
+        "required": false,
+        "control": "operator",
+        "description": "Acting agent identity used for locks and task ownership."
+      }
+    ]
+  },
+  "security": {
+    "authMethods": ["ssh", "mcp"],
+    "tokenScopes": ["repo:read", "task:write", "lock:write", "workspace:read"],
+    "tenantBoundary": "host-level",
+    "dataClasses": ["logs", "metrics"],
+    "secretAccess": "references-only",
+    "revocation": "Revoke workspace access by disabling the operator account, SSH path, or MCP client grant.",
+    "auditEvents": ["frog.task.changed", "frog.lock.changed"]
+  },
+  "health": {
+    "checks": [
+      {
+        "name": "cli-status",
+        "type": "command",
+        "target": "/data/src/ragbaz-frog/bin/frog status --json",
+        "intervalSeconds": 300,
+        "timeoutSeconds": 20,
+        "required": true
+      }
+    ]
+  },
+  "compatibility": {
+    "contracts": [
+      {
+        "name": "frog-cli",
+        "version": "0.1.0",
+        "test": "python3 -m unittest discover -s tests"
+      },
+      {
+        "name": "frog-mcp",
+        "version": "0.1.0",
+        "test": "/data/src/ragbaz-frog/bin/frog mcp tools --json"
+      }
+    ]
+  },
+  "docs": {
+    "readme": "README.md",
+    "runbook": "docs/DEPLOY.md",
+    "architecture": "docs/FEDERATION.md"
+  },
+  "metadata": {
+    "candidateWave": "component-manifest-candidate-wave"
+  }
+}
