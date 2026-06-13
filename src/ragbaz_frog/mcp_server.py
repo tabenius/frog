@@ -7,7 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ragbaz_frog import DEFAULT_DB_PATH
+from ragbaz_frog import DEFAULT_DB_PATH as _COMPILED_DEFAULT_DB_PATH
+
+DEFAULT_DB_PATH = os.environ.get("FROG_DB_PATH") or _COMPILED_DEFAULT_DB_PATH
 from ragbaz_frog import config as frog_config
 from ragbaz_frog import store
 
@@ -258,6 +260,11 @@ def _tool_specs() -> list[dict]:
             },
         },
         {
+            "name": "__health",
+            "description": "Health check: server status, version, db connectivity, timestamp.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
             "name": "frog_workspace_list",
             "description": "List configured frog workspaces.",
             "inputSchema": {"type": "object", "properties": {}},
@@ -429,6 +436,29 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
             )
         if tool_name == "frog_workspace_list":
             return frog_config.list_workspaces()
+        if tool_name == "__health":
+            import datetime, sqlite3 as _sqlite3
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            db_ok = False
+            db_error = None
+            try:
+                _c = _sqlite3.connect(db_path, timeout=3)
+                _c.execute("SELECT 1")
+                _c.close()
+                db_ok = True
+            except Exception as _e:
+                db_error = str(_e)
+            result = {
+                "ok": db_ok,
+                "status": "ok" if db_ok else "degraded",
+                "server": "frog",
+                "version": SERVER_INFO["version"],
+                "checks": {"db": {"ok": db_ok}},
+                "ts": ts,
+            }
+            if db_error:
+                result["checks"]["db"]["error"] = db_error
+            return result
         return {"ok": False, "error": f"unsupported tool: {tool_name}"}
 
     return _with_conn(db_path, run)
@@ -494,61 +524,21 @@ def call_tool(tool_name: str, arguments: dict | None, *, config_path: str | None
             if args.get("repo_ref"):
                 argv.extend(["--repo-ref", args["repo_ref"]])
             return _remote_dispatch(workspace, argv)
-    return _call_local(tool_name, args, workspace)
+    try:
+        return _call_local(tool_name, args, workspace)
+    except Exception as _exc:
+        import datetime as _dt, logging as _logging
+        _ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _rec = {"ts": _ts, "level": "error", "logger": "mcp_server",
+                "msg": str(_exc), "tool": tool_name}
+        sys.stderr.write(__import__("json").dumps(_rec) + "\n")
+        sys.stderr.flush()
+        raise
 
 
-def _read_message() -> dict | list | None:
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        line = line.strip()
-        if line:
-            return json.loads(line.decode("utf-8"))
-
-
-def _write_message(payload: dict | list) -> None:
-    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-    sys.stdout.write(blob + "\n")
-    sys.stdout.flush()
-
-
-def _response(message_id, result=None, error=None) -> dict:
-    payload = {"jsonrpc": "2.0", "id": message_id}
-    if error is not None:
-        payload["error"] = error
-    else:
-        payload["result"] = result or {}
-    return payload
-
-
-def _error(message_id, code: int, message: str, data=None) -> dict:
-    error = {"code": code, "message": message}
-    if data is not None:
-        error["data"] = data
-    return _response(message_id, error=error)
-
-
-def _negotiate_protocol_version(message: dict) -> str:
-    params = message.get("params") or {}
-    requested = params.get("protocolVersion")
-    if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS:
-        return requested
-    if isinstance(requested, str) and requested:
-        # Core tools/list and tools/call semantics are stable enough here that
-        # matching the client preference is safer than forcing an older version.
-        return requested
-    return DEFAULT_PROTOCOL_VERSION
-
-
-def _tool_result(payload: dict) -> dict:
-    text = json.dumps(payload, indent=2, sort_keys=True)
-    return {
-        "content": [{"type": "text", "text": text}],
-        "isError": not payload.get("ok", True),
-        "structuredContent": payload,
-    }
-
+# ---------------------------------------------------------------------------
+# Shared resource / prompt helpers (used by both serve() implementations)
+# ---------------------------------------------------------------------------
 
 _SRC_ROOT = "/data/src"
 
@@ -611,6 +601,148 @@ def _get_prompt(name: str, arguments: dict) -> dict:
     )
     return {"messages": [{"role": "user",
             "content": {"type": "text", "text": text}}]}
+
+
+def _tool_result(payload: dict) -> dict:
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    return {
+        "content": [{"type": "text", "text": text}],
+        "isError": not payload.get("ok", True),
+        "structuredContent": payload,
+    }
+
+
+# ---------------------------------------------------------------------------
+# FastMCP serve (primary)
+# ---------------------------------------------------------------------------
+
+def _serve_fastmcp(*, config_path: str | None = None) -> int:
+    from mcp.server.fastmcp import FastMCP
+
+    fmcp = FastMCP("ragbaz-frog")
+
+    # --- tools ---
+    for spec in _tool_specs():
+        tool_name = spec["name"]
+
+        # Build a closure capturing tool_name.
+        # FastMCP introspects function signatures; **kwargs breaks pydantic validation
+        # when called with {}, and dynamic pydantic models break inspect.signature.
+        # Solution: build a handler with explicit named Optional[Any] parameters
+        # via exec() so FastMCP sees a real inspectable signature.
+        def _make_handler(name, props: dict):
+            from typing import Optional, Any
+            param_names = list(props.keys())
+            if param_names:
+                params_sig = ", ".join(f"{p}: Optional[Any] = None" for p in param_names)
+                params_collect = "{" + ", ".join(f'"{p}": {p}' for p in param_names) + "}"
+                src_code = (
+                    f"async def handler({params_sig}) -> str:\n"
+                    f"    args = {{k: v for k, v in {params_collect}.items() if v is not None}}\n"
+                    f"    result = _call_tool(name, args, config_path=_cfg)\n"
+                    f"    return _json.dumps(result, indent=2, sort_keys=True)\n"
+                )
+            else:
+                src_code = (
+                    "async def handler() -> str:\n"
+                    "    result = _call_tool(name, {}, config_path=_cfg)\n"
+                    "    return _json.dumps(result, indent=2, sort_keys=True)\n"
+                )
+            ns = {"name": name, "_cfg": config_path, "_call_tool": call_tool,
+                  "_json": json, "Optional": Optional, "Any": Any}
+            exec(src_code, ns)
+            fn = ns["handler"]
+            fn.__name__ = name
+            return fn
+
+        _props = spec.get("inputSchema", {}).get("properties", {})
+        fmcp.add_tool(
+            _make_handler(tool_name, _props),
+            name=tool_name,
+            description=spec["description"],
+        )
+
+    # --- resources ---
+    @fmcp.resource("frog://board")
+    def board_resource() -> str:
+        snap = _with_conn(DEFAULT_DB_PATH, lambda c: store.board_snapshot(c))
+        return json.dumps(snap, indent=2)
+
+    @fmcp.resource("frog://events")
+    def events_resource() -> str:
+        ev = _with_conn(DEFAULT_DB_PATH, lambda c: store.log_tail(c, limit=30, repo_ref=None))
+        return json.dumps(ev, indent=2)
+
+    @fmcp.resource("frog://agents-md")
+    def agents_md_resource() -> str:
+        fp = Path(_SRC_ROOT) / "AGENTS.md"
+        return fp.read_text() if fp.is_file() else "(AGENTS.md not present)"
+
+    @fmcp.resource("frog://agents-coop")
+    def agents_coop_resource() -> str:
+        fp = Path(_SRC_ROOT) / "agents-coop.md"
+        return fp.read_text() if fp.is_file() else "(agents-coop.md not present)"
+
+    # --- prompt ---
+    @fmcp.prompt("coordinate-before-edit")
+    def coordinate_prompt(agent: str = "${FROG_AGENT:-$USER}") -> str:
+        return (
+            "Before editing this frog-coordinated tree:\n"
+            f"1. `frog board` then `frog task next --agent {agent}`.\n"
+            f"2. `frog task claim <slug> --agent {agent}` (assigns + locks).\n"
+            "3. `frog lock check --file <path>` before touching shared files.\n"
+            f"4. When done: `frog task finish <slug> --agent {agent}`.\n"
+            "Read the frog://board and frog://agents-md resources for context."
+        )
+
+    fmcp.run(transport="stdio")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Legacy hand-rolled JSON-RPC serve (fallback if FastMCP unavailable)
+# ---------------------------------------------------------------------------
+
+def _read_message() -> dict | list | None:
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if line:
+            return json.loads(line.decode("utf-8"))
+
+
+def _write_message(payload: dict | list) -> None:
+    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    sys.stdout.write(blob + "\n")
+    sys.stdout.flush()
+
+
+def _response(message_id, result=None, error=None) -> dict:
+    payload = {"jsonrpc": "2.0", "id": message_id}
+    if error is not None:
+        payload["error"] = error
+    else:
+        payload["result"] = result or {}
+    return payload
+
+
+def _error(message_id, code: int, message: str, data=None) -> dict:
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return _response(message_id, error=error)
+
+
+def _negotiate_protocol_version(message: dict) -> str:
+    params = message.get("params") or {}
+    requested = params.get("protocolVersion")
+    if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS:
+        return requested
+    if isinstance(requested, str) and requested:
+        return requested
+    return DEFAULT_PROTOCOL_VERSION
 
 
 def _handle_message(message: dict, *, config_path: str | None = None) -> dict | str | None:
@@ -678,7 +810,7 @@ def _handle_message(message: dict, *, config_path: str | None = None) -> dict | 
         return None
 
 
-def serve(*, config_path: str | None = None) -> int:
+def _serve_legacy(*, config_path: str | None = None) -> int:
     while True:
         try:
             message = _read_message()
@@ -706,3 +838,15 @@ def serve(*, config_path: str | None = None) -> int:
             return 0
         if response is not None:
             _write_message(response)
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def serve(*, config_path: str | None = None) -> int:
+    try:
+        return _serve_fastmcp(config_path=config_path)
+    except ImportError:
+        _log("warn", "FastMCP not available, falling back to legacy JSON-RPC server")
+        return _serve_legacy(config_path=config_path)
