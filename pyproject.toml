@@ -10,6 +10,9 @@ requires-python = ">=3.11"  # tomllib
 readme = "README.md"
 dependencies = []
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.0.0"]
+
 [project.scripts]
 frog = "ragbaz_frog.main_cli:main"
 frog-mcp = "ragbaz_frog.mcp_server:serve"

@@ -20,6 +20,7 @@ from ragbaz_frog import cli_render
 from ragbaz_frog import config as frog_config
 from ragbaz_frog import mcp_server
 from ragbaz_frog import store
+from ragbaz_frog import gateway
 
 
 TOP_LEVEL_COMMANDS = {
@@ -1709,7 +1710,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,gh,import,export,hook,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync}",
+        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,gh,import,export,hook,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync,gateway}",
     )
 
     db_cmd = sub.add_parser(
@@ -1937,6 +1938,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_sync_ops(sync_cmd.add_subparsers(
         dest="sync_command", required=True))
+
+    gateway.add_subcommands(sub)
 
     agent_cmd = sub.add_parser("agent", help="Acting-agent identity")
     box_cmd = sub.add_parser("box", help="This machine federation identity")
@@ -2974,6 +2977,9 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.agent_whoami(conn), args.json)
             if args.agent_command == "register":
                 return _emit(store.agent_register(conn, args.name, kind=args.kind, notes=args.notes), args.json)
+        if args.command == "gateway":
+            gateway.handle_command(args)
+            return 0
         return _emit({"ok": False, "error": "unsupported command"}, args.json)
     finally:
         conn.close()

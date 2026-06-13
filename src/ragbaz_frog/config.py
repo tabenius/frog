@@ -107,7 +107,7 @@ def resolve_workspace(name: str | None, path: str | None = None) -> dict | None:
         "name": workspace_name,
         "host_name": workspace["host"],
         "host": host,
-        "frog_bin": workspace_frog_bin(workspace["root"]),
+        "frog_bin": workspace.get("frog_bin") or workspace_frog_bin(workspace["root"]),
     }
 
 
