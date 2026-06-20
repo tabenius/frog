@@ -1652,6 +1652,9 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
     ).fetchone()
     if exact:
         return dict(exact)
+    alias_match = _resolve_repo_alias_path(conn, repo_ref)
+    if alias_match:
+        return alias_match
     rows = conn.execute("SELECT * FROM repos ORDER BY repo_path").fetchall()
     for row in rows:
         payload = dict(row)
@@ -1693,6 +1696,8 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
             "created_at": None,
             "updated_at": None,
         }
+    if as_path.is_absolute():
+        return None
     workspace = WORKSPACE_ROOT
     matches = []
     for candidate in workspace.rglob(repo_ref):
@@ -1731,6 +1736,32 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
             "created_at": None,
             "updated_at": None,
         }
+    return None
+
+
+def _resolve_repo_alias_path(conn, repo_path: str) -> dict | None:
+    aliases = conn.execute(
+        """SELECT repo_key FROM repo_aliases WHERE repo_path = ?
+           ORDER BY CASE WHEN box = ? THEN 0 ELSE 1 END, created_at""",
+        (repo_path, _box_id()),
+    ).fetchall()
+    for alias in aliases:
+        rows = conn.execute(
+            """SELECT * FROM repos WHERE repo_key = ?
+               ORDER BY LENGTH(repo_path), repo_path""",
+            (alias["repo_key"],),
+        ).fetchall()
+        candidates = [dict(row) for row in rows]
+        if not candidates:
+            continue
+        basename = Path(repo_path).name
+        basename_matches = [
+            candidate for candidate in candidates
+            if Path(candidate["repo_path"]).name == basename
+        ]
+        if basename_matches:
+            return basename_matches[0]
+        return candidates[0]
     return None
 
 

@@ -85,6 +85,51 @@ class RepoKeys(unittest.TestCase):
         boxes = {a["box"] for a in w["aliases"]}
         self.assertIn("otherbox", boxes)
 
+    def test_resolve_repo_by_old_absolute_alias_path(self):
+        key = "git:storefront"
+        now = store.utc_now_iso()
+        rows = [
+            ("/data/src/products/articulate/universe/storefront",
+             "universe-storefront"),
+            ("/data/src/products/articulate/universe/storefront/"
+             "packages/ragbaz-bridge-plugin", "ragbaz-bridge-plugin"),
+        ]
+        for repo_path, name in rows:
+            self.conn.execute(
+                """INSERT INTO repos(repo_path,name,kind,status,third_party,
+                   notes,created_at,updated_at,repo_key)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (repo_path, name, "product", "active", 0, None, now, now, key),
+            )
+        aliases = [
+            "/data/src/products/articulate/universe/main",
+            ("/data/src/products/articulate/universe/main/"
+             "packages/ragbaz-bridge-plugin"),
+        ]
+        for repo_path in aliases:
+            self.conn.execute(
+                "INSERT INTO repo_aliases(repo_key,box,repo_path,created_at) "
+                "VALUES(?,?,?,?)",
+                (key, "konsonans", repo_path, now),
+            )
+        self.conn.commit()
+
+        root = store.resolve_repo(
+            self.conn, "/data/src/products/articulate/universe/main")
+        self.assertEqual(root["name"], "universe-storefront")
+        self.assertEqual(root["repo_path"], rows[0][0])
+
+        nested = store.resolve_repo(
+            self.conn,
+            "/data/src/products/articulate/universe/main/"
+            "packages/ragbaz-bridge-plugin")
+        self.assertEqual(nested["name"], "ragbaz-bridge-plugin")
+        self.assertEqual(nested["repo_path"], rows[1][0])
+
+    def test_unknown_absolute_path_does_not_rglob(self):
+        self.assertIsNone(store.resolve_repo(
+            self.conn, "/data/src/products/articulate/universe/missing"))
+
 
 if __name__ == "__main__":
     unittest.main()
