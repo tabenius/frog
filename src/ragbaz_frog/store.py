@@ -1840,7 +1840,17 @@ def _candidate_category_root(root_path: Path, current: Path) -> tuple[str | None
 
 
 def _looks_like_repo_boundary(root_path: Path, current: Path, dirnames: list[str], filenames: list[str]) -> bool:
-    if ".git" in dirnames or ".git" in filenames:
+    # NOTE: this cannot check `".git" in dirnames`/`filenames` -- by the time
+    # discover_repos() calls this, it has already stripped ".git" out of
+    # dirnames (DISCOVERY_EXCLUDED_DIRS, so os.walk doesn't recurse into it),
+    # so that membership test can never be true. Stat the filesystem
+    # directly instead. Require `.git/HEAD` (not just an existing `.git`
+    # dir) so a hollow/uninitialized `.git` -- e.g. an empty directory left
+    # over from a broken `git init` -- doesn't get treated as a repo; a
+    # worktree's `.git` is a *file* (a gitdir pointer), which `is_file()`
+    # covers without needing a nested HEAD.
+    git_marker = current / ".git"
+    if git_marker.is_file() or (git_marker / "HEAD").exists():
         return True
     if any(part in {".claude", "worktrees"} for part in current.parts):
         return False
@@ -4930,29 +4940,47 @@ def repo_scan(conn, repo_ref: str) -> dict:
     conn.execute("DELETE FROM repo_targets WHERE repo_path = ?", (repo["repo_path"],))
     conn.execute("DELETE FROM repo_artifacts WHERE repo_path = ?", (repo["repo_path"],))
     conn.execute("DELETE FROM repo_detection_sources WHERE repo_path = ?", (repo["repo_path"],))
+    detectors = {
+        "taskfile": _detect_from_taskfile,
+        "justfile": _detect_from_justfile,
+        "mise": _detect_from_mise,
+        "makefile": _detect_from_makefile,
+        "package_json": _detect_from_package_json,
+        "cargo_toml": _detect_from_cargo_toml,
+        "pyproject": _detect_from_pyproject,
+        "compose": _detect_from_compose,
+    }
+    skipped: list[dict] = []
     for kind, path in _manifest_candidates(repo_root):
-        if kind == "taskfile":
-            _detect_from_taskfile(conn, repo_root, path)
-        elif kind == "justfile":
-            _detect_from_justfile(conn, repo_root, path)
-        elif kind == "mise":
-            _detect_from_mise(conn, repo_root, path)
-        elif kind == "makefile":
-            _detect_from_makefile(conn, repo_root, path)
-        elif kind == "package_json":
-            _detect_from_package_json(conn, repo_root, path)
-        elif kind == "cargo_toml":
-            _detect_from_cargo_toml(conn, repo_root, path)
-        elif kind == "pyproject":
-            _detect_from_pyproject(conn, repo_root, path)
-        elif kind == "compose":
-            _detect_from_compose(conn, repo_root, path)
+        detect = detectors.get(kind)
+        if detect is None:
+            continue
+        try:
+            detect(conn, repo_root, path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError,
+                tomllib.TOMLDecodeError) as e:
+            # A single malformed/empty/unreadable manifest (real example:
+            # an empty package.json stub) must not abort scanning this
+            # repo's other manifests, let alone every other repo queued
+            # behind it in a workspace-wide `discover --scan` -- one bad
+            # file anywhere under the scanned root used to take down
+            # discovery for the whole workspace.
+            skipped.append({"kind": kind, "path": str(path), "error": str(e)})
+    if skipped:
+        record_event(
+            conn,
+            kind="repo.scan_warning",
+            summary=f"{repo['name']}: {len(skipped)} manifest(s) skipped (unreadable/malformed)",
+            repo_path=repo["repo_path"],
+            payload={"skipped": skipped},
+        )
     record_event(
         conn,
         kind="repo.scanned",
         summary=f"scanned repo {repo['name']}",
         repo_path=repo["repo_path"],
-        payload={"sources": len(_manifest_candidates(repo_root))},
+        payload={"sources": len(_manifest_candidates(repo_root)),
+                 "skipped": len(skipped)},
     )
     conn.commit()
     return repo_targets(conn, repo_ref)
