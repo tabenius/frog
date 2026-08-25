@@ -5,6 +5,67 @@
 It keeps human-readable rules in files and shared machine-readable coordination
 state in `/data/src/AGENTS.db`.
 
+## Related projects: WeftMark and Sylvae
+
+Two other repos in this workspace sit near frog's territory. Neither replaces
+it today; read this before assuming either one does.
+
+- **[WeftMark](../experiments/WeftMark)** is a *prospective successor* to
+  frog's task/lock/coordination domain specifically — not a fork, not a
+  rewrite of frog's code. Its own README carries a "From Frog to WeftMark"
+  table naming the transition explicitly: frog's tasks/deps/claims become
+  WeftMark's Change Sets, frog's file/repo locks become file *and*
+  semantic/contract scopes, frog's event log becomes an immutable evidence
+  ledger, and so on — frog's lessons made first-class, not thrown away.
+  WeftMark is still `prototype` (its own `ragbaz.component.json` says so)
+  and has no repo/build/scan/discovery layer at all — it starts from
+  evidence and handoff semantics, not from "find and index every repo."
+  **Practical answer: use frog for anything repo/task/lock/build/discovery
+  today.** WeftMark is worth watching, not switching to, until it grows
+  that ground floor.
+- **[Sylvae](../experiments/Sylvae)** is unrelated in scope, not a
+  coordination tool at all — a portable skill runner that executes a
+  `SKILL.md` against a chosen backend (Ollama, Claude Code, Codex,
+  OpenCode, or the Anthropic API directly) and logs every run as an
+  evidence record. Complementary layer, not competing: frog decides *what
+  work exists and who's doing it*; Sylvae is one way a *cheap-tier* model
+  could actually execute a well-scoped piece of it. Nothing wires them
+  together today (Sylvae's own docs don't mention frog), but frog's MCP
+  tool surface and Sylvae's MCP server (`sylvae mcp`, tools
+  `sylvae_list_skills`/`sylvae_run_skill`) are both real integration points
+  if that's ever worth building.
+
+## Future
+
+`PLAN.md` tracks everything actually committed and shipped — Phase 0
+through Phase II are all closed there; there is no open Phase III entry in
+it right now, so treat anything below as informed extrapolation, not a
+roadmap promise:
+
+- **WeftMark absorbing the task/lock/evidence domain** is the most
+  concrete forward signal on file (see above) — not a frog initiative,
+  but the reason not to over-invest in frog's own evidence/scope model
+  growing much further past where it is today.
+- **Hardening the surface every other product actually calls.** This
+  review (2026-08-25) found and fixed two bugs that were reachable by any
+  caller of `frog repo discover` — including WeftMark or Sylvae sessions,
+  or anyone else's `frog_repo_discover` MCP call, not just a human running
+  the CLI: a dead `.git`-detection code path that made manifest-less repos
+  invisible to discovery, and one malformed manifest anywhere under the
+  scanned root aborting discovery for the *entire remaining workspace*.
+  Neither was theoretical — both were live, reproducible against this
+  actual workspace. The general lesson (audit every MCP-exposed code path
+  for "what happens when a peer product hands this something malformed or
+  unexpected," not just "does the happy path work") is the kind of pass
+  worth repeating periodically, not a one-time fix.
+- **`frog repo discover`'s self-registration gap.** Discovering a repo by
+  passing its own path as `--root` now works (the `.git` fix above), but
+  there's no single obvious command a new repo's owner runs once to
+  register-and-forget — `frog repo discover --root <path>` is the answer,
+  but it's not documented as *the* onboarding step anywhere prominent.
+  Worth a `frog new`-adjacent affordance or a README callout, not solved
+  here.
+
 ## Primary CLI
 
 - `/data/src/ragbaz-frog/bin/frog`
