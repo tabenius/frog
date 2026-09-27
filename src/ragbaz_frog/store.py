@@ -2314,6 +2314,10 @@ def create_task(
     parent_task_slug: str | None,
     files: list[str] | None = None,
 ) -> dict:
+    try:
+        priority = normalize_priority(priority)
+    except ValueError as error:
+        return {"ok": False, "error": str(error)}
     repo_path = None
     if repo_ref:
         repo = resolve_repo(conn, repo_ref)
@@ -2441,10 +2445,27 @@ _WF_INPROG = {"in_progress", "in-progress", "doing", "wip", "active",
 _TASK_PRIORITIES = {"p0", "p1", "p2", "p3"}
 
 
+def normalize_priority(value: str | int | None) -> str | None:
+    """'p2', 'P2', '2' or 2 -> 'p2'; None -> None; anything else -> ValueError.
+
+    create used to store whatever it was given ('2'), which _priority_rank
+    could not read, so such tasks were all scheduled last."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text.isdigit():
+        text = "p" + text
+    if text not in _TASK_PRIORITIES:
+        raise ValueError("priority must be one of p0, p1, p2, p3 (or 0-3)")
+    return text
+
+
 def _priority_rank(p: str | None) -> int:
-    if p and len(p) >= 2 and p[0] in "pP" and p[1:].isdigit():
-        return int(p[1:])
-    return 9
+    try:
+        normalized = normalize_priority(p)
+    except ValueError:
+        return 9
+    return int(normalized[1:]) if normalized else 9
 
 
 def task_edit(
@@ -2469,10 +2490,12 @@ def task_edit(
         "why": why,
         "what_text": what_text,
         "roi_note": roi_note,
-        "priority": priority.lower() if isinstance(priority, str) else priority,
+        "priority": priority,
     }
-    if candidates["priority"] is not None and candidates["priority"] not in _TASK_PRIORITIES:
-        return {"ok": False, "error": "priority must be one of p0, p1, p2, p3"}
+    try:
+        candidates["priority"] = normalize_priority(priority)
+    except ValueError as error:
+        return {"ok": False, "error": str(error)}
     if repo_ref is not None:
         repo = resolve_repo(conn, repo_ref)
         if not repo or not conn.execute(
