@@ -44,6 +44,44 @@ class GlobalFlagHoisting(unittest.TestCase):
             ["--db=/tmp/x.db", "task", "list"],
         )
 
+    def test_workspace_add_db_is_not_hoisted(self):
+        argv = [
+            "config", "workspace", "add", "local-src",
+            "--host", "local", "--root", "/src", "--db", "/src/AGENTS.db",
+        ]
+        self.assertEqual(_hoist_global_flags(argv), argv)
+
+    def test_workspace_add_uses_derived_db_when_omitted(self):
+        import json as _json
+        import tempfile
+        from pathlib import Path
+
+        config_path = str(Path(tempfile.mkdtemp()) / "frog.json")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main([
+                "--config", config_path, "config", "workspace", "add", "local-src",
+                "--host", "local", "--root", "/src", "--json",
+            ])
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertEqual(_json.loads(buf.getvalue())["workspace"]["db"], "/src/AGENTS.db")
+
+    def test_workspace_add_uses_explicit_db(self):
+        import json as _json
+        import tempfile
+        from pathlib import Path
+
+        config_path = str(Path(tempfile.mkdtemp()) / "frog.json")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main([
+                "--config", config_path, "config", "workspace", "add", "local-src",
+                "--host", "local", "--root", "/src", "--db", "/state/frog.db",
+                "--json",
+            ])
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertEqual(_json.loads(buf.getvalue())["workspace"]["db"], "/state/frog.db")
+
     def test_non_global_flags_left_in_place(self):
         # --workflow-status is a task-list-local flag and should not be
         # hoisted (would land in the wrong parser).
