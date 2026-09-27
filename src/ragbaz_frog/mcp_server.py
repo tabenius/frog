@@ -298,6 +298,31 @@ def _remote_dispatch(workspace: dict, argv: list[str]) -> dict:
         }
 
 
+# What `frog --db PATH --config FILE mcp serve` was started with. An explicit
+# --db wins over every configured workspace, as it does for the CLI; without
+# one, the configured local workspace's database is used before the built-in
+# default (/data/src/AGENTS.db, which need not exist on this host).
+_DB_OVERRIDE: str | None = None
+_CONFIG_PATH: str | None = None
+
+
+def _default_db() -> str:
+    if _DB_OVERRIDE:
+        return _DB_OVERRIDE
+    workspace = frog_config.resolve_workspace(None, _CONFIG_PATH)
+    if workspace and workspace["host"].get("transport", "local") == "local":
+        return workspace["db"]
+    return DEFAULT_DB_PATH
+
+
+def _src_root() -> str:
+    """The configured local workspace's root (for AGENTS.md), else /data/src."""
+    workspace = frog_config.resolve_workspace(None, _CONFIG_PATH)
+    if workspace and workspace["host"].get("transport", "local") == "local":
+        return workspace["root"]
+    return _SRC_ROOT
+
+
 def _workspace(name: str | None, config_path: str | None) -> dict | None:
     return frog_config.resolve_workspace(name, config_path)
 
@@ -311,7 +336,7 @@ def _with_conn(db_path: str, fn):
 
 
 def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
-    db_path = workspace["db"] if workspace else DEFAULT_DB_PATH
+    db_path = _DB_OVERRIDE or (workspace["db"] if workspace else _default_db())
 
     def run(conn):
         if tool_name == "frog_status":
@@ -469,6 +494,8 @@ def call_tool(tool_name: str, arguments: dict | None, *, config_path: str | None
     workspace = _workspace(args.get("workspace"), config_path)
     if tool_name == "frog_workspace_list":
         return frog_config.list_workspaces(config_path)
+    if _DB_OVERRIDE and not args.get("workspace"):
+        return _call_local(tool_name, args, None)
     if workspace and workspace["host"].get("transport") != "local":
         if tool_name == "frog_repo_list":
             argv = ["repo", "list"]
@@ -561,7 +588,7 @@ def _resource_specs() -> list[dict]:
 
 
 def _read_resource(uri: str, *, db_path: str | None = None) -> dict:
-    db_path = db_path or DEFAULT_DB_PATH
+    db_path = db_path or _default_db()
     if uri == "frog://board":
         snap = _with_conn(db_path, lambda c: store.board_snapshot(c))
         return {"mimeType": "application/json",
@@ -572,7 +599,7 @@ def _read_resource(uri: str, *, db_path: str | None = None) -> dict:
                 "text": json.dumps(ev, indent=2)}
     if uri in ("frog://agents-md", "frog://agents-coop"):
         fn = "AGENTS.md" if uri.endswith("agents-md") else "agents-coop.md"
-        fp = Path(_SRC_ROOT) / fn
+        fp = Path(_src_root()) / fn
         return {"mimeType": "text/markdown",
                 "text": fp.read_text() if fp.is_file() else f"({fn} not present)"}
     raise KeyError(uri)
@@ -665,22 +692,22 @@ def _serve_fastmcp(*, config_path: str | None = None) -> int:
     # --- resources ---
     @fmcp.resource("frog://board")
     def board_resource() -> str:
-        snap = _with_conn(DEFAULT_DB_PATH, lambda c: store.board_snapshot(c))
+        snap = _with_conn(_default_db(), lambda c: store.board_snapshot(c))
         return json.dumps(snap, indent=2)
 
     @fmcp.resource("frog://events")
     def events_resource() -> str:
-        ev = _with_conn(DEFAULT_DB_PATH, lambda c: store.log_tail(c, limit=30, repo_ref=None))
+        ev = _with_conn(_default_db(), lambda c: store.log_tail(c, limit=30, repo_ref=None))
         return json.dumps(ev, indent=2)
 
     @fmcp.resource("frog://agents-md")
     def agents_md_resource() -> str:
-        fp = Path(_SRC_ROOT) / "AGENTS.md"
+        fp = Path(_src_root()) / "AGENTS.md"
         return fp.read_text() if fp.is_file() else "(AGENTS.md not present)"
 
     @fmcp.resource("frog://agents-coop")
     def agents_coop_resource() -> str:
-        fp = Path(_SRC_ROOT) / "agents-coop.md"
+        fp = Path(_src_root()) / "agents-coop.md"
         return fp.read_text() if fp.is_file() else "(agents-coop.md not present)"
 
     # --- prompt ---
@@ -844,7 +871,9 @@ def _serve_legacy(*, config_path: str | None = None) -> int:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def serve(*, config_path: str | None = None) -> int:
+def serve(*, config_path: str | None = None, db_path: str | None = None) -> int:
+    global _DB_OVERRIDE, _CONFIG_PATH
+    _DB_OVERRIDE, _CONFIG_PATH = db_path, config_path
     try:
         return _serve_fastmcp(config_path=config_path)
     except ImportError:

@@ -1809,7 +1809,10 @@ def _candidate_category_root(root_path: Path, current: Path) -> tuple[str | None
 
 
 def _looks_like_repo_boundary(root_path: Path, current: Path, dirnames: list[str], filenames: list[str]) -> bool:
-    if ".git" in dirnames or ".git" in filenames:
+    # Ask the filesystem: discover_repos prunes .git from dirnames (so it is
+    # not walked) before calling this, so a Git repo without a build manifest
+    # (e.g. a Nix-only flake repo) was never found. A worktree's .git is a file.
+    if ".git" in dirnames or ".git" in filenames or (current / ".git").exists():
         return True
     if any(part in {".claude", "worktrees"} for part in current.parts):
         return False

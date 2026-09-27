@@ -1907,7 +1907,9 @@ def build_parser() -> argparse.ArgumentParser:
     config_workspace_add.add_argument("name")
     config_workspace_add.add_argument("--host", required=True)
     config_workspace_add.add_argument("--root", required=True)
-    config_workspace_add.add_argument("--db")
+    # Its own dest: `--db` is also a global flag, hoisted to the front of argv
+    # (_hoist_global_flags), and this subparser's default would erase it.
+    config_workspace_add.add_argument("--db", dest="workspace_db")
     config_workspace_add.add_argument("--notes")
     config_workspace_add.add_argument("--default", action="store_true")
     config_workspace_list = config_workspace_sub.add_parser("list", help="List configured workspaces")
@@ -2432,7 +2434,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.json,
             )
         if args.mcp_command == "serve":
-            return mcp_server.serve(config_path=args.config)
+            return mcp_server.serve(
+                config_path=args.config,
+                db_path=args.db if args._db_explicit else None,
+            )
         if args.mcp_command == "tools":
             return _emit({"ok": True, "tools": mcp_server._tool_specs()}, args.json)
     if args.command == "config":
@@ -2459,7 +2464,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.name,
                         host_name=args.host,
                         root=args.root,
-                        db=args.db,
+                        db=args.workspace_db or (args.db if args._db_explicit else None),
                         notes=args.notes,
                         use_default=args.default,
                         path=args.config,
@@ -2515,6 +2520,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.init_command == "schema":
             return _emit(store.schema_status(args.db), args.json)
 
+    # Open the configured local workspace's database from the start. Opening
+    # DEFAULT_DB_PATH first (and switching later) creates /data/src on a host
+    # whose workspace lives elsewhere, or fails where it cannot.
+    if not db_explicit:
+        configured = frog_config.resolve_workspace(args.workspace, args.config)
+        if configured and configured["host"].get("transport") == "local":
+            args.db = configured["db"]
     conn = store.connect(args.db)
     try:
         workspace = _workspace_for_args(args, conn)
