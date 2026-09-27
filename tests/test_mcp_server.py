@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import io
 import json
+import select
+import time
 import os
 import subprocess
 import sys
@@ -28,14 +30,41 @@ EXPECTED_TOOLS = [
 
 
 def _run_mcp(messages, *, db=None, env=None):
+    """Talk to `frog mcp serve` like a real client: keep stdin open until every
+    request has been answered, then close it.
+
+    Closing stdin right after writing (subprocess.run(input=...)) raced the
+    server: on end of input the MCP SDK shuts down and cancels a request still
+    being handled, so its answer was sometimes never written (~1 run in 7).
+    """
     db = db or fresh_db()
-    body = "".join(json.dumps(m, separators=(",", ":")) + "\n" for m in messages)
     e = {**os.environ, **(env or {})}
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [sys.executable, "bin/frog", "--db", db, "mcp", "serve"],
-        cwd=ROOT, input=body, text=True, capture_output=True, timeout=10, env=e,
+        cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=e,
     )
-    return proc, db
+    pending = {m["id"] for m in messages if "id" in m}
+    for m in messages:
+        proc.stdin.write(json.dumps(m, separators=(",", ":")) + "\n")
+    proc.stdin.flush()
+    lines = []
+    deadline = time.monotonic() + 10
+    while pending and time.monotonic() < deadline:
+        ready, _, _ = select.select([proc.stdout], [], [], 0.1)
+        if not ready:
+            continue
+        line = proc.stdout.readline()
+        if not line:
+            break
+        lines.append(line)
+        try:
+            pending.discard(json.loads(line).get("id"))
+        except ValueError:
+            pass
+    proc.stdin.close()
+    rest, stderr = proc.communicate(timeout=10)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, "".join(lines) + rest, stderr), db
 
 
 def _by_id(lines, msg_id):

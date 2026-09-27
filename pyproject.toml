@@ -11,7 +11,7 @@ readme = "README.md"
 dependencies = []
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.0.0"]
+mcp = ["mcp>=1.28.1,<2"]
 
 [project.scripts]
 frog = "ragbaz_frog.main_cli:main"
