@@ -1652,6 +1652,9 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
     ).fetchone()
     if exact:
         return dict(exact)
+    alias_match = _resolve_repo_alias_path(conn, repo_ref)
+    if alias_match:
+        return alias_match
     rows = conn.execute("SELECT * FROM repos ORDER BY repo_path").fetchall()
     for row in rows:
         payload = dict(row)
@@ -1693,6 +1696,8 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
             "created_at": None,
             "updated_at": None,
         }
+    if as_path.is_absolute():
+        return None
     workspace = WORKSPACE_ROOT
     matches = []
     for candidate in workspace.rglob(repo_ref):
@@ -1731,6 +1736,32 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
             "created_at": None,
             "updated_at": None,
         }
+    return None
+
+
+def _resolve_repo_alias_path(conn, repo_path: str) -> dict | None:
+    aliases = conn.execute(
+        """SELECT repo_key FROM repo_aliases WHERE repo_path = ?
+           ORDER BY CASE WHEN box = ? THEN 0 ELSE 1 END, created_at""",
+        (repo_path, _box_id()),
+    ).fetchall()
+    for alias in aliases:
+        rows = conn.execute(
+            """SELECT * FROM repos WHERE repo_key = ?
+               ORDER BY LENGTH(repo_path), repo_path""",
+            (alias["repo_key"],),
+        ).fetchall()
+        candidates = [dict(row) for row in rows]
+        if not candidates:
+            continue
+        basename = Path(repo_path).name
+        basename_matches = [
+            candidate for candidate in candidates
+            if Path(candidate["repo_path"]).name == basename
+        ]
+        if basename_matches:
+            return basename_matches[0]
+        return candidates[0]
     return None
 
 
@@ -1809,10 +1840,17 @@ def _candidate_category_root(root_path: Path, current: Path) -> tuple[str | None
 
 
 def _looks_like_repo_boundary(root_path: Path, current: Path, dirnames: list[str], filenames: list[str]) -> bool:
-    # Ask the filesystem: discover_repos prunes .git from dirnames (so it is
-    # not walked) before calling this, so a Git repo without a build manifest
-    # (e.g. a Nix-only flake repo) was never found. A worktree's .git is a file.
-    if ".git" in dirnames or ".git" in filenames or (current / ".git").exists():
+    # NOTE: this cannot check `".git" in dirnames`/`filenames` -- by the time
+    # discover_repos() calls this, it has already stripped ".git" out of
+    # dirnames (DISCOVERY_EXCLUDED_DIRS, so os.walk doesn't recurse into it),
+    # so that membership test can never be true. Stat the filesystem
+    # directly instead. Require `.git/HEAD` (not just an existing `.git`
+    # dir) so a hollow/uninitialized `.git` -- e.g. an empty directory left
+    # over from a broken `git init` -- doesn't get treated as a repo; a
+    # worktree's `.git` is a *file* (a gitdir pointer), which `is_file()`
+    # covers without needing a nested HEAD.
+    git_marker = current / ".git"
+    if git_marker.is_file() or (git_marker / "HEAD").exists():
         return True
     if any(part in {".claude", "worktrees"} for part in current.parts):
         return False
@@ -4902,29 +4940,47 @@ def repo_scan(conn, repo_ref: str) -> dict:
     conn.execute("DELETE FROM repo_targets WHERE repo_path = ?", (repo["repo_path"],))
     conn.execute("DELETE FROM repo_artifacts WHERE repo_path = ?", (repo["repo_path"],))
     conn.execute("DELETE FROM repo_detection_sources WHERE repo_path = ?", (repo["repo_path"],))
+    detectors = {
+        "taskfile": _detect_from_taskfile,
+        "justfile": _detect_from_justfile,
+        "mise": _detect_from_mise,
+        "makefile": _detect_from_makefile,
+        "package_json": _detect_from_package_json,
+        "cargo_toml": _detect_from_cargo_toml,
+        "pyproject": _detect_from_pyproject,
+        "compose": _detect_from_compose,
+    }
+    skipped: list[dict] = []
     for kind, path in _manifest_candidates(repo_root):
-        if kind == "taskfile":
-            _detect_from_taskfile(conn, repo_root, path)
-        elif kind == "justfile":
-            _detect_from_justfile(conn, repo_root, path)
-        elif kind == "mise":
-            _detect_from_mise(conn, repo_root, path)
-        elif kind == "makefile":
-            _detect_from_makefile(conn, repo_root, path)
-        elif kind == "package_json":
-            _detect_from_package_json(conn, repo_root, path)
-        elif kind == "cargo_toml":
-            _detect_from_cargo_toml(conn, repo_root, path)
-        elif kind == "pyproject":
-            _detect_from_pyproject(conn, repo_root, path)
-        elif kind == "compose":
-            _detect_from_compose(conn, repo_root, path)
+        detect = detectors.get(kind)
+        if detect is None:
+            continue
+        try:
+            detect(conn, repo_root, path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError,
+                tomllib.TOMLDecodeError) as e:
+            # A single malformed/empty/unreadable manifest (real example:
+            # an empty package.json stub) must not abort scanning this
+            # repo's other manifests, let alone every other repo queued
+            # behind it in a workspace-wide `discover --scan` -- one bad
+            # file anywhere under the scanned root used to take down
+            # discovery for the whole workspace.
+            skipped.append({"kind": kind, "path": str(path), "error": str(e)})
+    if skipped:
+        record_event(
+            conn,
+            kind="repo.scan_warning",
+            summary=f"{repo['name']}: {len(skipped)} manifest(s) skipped (unreadable/malformed)",
+            repo_path=repo["repo_path"],
+            payload={"skipped": skipped},
+        )
     record_event(
         conn,
         kind="repo.scanned",
         summary=f"scanned repo {repo['name']}",
         repo_path=repo["repo_path"],
-        payload={"sources": len(_manifest_candidates(repo_root))},
+        payload={"sources": len(_manifest_candidates(repo_root)),
+                 "skipped": len(skipped)},
     )
     conn.commit()
     return repo_targets(conn, repo_ref)

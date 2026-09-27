@@ -2335,6 +2335,17 @@ def _hoist_global_flags(argv: list[str]) -> list[str]:
     broken for task list" and forced a fallback to ANSI-colored text
     grep. This is purely a UX repair: behavior is unchanged when the
     canonical position is used."""
+    # ``config workspace add`` has its own ``--db`` option.  Keep that
+    # occurrence with the subcommand instead of silently turning it into the
+    # top-level database override.
+    workspace_add = any(
+        argv[index:index + 3] == ["config", "workspace", "add"]
+        for index in range(max(0, len(argv) - 2))
+    )
+    flags_with_value = tuple(
+        flag for flag in _GLOBAL_FLAGS_WITH_VALUE
+        if not (workspace_add and flag == "--db")
+    )
     hoisted: list[str] = []
     remaining: list[str] = []
     i = 0
@@ -2344,11 +2355,11 @@ def _hoist_global_flags(argv: list[str]) -> list[str]:
             hoisted.append(tok)
             i += 1
             continue
-        if tok in _GLOBAL_FLAGS_WITH_VALUE and i + 1 < len(argv):
+        if tok in flags_with_value and i + 1 < len(argv):
             hoisted.extend(argv[i:i + 2])
             i += 2
             continue
-        for prefix in _GLOBAL_FLAGS_WITH_VALUE:
+        for prefix in flags_with_value:
             if tok.startswith(prefix + "="):
                 hoisted.append(tok)
                 i += 1
