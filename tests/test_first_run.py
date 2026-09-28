@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from _util import fresh_db  # noqa: F401  (sets FROG_HOME, sys.path)
 from ragbaz_frog import DEFAULT_DB_PATH, store
@@ -76,6 +77,67 @@ class FirstRun(unittest.TestCase):
             conn.close()
         paths = {Path(r["repo_path"]).name for r in found["repos"]}
         self.assertEqual(paths, {"flake-only", "python"})
+
+    def test_paths_follow_the_workspace_not_data_src(self):
+        self.add_workspace()
+        old = os.environ.pop("RAGBAZ_SRC_ROOT", None)
+        from ragbaz_frog import config as frog_config
+        real = frog_config.resolve_workspace
+        frog_config.resolve_workspace = lambda name, path=None: real(name, self.config)
+        try:
+            self.assertEqual(store.workspace_root(), self.root)
+            self.assertEqual(store.workspace_db(), self.db)
+            text = store.agent_instructions_text()
+            self.assertIn(str(self.root / "AGENTS.md"), text)
+            self.assertIn(self.db, text)
+            self.assertNotIn("/data/src", text + store._agent_md("a"))
+            os.environ["RAGBAZ_SRC_ROOT"] = str(self.tmp / "elsewhere")
+            self.assertEqual(store.workspace_root(), (self.tmp / "elsewhere").resolve())
+        finally:
+            frog_config.resolve_workspace = real
+            os.environ.pop("RAGBAZ_SRC_ROOT", None)
+            if old is not None:
+                os.environ["RAGBAZ_SRC_ROOT"] = old
+
+    def test_sync_defaults_follow_workspace_changes(self):
+        from ragbaz_frog import sync_watcher
+        for root in (self.root, self.tmp):
+            with patch.dict(os.environ, {"RAGBAZ_SRC_ROOT": str(root)}):
+                cfg = sync_watcher.load_config()
+                self.assertEqual(cfg.local_path, str(root))
+                self.assertEqual(sync_watcher.sync_config_path(), root / ".frog-sync.json")
+                self.assertEqual(cfg.remote_path, "/data/src")
+        first = sync_watcher.SyncConfig()
+        first.excludes.append("private/")
+        self.assertNotIn("private/", sync_watcher.SyncConfig().excludes)
+
+    def test_new_uses_explicit_config_workspace(self):
+        self.add_workspace()
+        code, _ = run("--config", self.config, "--json", "db", "migrate")
+        self.assertEqual(code, 0)
+        with patch.dict(os.environ):
+            os.environ.pop("RAGBAZ_SRC_ROOT", None)
+            code, output = run("--config", self.config, "--json", "new", "portable")
+        self.assertEqual(code, 0, output)
+        path = self.root / "experiments" / "portable"
+        self.assertTrue(path.is_dir())
+        self.assertIn(str(self.root), (path / "AGENTS.md").read_text())
+        self.assertIsNone(store._workspace_context.get())
+
+    def test_agent_setup_quotes_paths_with_spaces(self):
+        import shlex
+        import tomllib
+        path = '/tmp/a workspace/"quoted"/frog-mcp'
+        with patch.object(store, "_frog_mcp", return_value=path):
+            conn = store.connect(fresh_db())
+            try:
+                result = store.setup_agent(conn, "codex", target_dir=str(self.tmp))
+            finally:
+                conn.close()
+        self.assertEqual(tomllib.loads(result["codex_config_toml"])["mcp_servers"]["frog"]["command"], path)
+        with patch.object(store, "_frog_bin", return_value="/tmp/a workspace/frog"):
+            command = store._claude_settings_fragment()["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        self.assertEqual(shlex.split(command)[0], "/tmp/a workspace/frog")
 
 
 if __name__ == "__main__":

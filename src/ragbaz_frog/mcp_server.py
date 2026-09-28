@@ -316,11 +316,11 @@ def _default_db() -> str:
 
 
 def _src_root() -> str:
-    """The configured local workspace's root (for AGENTS.md), else /data/src."""
+    """The configured local workspace's root (for AGENTS.md)."""
     workspace = frog_config.resolve_workspace(None, _CONFIG_PATH)
     if workspace and workspace["host"].get("transport", "local") == "local":
         return workspace["root"]
-    return _SRC_ROOT
+    return str(store.workspace_root())
 
 
 def _workspace(name: str | None, config_path: str | None) -> dict | None:
@@ -349,7 +349,7 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
         if tool_name == "frog_repo_info":
             return store.repo_info(conn, arguments["repo_ref"])
         if tool_name == "frog_repo_discover":
-            root = arguments.get("root") or (workspace["root"] if workspace else "/data/src")
+            root = arguments.get("root") or (workspace["root"] if workspace else str(store.workspace_root()))
             return store.discover_repos(conn, root=root, scan=bool(arguments.get("scan", True)))
         if tool_name == "frog_repo_targets":
             return store.repo_targets(conn, arguments["repo_ref"])

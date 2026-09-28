@@ -5,7 +5,16 @@ from typing import Optional
 
 logger = logging.getLogger("frog.sync")
 
-SYNC_CONF_PATH = Path("/data/src") / ".frog-sync.json"
+def _local_root() -> str:
+    """This host's workspace root (see store.workspace_root)."""
+    from ragbaz_frog import store
+
+    return str(store.workspace_root())
+
+
+# The config lives in the local workspace; remote_path is the remote host's.
+def sync_config_path() -> Path:
+    return Path(_local_root()) / ".frog-sync.json"
 DEFAULT_EXCLUDES = [
     ".git/", "__pycache__/", ".ruff_cache/", ".pytest_cache/",
     "node_modules/", ".next/", "target/", "build/", "dist/",
@@ -18,24 +27,26 @@ class SyncConfig:
     enabled: bool = True
     remote_host: str = "konsonans"
     remote_path: str = "/data/src"
-    local_path: str = "/data/src"
-    excludes: list[str] = field(default_factory=lambda: DEFAULT_EXCLUDES)
+    local_path: str = field(default_factory=_local_root)
+    excludes: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDES))
     ssh_port: int = 22
     debounce_seconds: float = 1.0
     poll_interval: float = 5.0
     watch_subdirs: list[str] = field(default_factory=lambda: ["."])
 
 def load_config() -> SyncConfig:
-    if SYNC_CONF_PATH.exists():
-        data = json.loads(SYNC_CONF_PATH.read_text())
+    path = sync_config_path()
+    if path.exists():
+        data = json.loads(path.read_text())
         return SyncConfig(**{k: data[k] for k in SyncConfig.__dataclass_fields__ if k in data})
     return SyncConfig()
 
 def save_config(cfg: SyncConfig):
-    SYNC_CONF_PATH.write_text(json.dumps({
+    path = sync_config_path()
+    path.write_text(json.dumps({
         k: getattr(cfg, k) for k in SyncConfig.__dataclass_fields__
     }, indent=2))
-    logger.info("Config saved to %s", SYNC_CONF_PATH)
+    logger.info("Config saved to %s", path)
 
 
 class SyncEvent:
@@ -266,6 +277,6 @@ if __name__ == "__main__":
     cfg = load_config()
     if "--init" in sys.argv:
         save_config(cfg)
-        print(f"Config written to {SYNC_CONF_PATH}")
+        print(f"Config written to {sync_config_path()}")
     else:
         watch(cfg)

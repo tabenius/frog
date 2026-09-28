@@ -1696,7 +1696,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  frog completion fish --json | jq -r '.script'\n"
             "  frog mcp tools --json | jq '.tools[].name'\n"
             "  frog db migrate\n"
-            "  frog new my-new-idea            # defaults under /data/src/experiments\n"
+            "  frog new my-new-idea            # defaults under <workspace root>/experiments\n"
             "  frog new ~/sandbox/x            # explicit path"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
@@ -1738,7 +1738,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scaffold a new repo/draft path",
         description=(
             "Create a new repo/draft scaffold.\n"
-            "  frog new my-idea       # defaults under /data/src/experiments\n"
+            "  frog new my-idea       # defaults under <workspace root>/experiments\n"
             "  frog new ~/sandbox/x   # explicit path"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
@@ -1749,7 +1749,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_instructions = sub.add_parser(
         "agent-instructions",
-        help="Write a local AGENTS.md that tells agents to read /data/src/AGENTS.md",
+        help="Write a local AGENTS.md that tells agents to read the workspace AGENTS.md",
     )
     agent_instructions.add_argument("path", nargs="?", help="Repo directory or AGENTS.md path; defaults to cwd")
     agent_instructions.add_argument("--force", action="store_true", help="Overwrite an existing AGENTS.md")
@@ -2539,8 +2539,10 @@ def main(argv: list[str] | None = None) -> int:
         if configured and configured["host"].get("transport") == "local":
             args.db = configured["db"]
     conn = store.connect(args.db)
+    workspace_token = store._workspace_context.set(None)
     try:
         workspace = _workspace_for_args(args, conn)
+        store._workspace_context.set(workspace)
         if workspace and workspace["host"].get("transport") != "local":
             return _emit(_dispatch_workspace(workspace, argv), args.json)
         coordinator_workspace = _coordinator_workspace_for_write(args, workspace)
@@ -2765,7 +2767,7 @@ def main(argv: list[str] | None = None) -> int:
                     conn, args.old_path, args.new_path,
                     agent=store.current_agent()), args.json)
             if args.repo_command in {"discover", "sync"}:
-                root = args.root or (workspace["root"] if workspace else "/data/src")
+                root = args.root or (workspace["root"] if workspace else str(store.workspace_root()))
                 return _emit(store.discover_repos(conn, root=root, scan=not args.no_scan), args.json)
             if args.repo_command == "info":
                 return _emit(_run_repo_action(conn, args.repo_ref, args.repo_command, args), args.json)
@@ -3005,4 +3007,5 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return _emit({"ok": False, "error": "unsupported command"}, args.json)
     finally:
+        store._workspace_context.reset(workspace_token)
         conn.close()

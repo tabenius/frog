@@ -7,6 +7,7 @@ import time
 import os
 import re
 import shutil
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -15,8 +16,54 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from contextvars import ContextVar
 
+# The historical layout (the konsonans host). Use workspace_root(): the
+# configured workspace wins, and RAGBAZ_SRC_ROOT over both.
 WORKSPACE_ROOT = Path("/data/src")
+_workspace_context: ContextVar[dict | None] = ContextVar("frog_workspace", default=None)
+
+
+def workspace_root() -> Path:
+    """RAGBAZ_SRC_ROOT, else the configured local workspace's root, else /data/src."""
+    override = os.environ.get("RAGBAZ_SRC_ROOT")
+    if override:
+        return Path(override).expanduser().resolve()
+    try:
+        from ragbaz_frog import config as frog_config  # config imports store
+
+        workspace = _workspace_context.get() or frog_config.resolve_workspace(None, None)
+    except Exception:  # noqa: BLE001 -- an unreadable config must not break paths
+        workspace = None
+    if workspace and workspace["host"].get("transport", "local") == "local":
+        return Path(workspace["root"])
+    return WORKSPACE_ROOT
+
+
+def workspace_db() -> str:
+    """The configured local workspace's AGENTS.db, else <root>/AGENTS.db."""
+    try:
+        from ragbaz_frog import config as frog_config
+
+        workspace = _workspace_context.get() or frog_config.resolve_workspace(None, None)
+    except Exception:  # noqa: BLE001
+        workspace = None
+    if workspace and workspace["host"].get("transport", "local") == "local":
+        return workspace["db"]
+    return str(workspace_root() / "AGENTS.db")
+
+
+def _frog_home() -> Path:
+    """This Frog's checkout (bin/, hooks/): src/ragbaz_frog/store.py -> ../.."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _frog_bin() -> str:
+    return shutil.which("frog") or str(_frog_home() / "bin" / "frog")
+
+
+def _frog_mcp() -> str:
+    return shutil.which("frog-mcp") or str(_frog_home() / "bin" / "frog-mcp")
 DISCOVERY_MANIFESTS = (
     "Makefile",
     "package.json",
@@ -416,12 +463,10 @@ def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | 
     if any(sep in path_or_name for sep in ("/",)) or path_or_name.startswith(("~", ".")):
         repo_path = raw.resolve()
     else:
-        repo_path = (WORKSPACE_ROOT / "experiments" / path_or_name).resolve()
+        repo_path = (workspace_root() / "experiments" / path_or_name).resolve()
     repo_path.mkdir(parents=True, exist_ok=True)
-    agents_result = write_agent_instructions(conn, str(repo_path))
-    if not agents_result.get("ok", True):
-        return agents_result
-    agents_path = Path(agents_result["agents_path"])
+    # The instruction-written event references the repository via a foreign
+    # key, so the repository must exist before that event is recorded.
     repo = register_repo(
         conn,
         repo_path=str(repo_path),
@@ -431,6 +476,10 @@ def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | 
         third_party=False,
         notes=notes or "initialized by frog",
     )
+    agents_result = write_agent_instructions(conn, str(repo_path))
+    if not agents_result.get("ok", True):
+        return agents_result
+    agents_path = Path(agents_result["agents_path"])
     record_event(
         conn,
         kind="repo.initialized",
@@ -443,24 +492,20 @@ def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | 
 
 
 def agent_instructions_text() -> str:
-    return """# Local AGENTS.md
+    return f"""# Local AGENTS.md
 
-Read `/data/src/AGENTS.md` before starting work in this repo.
+Read `{workspace_root() / "AGENTS.md"}` before starting work in this repo.
 
 Use the shared coordination system:
-- CLI: `/data/src/ragbaz-frog/bin/frog`
-- DB: `/data/src/AGENTS.db`
+- CLI: `{_frog_bin()}`
+- DB: `{workspace_db()}`
 """
-
-
-_FROG_BIN = "/data/src/ragbaz-frog/bin/frog"
-_FROG_MCP = "/data/src/ragbaz-frog/bin/frog-mcp"
 
 
 def _agent_md(agent: str) -> str:
     return f"""# Agent instructions ({agent})
 
-This tree is coordinated by **frog** (`{_FROG_BIN}`, DB `/data/src/AGENTS.db`).
+This tree is coordinated by **frog** (`{_frog_bin()}`, DB `{workspace_db()}`).
 
 Before editing:
 - `frog board` -- see lifecycle + what's blocked on what
@@ -481,18 +526,18 @@ def _claude_settings_fragment() -> dict:
             "PreToolUse": [{
                 "matcher": "Edit|Write",
                 "hooks": [{"type": "command",
-                           "command": "/data/src/ragbaz-frog/hooks/pretooluse-lock-guard.sh"}],
+                           "command": shlex.quote(str(_frog_home() / "hooks" / "pretooluse-lock-guard.sh"))}],
             }],
             "SessionStart": [{
                 "hooks": [{"type": "command",
-                           "command": f"{_FROG_BIN} board --once; {_FROG_BIN} task next --agent ${{FROG_AGENT:-$USER}}"}],
+                           "command": f'{shlex.quote(_frog_bin())} board --once; {shlex.quote(_frog_bin())} task next --agent "${{FROG_AGENT:-$USER}}"'}],
             }],
         }
     }
 
 
 def _mcp_json_fragment() -> dict:
-    return {"mcpServers": {"frog": {"command": _FROG_MCP, "args": []}}}
+    return {"mcpServers": {"frog": {"command": _frog_mcp(), "args": []}}}
 
 
 def _merge_hooks(existing: dict, frag: dict) -> dict:
@@ -567,7 +612,7 @@ def setup_agent(conn, agent: str, *, target_dir: str | None,
         # to add by hand (we never edit a user's global ~/.codex/config.toml).
         toml_block = (
             "[mcp_servers.frog]\n"
-            f'command = "{_FROG_MCP}"\n'
+            f'command = {json.dumps(_frog_mcp())}\n'
             "args = []\n"
         )
         extra = {"codex_config_toml": toml_block,
@@ -1150,7 +1195,7 @@ def _unique_repo_name(conn, *, repo_path: str, preferred_name: str) -> str:
         return preferred_name
     repo = Path(repo_path)
     try:
-        relative = repo.relative_to(WORKSPACE_ROOT)
+        relative = repo.relative_to(workspace_root())
         candidate = relative.as_posix().replace("/", ":")
     except ValueError:
         candidate = repo.as_posix().replace("/", ":").lstrip(":")
@@ -1224,7 +1269,7 @@ def path_activity(path: str) -> dict:
 def path_metadata(path: str) -> dict:
     resolved = Path(path).resolve()
     try:
-        relative = resolved.relative_to(WORKSPACE_ROOT)
+        relative = resolved.relative_to(workspace_root())
         parts = relative.parts
     except ValueError:
         parts = resolved.parts
@@ -1698,7 +1743,7 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
         }
     if as_path.is_absolute():
         return None
-    workspace = WORKSPACE_ROOT
+    workspace = workspace_root()
     matches = []
     for candidate in workspace.rglob(repo_ref):
         if candidate.is_dir():
@@ -1777,7 +1822,7 @@ def infer_repo_from_cwd(conn, cwd: str | None = None) -> dict | None:
         except ValueError:
             continue
 
-    workspace = WORKSPACE_ROOT.resolve()
+    workspace = workspace_root().resolve()
     try:
         cwd_path.relative_to(workspace)
     except ValueError:
@@ -1869,8 +1914,8 @@ def _looks_like_repo_boundary(root_path: Path, current: Path, dirnames: list[str
     return len(relative_to_anchor.parts) <= max_depth
 
 
-def discover_repos(conn, *, root: str = str(WORKSPACE_ROOT), scan: bool = True) -> dict:
-    root_path = Path(root).expanduser().resolve()
+def discover_repos(conn, *, root: str | None = None, scan: bool = True) -> dict:
+    root_path = Path(root or workspace_root()).expanduser().resolve()
     discovered: list[dict] = []
     seen: set[str] = set()
     scanned = 0

@@ -10,6 +10,12 @@ STATE_PATH = CONFIG_DIR / "gateway.state"
 
 PID_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+def _local_root() -> str:
+    from ragbaz_frog import store
+
+    return str(store.workspace_root())
+
+
 DEFAULT_CONFIG = {
     "proxy_enabled": True,
     "proxy_bind": "100.102.135.43",
@@ -17,7 +23,8 @@ DEFAULT_CONFIG = {
     "proxy_target": "100.92.101.49",
     "proxy_target_port": 8976,
     "watch_enabled": True,
-    "watch_path": "/data/src",
+    # Local side follows this host's workspace; the remote path is the remote's.
+    "watch_path": _local_root(),
     "watch_remote_host": "konsonans",
     "watch_remote_path": "/data/src",
     "watch_ssh_port": 22,
@@ -34,12 +41,13 @@ CONFIG_PATH = CONFIG_DIR / "gateway.json"
 
 
 def load_config():
+    defaults = dict(DEFAULT_CONFIG, watch_path=_local_root())
     if CONFIG_PATH.exists():
         data = json.loads(CONFIG_PATH.read_text())
-        merged = dict(DEFAULT_CONFIG)
+        merged = defaults
         merged.update(data)
         return merged
-    return dict(DEFAULT_CONFIG)
+    return defaults
 
 
 def save_config(cfg: dict):
