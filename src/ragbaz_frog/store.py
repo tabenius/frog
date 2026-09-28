@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import glob
 import json
 import time
@@ -12,6 +13,7 @@ import socket
 import sqlite3
 import subprocess
 import tomllib
+import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -324,6 +326,196 @@ def record_event(
     )
 
 
+MAX_INTENTS_PER_WINDOW = 600
+MAX_INTENTS_PER_ACTOR = 60
+MAX_INTENT_PAYLOAD_BYTES = 4096
+_nostoi_reference = None
+
+
+class IntentRateLimited(RuntimeError):
+    """Action refused before execution because the audit admission budget is full."""
+
+
+def _load_nostoi_reference():
+    global _nostoi_reference
+    if _nostoi_reference is not None:
+        return _nostoi_reference
+    configured = os.environ.get("FROG_NOSTOI_PYTHON")
+    candidates = [Path(configured).expanduser()] if configured else []
+    candidates.extend([
+        Path(__file__).resolve().parents[3] / "nostoi" / "contrib" / "python" / "nostoi.py",
+        workspace_root() / "nostoi" / "contrib" / "python" / "nostoi.py",
+    ])
+    source = next((p.resolve() for p in candidates if p.is_file()), None)
+    if source is None:
+        raise RuntimeError(
+            "Nostoi's stdlib reference is unavailable; set FROG_NOSTOI_PYTHON "
+            "to nostoi/contrib/python/nostoi.py"
+        )
+    spec = importlib.util.spec_from_file_location("frog_nostoi_reference", source)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load Nostoi's Python reference from {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _nostoi_reference = module
+    return module
+
+
+def _append_nostoi_intent(db_path: str, *, kind: str, actor: str,
+                          subject: str, summary: str, payload: dict) -> None:
+    reference = _load_nostoi_reference()
+    ledger_path = os.environ.get("FROG_NOSTOI_LEDGER", db_path + ".frog-intents.jsonl")
+    reference.append(
+        ledger_path,
+        kind=kind,
+        actor=actor,
+        subject=subject,
+        at=utc_now_iso(),
+        body={"intent_id": subject, "summary": summary[:256], "payload": payload},
+    )
+
+
+def record_intent(conn, *, kind: str, summary: str, payload: dict) -> str:
+    """Durably audit an action request before performing its side effect.
+
+    Uses a separate FULL-sync transaction so caller rollback cannot erase the
+    intent. Pre-action rows carry resource identifiers in payload, never FK
+    columns for resources which may not exist yet. Per-minute limits bound
+    writes; the first rejected burst gets one compact audit event, and further
+    denied requests do no database writes in that window.
+    """
+    payload_json = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"))
+    if len(payload_json.encode("utf-8")) > MAX_INTENT_PAYLOAD_BYTES:
+        raise ValueError("intent payload exceeds the 4096-byte audit limit")
+    actor = current_agent() or "unknown"
+    if len(actor.encode("utf-8")) > 128:
+        actor = "sha256:" + hashlib.sha256(actor.encode()).hexdigest()
+    db_path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    if not db_path:
+        raise sqlite3.OperationalError("cannot durably record action intent for an in-memory database")
+    minute = int(time.time() // 60)
+    intent_id = uuid.uuid4().hex
+    audit = sqlite3.connect(db_path, timeout=5.0)
+    try:
+        audit.row_factory = sqlite3.Row
+        audit.execute("PRAGMA foreign_keys = ON")
+        audit.execute("PRAGMA busy_timeout = 5000")
+        audit.execute("PRAGMA synchronous = FULL")
+        # Fast read-only rejection path: after a window is marked saturated,
+        # a flood does not repeatedly acquire SQLite's writer reservation.
+        fast_global = audit.execute(
+            "SELECT accepted FROM audit_intent_windows WHERE window_minute=? AND actor='@global'",
+            (minute,),
+        ).fetchone()
+        if fast_global and int(fast_global[0]) >= MAX_INTENTS_PER_WINDOW:
+            if audit.execute(
+                "SELECT 1 FROM audit_intent_windows WHERE window_minute=? AND actor='@limited:global'",
+                (minute,),
+            ).fetchone():
+                raise IntentRateLimited("workspace audit intent rate limit reached; action refused")
+        fast_actor = audit.execute(
+            "SELECT accepted FROM audit_intent_windows WHERE window_minute=? AND actor=?",
+            (minute, actor),
+        ).fetchone()
+        limited_actor = "@limited:" + hashlib.sha256(actor.encode()).hexdigest()[:32]
+        if fast_actor and int(fast_actor[0]) >= MAX_INTENTS_PER_ACTOR and audit.execute(
+            "SELECT 1 FROM audit_intent_windows WHERE window_minute=? AND actor=?",
+            (minute, limited_actor),
+        ).fetchone():
+            raise IntentRateLimited("actor audit intent rate limit reached; action refused")
+
+        audit.execute("BEGIN IMMEDIATE")
+
+        global_row = audit.execute(
+            "SELECT accepted FROM audit_intent_windows WHERE window_minute=? AND actor='@global'",
+            (minute,),
+        ).fetchone()
+        if global_row is None:
+            audit.execute("DELETE FROM audit_intent_windows WHERE window_minute < ?", (minute,))
+            global_count = 0
+        else:
+            global_count = int(global_row[0])
+
+        if global_count >= MAX_INTENTS_PER_WINDOW:
+            summary_actor = "@limited:global"
+            seen = audit.execute(
+                "SELECT 1 FROM audit_intent_windows WHERE window_minute=? AND actor=?",
+                (minute, summary_actor),
+            ).fetchone()
+            if not seen:
+                record_event(audit, kind="audit.intent_rate_limited",
+                             summary="global per-minute audit intent limit reached",
+                             actor="frog", payload={"window_minute": minute, "scope": "global"})
+                _append_nostoi_intent(
+                    db_path, kind="audit.intent_rate_limited", actor="frog",
+                    subject=uuid.uuid4().hex, summary="global per-minute audit intent limit reached",
+                    payload={"window_minute": minute, "scope": "global"},
+                )
+                audit.execute("INSERT INTO audit_intent_windows VALUES(?,?,?)",
+                              (minute, summary_actor, 1))
+                audit.commit()
+            else:
+                audit.rollback()
+            raise IntentRateLimited("workspace audit intent rate limit reached; action refused")
+
+        actor_row = audit.execute(
+            "SELECT accepted FROM audit_intent_windows WHERE window_minute=? AND actor=?",
+            (minute, actor),
+        ).fetchone()
+        actor_count = int(actor_row[0]) if actor_row else 0
+        if actor_count >= MAX_INTENTS_PER_ACTOR:
+            summary_actor = "@limited:" + hashlib.sha256(actor.encode()).hexdigest()[:32]
+            seen = audit.execute(
+                "SELECT 1 FROM audit_intent_windows WHERE window_minute=? AND actor=?",
+                (minute, summary_actor),
+            ).fetchone()
+            if not seen:
+                record_event(audit, kind="audit.intent_rate_limited",
+                             summary="per-actor audit intent limit reached",
+                             actor="frog", payload={"window_minute": minute,
+                                                     "actor_sha256": hashlib.sha256(actor.encode()).hexdigest()})
+                _append_nostoi_intent(
+                    db_path, kind="audit.intent_rate_limited", actor="frog",
+                    subject=uuid.uuid4().hex, summary="per-actor audit intent limit reached",
+                    payload={"window_minute": minute,
+                             "actor_sha256": hashlib.sha256(actor.encode()).hexdigest()},
+                )
+                audit.execute("INSERT INTO audit_intent_windows VALUES(?,?,?)",
+                              (minute, summary_actor, 1))
+                audit.commit()
+            else:
+                audit.rollback()
+            raise IntentRateLimited("actor audit intent rate limit reached; action refused")
+
+        chained_payload = dict(payload or {})
+        chained_payload["intent_id"] = intent_id
+        record_event(audit, kind=kind, summary=summary[:256], actor=actor, payload=chained_payload)
+        if actor_row:
+            audit.execute("UPDATE audit_intent_windows SET accepted=accepted+1 WHERE window_minute=? AND actor=?",
+                          (minute, actor))
+        else:
+            audit.execute("INSERT INTO audit_intent_windows VALUES(?,?,1)", (minute, actor))
+        if global_row:
+            audit.execute("UPDATE audit_intent_windows SET accepted=accepted+1 WHERE window_minute=? AND actor='@global'",
+                          (minute,))
+        else:
+            audit.execute("INSERT INTO audit_intent_windows VALUES(?,'@global',1)", (minute,))
+        # Append to Nostoi before committing/passing control to the action.
+        # If SQLite later fails, the chain still proves the attempted action.
+        _append_nostoi_intent(
+            db_path, kind=kind, actor=actor, subject=intent_id,
+            summary=summary[:256], payload=payload or {},
+        )
+        audit.commit()
+        return intent_id
+    except Exception:
+        if audit.in_transaction:
+            audit.rollback()
+        raise
+    finally:
+        audit.close()
+
+
 def _split_sql(text: str) -> list[str]:
     """Split a migration into individual statements. Handles `--` line
     comments and single-quoted strings (incl. '' escapes) so a `;` in a
@@ -464,9 +656,13 @@ def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | 
         repo_path = raw.resolve()
     else:
         repo_path = (workspace_root() / "experiments" / path_or_name).resolve()
+    intent_id = record_intent(
+        conn, kind="repo.initialization.requested",
+        summary=f"requested repository initialization at {repo_path}",
+        payload={"repo_path": str(repo_path), "name": repo_path.name,
+                 "kind": kind or "embryo"},
+    )
     repo_path.mkdir(parents=True, exist_ok=True)
-    # The instruction-written event references the repository via a foreign
-    # key, so the repository must exist before that event is recorded.
     repo = register_repo(
         conn,
         repo_path=str(repo_path),
@@ -485,7 +681,7 @@ def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | 
         kind="repo.initialized",
         summary=f"initialized repo {repo_path.name}",
         repo_path=str(repo_path),
-        payload={"agents_path": str(agents_path)},
+        payload={"agents_path": str(agents_path), "intent_id": intent_id},
     )
     conn.commit()
     return {"ok": True, "message": f"initialized {repo_path}", "repo": repo["repo"], "agents_path": str(agents_path)}
@@ -629,12 +825,16 @@ def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = Fal
         raw = Path.cwd()
     if raw.suffix.lower() == ".md":
         target = raw.resolve()
-        target.parent.mkdir(parents=True, exist_ok=True)
     else:
         target = raw.resolve() / "AGENTS.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and not force:
         return {"ok": False, "error": f"refusing to overwrite existing file: {target}"}
+    intent_id = record_intent(
+        conn, kind="agents.instructions.write.requested",
+        summary=f"requested agent-instruction write to {target}",
+        payload={"agents_path": str(target), "force": bool(force)},
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(agent_instructions_text(), encoding="utf-8")
     repo = resolve_repo(conn, str(target.parent))
     record_event(
@@ -642,7 +842,7 @@ def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = Fal
         kind="agents.instructions.written",
         summary=f"wrote agent instructions to {target}",
         repo_path=repo["repo_path"] if repo else None,
-        payload={"agents_path": str(target)},
+        payload={"agents_path": str(target), "intent_id": intent_id},
     )
     conn.commit()
     return {"ok": True, "message": f"wrote {target}", "agents_path": str(target)}
@@ -1160,6 +1360,12 @@ def register_repo(
     repo_path = str(Path(repo_path).expanduser().resolve())
     preferred_name = name or Path(repo_path).name
     name = _unique_repo_name(conn, repo_path=repo_path, preferred_name=preferred_name)
+    intent_id = record_intent(
+        conn, kind="repo.registration.requested",
+        summary=f"requested repo registration for {name}",
+        payload={"repo_path": repo_path, "name": name, "kind": kind,
+                 "status": status, "third_party": bool(third_party)},
+    )
     conn.execute(
         """
         INSERT INTO repos(repo_path, name, kind, status, third_party, notes, created_at, updated_at)
@@ -1179,7 +1385,8 @@ def register_repo(
         kind="repo.upserted",
         summary=f"registered repo {name}",
         repo_path=repo_path,
-        payload={"name": name, "kind": kind, "status": status},
+        payload={"name": name, "kind": kind, "status": status,
+                 "intent_id": intent_id},
     )
     conn.commit()
     try:

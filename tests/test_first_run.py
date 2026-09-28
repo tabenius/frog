@@ -124,6 +124,77 @@ class FirstRun(unittest.TestCase):
         self.assertIn(str(self.root), (path / "AGENTS.md").read_text())
         self.assertIsNone(store._workspace_context.get())
 
+    def test_repo_intent_is_durable_before_filesystem_action(self):
+        store.migrate(self.db)
+        conn = store.connect(self.db)
+        try:
+            real_mkdir = Path.mkdir
+            target = self.root / "never-created"
+            def fail_target(path, *args, **kwargs):
+                if path == target:
+                    raise OSError("simulated disk failure")
+                return real_mkdir(path, *args, **kwargs)
+            with patch.object(Path, "mkdir", new=fail_target):
+                with self.assertRaisesRegex(OSError, "simulated disk failure"):
+                    store.init_repo(conn, str(target))
+            conn.rollback()
+            audit = store.connect(self.db)
+            try:
+                row = audit.execute(
+                    "SELECT kind, repo_path, payload_json FROM event_log "
+                    "WHERE kind='repo.initialization.requested' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                self.assertIsNotNone(row)
+                self.assertIsNone(row["repo_path"], "pre-create intent must not use the repo FK")
+                self.assertEqual(json.loads(row["payload_json"])["repo_path"],
+                                 str(target))
+                self.assertFalse(target.exists())
+                chain = store._load_nostoi_reference().verify(self.db + ".frog-intents.jsonl")
+                self.assertTrue(chain["ok"], chain["problem"])
+                self.assertEqual(chain["verified"], 1)
+            finally:
+                audit.close()
+        finally:
+            conn.close()
+
+    def test_intent_rate_limit_coalesces_rejected_flood(self):
+        store.migrate(self.db)
+        conn = store.connect(self.db)
+        try:
+            with patch.object(store, "MAX_INTENTS_PER_WINDOW", 2), \
+                 patch.object(store, "MAX_INTENTS_PER_ACTOR", 10):
+                store.record_intent(conn, kind="test.intent", summary="first", payload={})
+                store.record_intent(conn, kind="test.intent", summary="second", payload={})
+                with self.assertRaises(store.IntentRateLimited):
+                    store.record_intent(conn, kind="test.intent", summary="third", payload={})
+                before = conn.execute(
+                    "SELECT COUNT(*) FROM event_log WHERE kind='audit.intent_rate_limited'"
+                ).fetchone()[0]
+                with self.assertRaises(store.IntentRateLimited):
+                    store.record_intent(conn, kind="test.intent", summary="fourth", payload={})
+                after = conn.execute(
+                    "SELECT COUNT(*) FROM event_log WHERE kind='audit.intent_rate_limited'"
+                ).fetchone()[0]
+                self.assertEqual((before, after), (1, 1))
+                chain = store._load_nostoi_reference().verify(self.db + ".frog-intents.jsonl")
+                self.assertTrue(chain["ok"], chain["problem"])
+                self.assertEqual(chain["verified"], 3)
+        finally:
+            conn.close()
+
+    def test_oversized_intent_is_rejected_before_any_action(self):
+        store.migrate(self.db)
+        conn = store.connect(self.db)
+        try:
+            with self.assertRaisesRegex(ValueError, "4096-byte"):
+                store.record_intent(conn, kind="test.intent", summary="large",
+                                    payload={"data": "x" * 5000})
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM event_log WHERE kind='test.intent'"
+            ).fetchone()[0], 0)
+        finally:
+            conn.close()
+
     def test_agent_setup_quotes_paths_with_spaces(self):
         import shlex
         import tomllib
