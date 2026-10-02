@@ -14,6 +14,9 @@ from __future__ import annotations
 import os
 
 from ragbaz_frog import store
+from ragbaz_frog.runtime_status import runtime_lines
+
+_RUNTIME_BINDING = ("x", "runtime / URLs / signing")
 
 _COLS = [("idea", "IDEA"), ("blocked", "BLOCKED"),
          ("in_progress", "IN PROGRESS"), ("done", "DONE")]
@@ -401,6 +404,7 @@ def help_overlay_lines(sort_label: str) -> list[str]:
         "f           finish selected task",
         "n           jump to scheduler's next pick",
         "r           force refresh   q  quit",
+        f"{_RUNTIME_BINDING[0]}           {_RUNTIME_BINDING[1]}",
     ]
     inner = max(len(line) for line in content) + 4
     width = inner + 2
@@ -458,6 +462,8 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
         last_fp = None
         status = "claimed nothing yet"
         show_help = False
+        runtime = runtime_lines()
+        runtime_offset = 0
 
         while True:
             fp = _db_fingerprint(db_path)
@@ -480,7 +486,12 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                 put(1 + i, 2, ln, C(_FROG_C))
             top = 1 + len(_FROG_ART) + 1
 
-            if view == "board":
+            if view == "runtime":
+                put(top, 1, "RUNTIME / URLS / HUMAN WORKFLOWS", maxw=max(1, w - 2))
+                for i, line in enumerate(runtime[runtime_offset:runtime_offset + max(0, h - top - 3)]):
+                    put(top + 1 + i, 1, line, maxw=max(1, w - 2))
+                put(h - 1, 1, f"{_RUNTIME_BINDING[0]} back  up/down scroll  r refresh  q quit", maxw=max(1, w - 2))
+            elif view == "board":
                 # ---- columns ----
                 ncol = len(_COLS)
                 colw = max(16, w // ncol)
@@ -547,7 +558,7 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                         C(_DIM))
                 hint = ("?: help  " if not show_help else "")
                 put(h - 1, 1,
-                    f"{hint}q quit  ←/→ col  ↑/↓ task  s sort  S dir  c claim  e edit  f finish  n next  r refresh   | {status}"[: w - 2],
+                    f"{hint}{_RUNTIME_BINDING[0]} runtime  q quit  ←/→ col  ↑/↓ task  s sort  S dir  c claim  e edit  f finish  n next  r refresh   | {status}"[: w - 2],
                     C(_DIM))
                 if show_help:
                     lines = help_overlay_lines(st.sort_label())
@@ -610,6 +621,19 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
             c = chr(ch) if 0 <= ch < 256 else ""
             if c in ("q", "Q") or ch == 3:  # 3 = Ctrl-C (ETX)
                 return 0
+            if c == _RUNTIME_BINDING[0]:
+                view = "board" if view == "runtime" else "runtime"
+                runtime = runtime_lines()
+                runtime_offset = 0
+                continue
+            if view == "runtime":
+                if c == "r":
+                    runtime = runtime_lines()
+                elif ch == curses.KEY_DOWN:
+                    runtime_offset = min(max(0, len(runtime) - 1), runtime_offset + 1)
+                elif ch == curses.KEY_UP:
+                    runtime_offset = max(0, runtime_offset - 1)
+                continue
             if c in ("v", "V"):
                 view = "repos" if view == "board" else "board"
                 continue

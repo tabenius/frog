@@ -1,9 +1,15 @@
 import tempfile, unittest
 from pathlib import Path
+import subprocess
 from ragbaz_frog import store
 
 
 class Splice(unittest.TestCase):
+    def _run_frog(self, args: list[str], env=None) -> subprocess.CompletedProcess:
+        """Run frog command via installed entrypoint."""
+        cmd = ["frog"] + args
+        return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
     def test_appends_when_absent(self):
         out = store.splice_marked_section("# Doc\n\nIntro.\n", "todo",
                                           "- [ ] a")
@@ -40,24 +46,17 @@ class Splice(unittest.TestCase):
             out, "<!-- frog:todo -->\n- [ ] z\n<!-- /frog:todo -->\n")
 
     def test_cli_into_roundtrip(self):
-        import subprocess, json
         d = tempfile.mkdtemp(); doc = Path(d) / "document_foo.md"
         doc.write_text("# Plan\n\nNotes here.\n")
         db = Path(d) / "AGENTS.db"
-        subprocess.run(["python3", "bin/frog", "--db", str(db),
-                        "db", "migrate"], capture_output=True)
-        subprocess.run(["python3", "bin/frog", "--db", str(db),
-                        "task", "create", "--slug", "x", "--title", "X"],
-                       capture_output=True)
-        r = subprocess.run(["python3", "bin/frog", "--db", str(db),
-                             "export", "todo", "--into", str(doc)],
-                            capture_output=True, text=True)
+        self._run_frog(["--db", str(db), "db", "migrate"])
+        self._run_frog(["--db", str(db), "task", "create", "--slug", "x", "--title", "X"])
+        r = self._run_frog(["--db", str(db), "export", "todo", "--into", str(doc)])
         self.assertIn("frog:todo", r.stdout)
         txt = doc.read_text()
         self.assertTrue(txt.startswith("# Plan\n\nNotes here.\n"))
         self.assertIn("<!-- frog:todo -->", txt)
         self.assertIn("- [ ] x", txt)
-
 
     # ---- splice_heading_section (--section) ----
     def test_heading_replaces_under_existing_section(self):
@@ -105,20 +104,16 @@ class Splice(unittest.TestCase):
         self.assertIn("- [ ] a", out)
 
     def test_cli_section_roundtrip(self):
-        import subprocess, tempfile
         d = tempfile.mkdtemp(); doc = Path(d) / "doc.md"
         doc.write_text("# Plan\n\n## TODO\n\nplaceholder\n\n"
                        "## Done\n\nshipped\n")
         db = Path(d) / "AGENTS.db"
-        subprocess.run(["python3", "bin/frog", "--db", str(db),
-                        "db", "migrate"], capture_output=True)
-        subprocess.run(["python3", "bin/frog", "--db", str(db), "task",
-                        "create", "--slug", "s1", "--title", "S1"],
-                       capture_output=True)
-        r = subprocess.run(["python3", "bin/frog", "--db", str(db),
+        self._run_frog(["--db", str(db), "db", "migrate"])
+        self._run_frog(["--db", str(db), "task",
+                        "create", "--slug", "s1", "--title", "S1"])
+        r = self._run_frog(["--db", str(db),
                              "export", "todo", "--into", str(doc),
-                             "--section", "TODO"],
-                            capture_output=True, text=True)
+                             "--section", "TODO"])
         self.assertIn('"TODO" section', r.stdout)
         txt = doc.read_text()
         self.assertNotIn("placeholder", txt)
@@ -127,13 +122,10 @@ class Splice(unittest.TestCase):
         self.assertIn("shipped", txt)
 
     def test_cli_section_requires_into(self):
-        import subprocess, tempfile
         d = tempfile.mkdtemp(); db = Path(d) / "AGENTS.db"
-        subprocess.run(["python3", "bin/frog", "--db", str(db),
-                        "db", "migrate"], capture_output=True)
-        r = subprocess.run(["python3", "bin/frog", "--db", str(db),
-                             "export", "todo", "--section", "TODO"],
-                            capture_output=True, text=True)
+        self._run_frog(["--db", str(db), "db", "migrate"])
+        r = self._run_frog(["--db", str(db),
+                             "export", "todo", "--section", "TODO"])
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--section requires --into", r.stdout + r.stderr)
 

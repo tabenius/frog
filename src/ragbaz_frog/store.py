@@ -19,6 +19,41 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextvars import ContextVar
+from typing import Optional
+
+# VFS integration
+from .vfs_store import (
+    get_workspace_vfs,
+    vfs_workspace_root,
+    vfs_db_path,
+    vfs_frog_home,
+    vfs_migration_dir,
+    vfs_exists,
+    vfs_is_file,
+    vfs_is_dir,
+    vfs_stat,
+    vfs_read_text,
+    vfs_read_bytes,
+    vfs_write_text,
+    vfs_write_bytes,
+    vfs_mkdir,
+    vfs_unlink,
+    vfs_rename,
+    vfs_listdir,
+    vfs_walk,
+    vfs_glob,
+    vfs_open,
+    vfs_resolve,
+    vfs_expanduser,
+    vfs_parent,
+    vfs_name,
+    vfs_join,
+    vfs_relative_to,
+    vfs_from_local_path,
+    vfs_connect,
+    _is_path_under_vfs_root,
+)
+from .vfs import LocalVFS, current_vfs, set_vfs
 
 # The historical layout (the konsonans host). Use workspace_root(): the
 # configured workspace wins, and RAGBAZ_SRC_ROOT over both.
@@ -42,6 +77,11 @@ def workspace_root() -> Path:
     return WORKSPACE_ROOT
 
 
+def workspace_root_vfs() -> str:
+    """Get workspace root as VFS path (always '/')."""
+    return "/"
+
+
 def workspace_db() -> str:
     """The configured local workspace's AGENTS.db, else <root>/AGENTS.db."""
     try:
@@ -55,9 +95,19 @@ def workspace_db() -> str:
     return str(workspace_root() / "AGENTS.db")
 
 
+def workspace_db_vfs() -> str:
+    """Get database path as VFS path."""
+    return vfs_db_path()
+
+
 def _frog_home() -> Path:
     """This Frog's checkout (bin/, hooks/): src/ragbaz_frog/store.py -> ../.."""
     return Path(__file__).resolve().parents[2]
+
+
+def _frog_home_vfs() -> str:
+    """Get frog home as VFS path."""
+    return vfs_frog_home()
 
 
 def _frog_bin() -> str:
@@ -175,6 +225,18 @@ def _guard_local_db(path: Path) -> None:
 
 
 def connect(db_path: str) -> sqlite3.Connection:
+    """Connect to SQLite database using VFS-aware connection.
+
+    The local-database guard still applies: routing through the VFS must not
+    become a way to open a SQLite database on a network filesystem, which is
+    what the guard exists to prevent.
+    """
+    _guard_local_db(Path(db_path))
+    return vfs_connect(db_path)
+
+
+def connect_local(db_path: str) -> sqlite3.Connection:
+    """Connect to local SQLite database directly (backward compatibility)."""
     path = Path(db_path)
     _guard_local_db(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,7 +254,7 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 def migration_dir() -> Path:
-    return Path(__file__).resolve().parent / "migrations"
+    return Path(vfs_migration_dir())
 
 
 def dicts(rows) -> list[dict]:
@@ -565,7 +627,8 @@ def _migrate_once(db_path: str) -> dict:
     conn.isolation_level = None  # explicit transaction control
     try:
         newly_applied = []
-        for sql_file in sorted(migration_dir().glob("*.sql")):
+        mig_dir = migration_dir()
+        for sql_file in sorted(mig_dir.glob("*.sql")):
             # BEGIN IMMEDIATE serializes concurrent migrators (the whole
             # premise is many agents) and is re-checked inside the lock,
             # so a parallel `db migrate` cannot double-apply. The apply +
@@ -584,7 +647,8 @@ def _migrate_once(db_path: str) -> dict:
                 if sql_file.name in applied:
                     conn.execute("ROLLBACK")
                     continue
-                for stmt in _split_sql(sql_file.read_text()):
+                sql_content = sql_file.read_text()
+                for stmt in _split_sql(sql_content):
                     conn.execute(stmt)
                 conn.execute(
                     "INSERT OR REPLACE INTO schema_migrations"
@@ -651,40 +715,62 @@ def migrate(db_path: str, *, attempts: int = 12) -> dict:
 
 
 def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | None = None) -> dict:
-    raw = Path(path_or_name).expanduser()
-    if any(sep in path_or_name for sep in ("/",)) or path_or_name.startswith(("~", ".")):
-        repo_path = raw.resolve()
+    vfs = current_vfs()
+    raw_path = vfs_expanduser(path_or_name, vfs)
+
+    # Check if absolute path is outside VFS root (for LocalVFS)
+    is_absolute_outside_root = False
+    if isinstance(vfs, LocalVFS) and os.path.isabs(raw_path):
+        try:
+            Path(raw_path).relative_to(vfs._root)
+        except ValueError:
+            is_absolute_outside_root = True
+
+    if is_absolute_outside_root:
+        # Absolute path outside VFS root - use directly without VFS conversion
+        repo_path_vfs = raw_path  # Keep as absolute path for display
+        repo_path_local = raw_path
+    elif any(sep in path_or_name for sep in ("/",)) or path_or_name.startswith(("~", ".")):
+        repo_path_vfs = vfs_resolve(raw_path, vfs)
+        repo_path_local = _vfs_to_local_path(repo_path_vfs, vfs)
     else:
-        repo_path = (workspace_root() / "experiments" / path_or_name).resolve()
+        repo_path_vfs = vfs_join(vfs_workspace_root(vfs), "experiments", path_or_name, vfs=vfs)
+        repo_path_local = _vfs_to_local_path(repo_path_vfs, vfs)
+
     intent_id = record_intent(
         conn, kind="repo.initialization.requested",
-        summary=f"requested repository initialization at {repo_path}",
-        payload={"repo_path": str(repo_path), "name": repo_path.name,
+        summary=f"requested repository initialization at {repo_path_local}",
+        payload={"repo_path": repo_path_local, "name": vfs_name(repo_path_vfs, vfs) if not is_absolute_outside_root else Path(repo_path_local).name,
                  "kind": kind or "embryo"},
     )
-    repo_path.mkdir(parents=True, exist_ok=True)
+    # For paths outside VFS root, use local mkdir directly
+    if is_absolute_outside_root:
+        Path(repo_path_local).mkdir(parents=True, exist_ok=True)
+    else:
+        vfs_mkdir(repo_path_vfs, parents=True, exist_ok=True, vfs=vfs)
     repo = register_repo(
         conn,
-        repo_path=str(repo_path),
-        name=repo_path.name,
+        repo_path=repo_path_local,
+        name=vfs_name(repo_path_vfs, vfs) if not is_absolute_outside_root else Path(repo_path_local).name,
         kind=kind or "embryo",
         status="active",
         third_party=False,
         notes=notes or "initialized by frog",
     )
-    agents_result = write_agent_instructions(conn, str(repo_path))
+    # Pass local path to write_agent_instructions for proper repo resolution
+    agents_result = write_agent_instructions(conn, repo_path_local)
     if not agents_result.get("ok", True):
         return agents_result
-    agents_path = Path(agents_result["agents_path"])
+    agents_path = agents_result["agents_path"]
     record_event(
         conn,
         kind="repo.initialized",
-        summary=f"initialized repo {repo_path.name}",
-        repo_path=str(repo_path),
-        payload={"agents_path": str(agents_path), "intent_id": intent_id},
+        summary=f"initialized repo {vfs_name(repo_path_vfs, vfs) if not is_absolute_outside_root else Path(repo_path_local).name}",
+        repo_path=repo_path_local,
+        payload={"agents_path": agents_path, "intent_id": intent_id},
     )
     conn.commit()
-    return {"ok": True, "message": f"initialized {repo_path}", "repo": repo["repo"], "agents_path": str(agents_path)}
+    return {"ok": True, "message": f"initialized {repo_path_local}", "repo": repo["repo"], "agents_path": agents_path}
 
 
 def agent_instructions_text() -> str:
@@ -756,7 +842,80 @@ def setup_agent(conn, agent: str, *, target_dir: str | None,
     agent = agent.lower()
     if agent not in {"claude", "codex"}:
         return {"ok": False, "error": "agent must be 'claude' or 'codex'"}
-    base = Path(target_dir).expanduser().resolve() if target_dir else Path.cwd()
+
+    vfs = current_vfs()
+    target_dir_local = target_dir if target_dir else os.getcwd()
+
+    # Check if target_dir is under VFS root - if not, fall back to pathlib
+    if not _is_path_under_vfs_root(target_dir_local, vfs):
+        return _setup_agent_pathlib(conn, agent, target_dir_local, dry_run, force)
+
+    base = vfs_expanduser(target_dir_local, vfs) if target_dir else vfs_resolve(".", vfs)
+    if not vfs_is_dir(base, vfs):
+        return {"ok": False, "error": f"not a directory: {base}"}
+    actions = []
+
+    def plan(path: str, kind: str, write):
+        rel = path
+        if vfs_exists(path, vfs) and not force and kind == "create":
+            actions.append({"path": rel, "action": "skip (exists)"})
+            return
+        actions.append({"path": rel,
+                        "action": ("would " if dry_run else "") +
+                        ("merge" if kind == "merge" else "write")})
+        if not dry_run:
+            vfs_mkdir(vfs_parent(path, vfs), parents=True, exist_ok=True, vfs=vfs)
+            write()
+
+    md_name = "CLAUDE.md" if agent == "claude" else "AGENTS.md"
+    md = vfs_join(base, md_name, vfs=vfs)
+    plan(md, "create", lambda: vfs_write_text(md, _agent_md(agent), vfs=vfs))
+
+    snippet = {"FROG_AGENT": f"{agent}-$(hostname -s)"}
+    if agent == "claude":
+        sj = vfs_join(base, ".claude", "settings.json", vfs=vfs)
+        def _w_sj():
+            cur = {}
+            if vfs_exists(sj, vfs):
+                try:
+                    cur = json.loads(vfs_read_text(sj, vfs=vfs))
+                except json.JSONDecodeError:
+                    cur = {}
+            vfs_write_text(sj, json.dumps(_merge_hooks(cur, _claude_settings_fragment()),
+                                         indent=2) + "\n", vfs=vfs)
+        plan(sj, "merge", _w_sj)
+        mj = vfs_join(base, ".mcp.json", vfs=vfs)
+        def _w_mj():
+            cur = {}
+            if vfs_exists(mj, vfs):
+                try:
+                    cur = json.loads(vfs_read_text(mj, vfs=vfs))
+                except json.JSONDecodeError:
+                    cur = {}
+            cur.setdefault("mcpServers", {})["frog"] = _mcp_json_fragment()["mcpServers"]["frog"]
+            vfs_write_text(mj, json.dumps(cur, indent=2) + "\n", vfs=vfs)
+        plan(mj, "merge", _w_mj)
+        extra = {"mcp": _mcp_json_fragment(),
+                 "env_snippet": f'export FROG_AGENT="claude-$(hostname -s)"'}
+    else:
+        # Codex reads AGENTS.md (written above). Emit the config.toml block
+        # to add by hand (we never edit a user's global ~/.codex/config.toml).
+        toml_block = (
+            "[mcp_servers.frog]\n"
+            f'command = {json.dumps(_frog_mcp())}\n'
+            "args = []\n"
+        )
+        extra = {"codex_config_toml": toml_block,
+                 "env_snippet": f'export FROG_AGENT="codex-$(hostname -s)"'}
+
+    return {"ok": True, "agent": agent, "dir": target_dir_local,
+            "dry_run": dry_run, "actions": actions, **extra}
+
+
+def _setup_agent_pathlib(conn, agent: str, target_dir: str, dry_run: bool, force: bool) -> dict:
+    """Fallback implementation using pathlib for paths outside VFS root."""
+    from pathlib import Path
+    base = Path(target_dir).expanduser().resolve()
     if not base.is_dir():
         return {"ok": False, "error": f"not a directory: {base}"}
     actions = []
@@ -818,34 +977,70 @@ def setup_agent(conn, agent: str, *, target_dir: str | None,
             "dry_run": dry_run, "actions": actions, **extra}
 
 
+def _vfs_to_local_path(path: str, vfs: VFS) -> str:
+    """Convert VFS path to local path for database storage."""
+    if isinstance(vfs, LocalVFS):
+        # path is a VFS path (always starts with / in our convention)
+        # Convert to local path using the VFS's _to_path method
+        return str(vfs._to_path(path))
+    return path
+
+
 def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = False) -> dict:
+    vfs = current_vfs()
+
+    # Determine target directory (local path)
     if path_or_dir:
-        raw = Path(path_or_dir).expanduser()
+        target_dir_local = vfs_expanduser(path_or_dir, vfs)
+        if not (target_dir_local.endswith(".md") or target_dir_local.endswith(".MD")):
+            # It's a directory - append AGENTS.md
+            target_file_local = os.path.join(target_dir_local, "AGENTS.md")
+        else:
+            target_file_local = target_dir_local
     else:
-        raw = Path.cwd()
-    if raw.suffix.lower() == ".md":
-        target = raw.resolve()
-    else:
-        target = raw.resolve() / "AGENTS.md"
-    if target.exists() and not force:
-        return {"ok": False, "error": f"refusing to overwrite existing file: {target}"}
+        # Use current working directory
+        target_dir_local = vfs_resolve(".", vfs)
+        target_dir_local = _vfs_to_local_path(target_dir_local, vfs)
+        target_file_local = os.path.join(target_dir_local, "AGENTS.md")
+
+    # Convert target file to VFS path for VFS operations
+    target_vfs = vfs_from_local_path(target_file_local, vfs)
+    target_dir_vfs = vfs_from_local_path(target_dir_local, vfs)
+
+    target_local = target_file_local
+
+    if vfs_exists(target_vfs, vfs) and not force:
+        return {"ok": False, "error": f"refusing to overwrite existing file: {target_local}"}
     intent_id = record_intent(
         conn, kind="agents.instructions.write.requested",
-        summary=f"requested agent-instruction write to {target}",
-        payload={"agents_path": str(target), "force": bool(force)},
+        summary=f"requested agent-instruction write to {target_local}",
+        payload={"agents_path": target_local, "force": bool(force)},
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(agent_instructions_text(), encoding="utf-8")
-    repo = resolve_repo(conn, str(target.parent))
-    record_event(
-        conn,
-        kind="agents.instructions.written",
-        summary=f"wrote agent instructions to {target}",
-        repo_path=repo["repo_path"] if repo else None,
-        payload={"agents_path": str(target), "intent_id": intent_id},
-    )
+    vfs_mkdir(target_dir_vfs, parents=True, exist_ok=True, vfs=vfs)
+    vfs_write_text(target_vfs, agent_instructions_text(), encoding="utf-8", vfs=vfs)
+    parent_local = target_dir_local
+    repo = resolve_repo(conn, parent_local)
+    # Only use repo_path if it exactly matches parent_local (FK constraint)
+    event_repo_path = repo["repo_path"] if repo and repo["repo_path"] == parent_local else None
+    try:
+        record_event(
+            conn,
+            kind="agents.instructions.written",
+            summary=f"wrote agent instructions to {target_local}",
+            repo_path=event_repo_path,
+            payload={"agents_path": target_local, "intent_id": intent_id},
+        )
+    except sqlite3.IntegrityError:
+        # FK constraint failed - retry with NULL repo_path
+        record_event(
+            conn,
+            kind="agents.instructions.written",
+            summary=f"wrote agent instructions to {target_local}",
+            repo_path=None,
+            payload={"agents_path": target_local, "intent_id": intent_id},
+        )
     conn.commit()
-    return {"ok": True, "message": f"wrote {target}", "agents_path": str(target)}
+    return {"ok": True, "message": f"wrote {target_local}", "agents_path": target_local}
 
 
 def auto_snapshot(conn, *, label: str) -> dict:
@@ -863,24 +1058,55 @@ def auto_snapshot(conn, *, label: str) -> dict:
     db_file = row[0] if row else None
     if not db_file:
         return {"ok": True, "skipped": "not file-backed"}
-    db_path = Path(db_file)
+
+    vfs = current_vfs()
+    db_name = vfs_name(db_file, vfs)
+
+    # Try /data/backups first (local filesystem), then fall back to DB's parent directory
+    # These are system paths, not workspace paths, so use local filesystem directly
     backup_root = Path("/data/backups")
     try:
         backup_root.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        backup_root = db_path.parent
+        # Check if we can write there
+        test_file = backup_root / ".write_test"
+        test_file.write_text("test")
+        test_file.unlink()
+    except (OSError, PermissionError):
+        # Fall back to DB's parent directory
+        backup_root = Path(db_file).parent
+
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", label) or "op"
-    dest = backup_root / f"{db_path.name}.pre-{safe}"
+    dest = backup_root / f"{db_name}.pre-{safe}"
+
+    # For remote VFS, we need to use a local temp file for SQLite backup
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        tmp_path = tmp.name
+
     try:
         conn.commit()
-        dst = sqlite3.connect(str(dest))
+        dst = sqlite3.connect(tmp_path)
         try:
             conn.backup(dst)
         finally:
             dst.close()
+
+        # Write to destination
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+        dest.write_bytes(data)
+
+        # Get size
+        size = dest.stat().st_size
+        return {"ok": True, "path": str(dest), "bytes": size}
     except Exception as e:
         return {"ok": False, "error": f"auto-snapshot failed: {e}"}
-    return {"ok": True, "path": str(dest), "bytes": dest.stat().st_size}
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def snapshot_workspace(conn, *, dest: str | None = None) -> dict:
@@ -897,45 +1123,73 @@ def snapshot_workspace(conn, *, dest: str | None = None) -> dict:
     if not db_file:
         return {"ok": False, "error": "database is not file-backed "
                 "(in-memory connection); nothing to snapshot"}
-    db_path = Path(db_file)
-    backup_root = Path(dest) if dest else Path("/data/backups")
-    backup_root.mkdir(parents=True, exist_ok=True)
-    last = backup_root / f"{db_path.name}.last"
-    prev = backup_root / f"{db_path.name}.prev"
 
-    if last.exists():
-        if prev.exists():
-            prev.unlink()
-        last.rename(prev)
+    vfs = current_vfs()
+    db_name = vfs_name(db_file, vfs)
+    backup_root = vfs_join(vfs_workspace_root(vfs), "backups", vfs=vfs) if not dest else vfs_resolve(dest, vfs)
+    vfs_mkdir(backup_root, parents=True, exist_ok=True, vfs=vfs)
+    last_vfs = vfs_join(backup_root, f"{db_name}.last", vfs=vfs)
+    prev_vfs = vfs_join(backup_root, f"{db_name}.prev", vfs=vfs)
 
-    dst = sqlite3.connect(str(last))
+    # Convert to local paths for return values
+    last_local = _vfs_to_local_path(last_vfs, vfs)
+    prev_local = _vfs_to_local_path(prev_vfs, vfs)
+
+    # Use temp file for SQLite backup
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        tmp_path = tmp.name
+
     try:
-        conn.backup(dst)
-    finally:
-        dst.close()
+        if vfs_exists(last_vfs, vfs):
+            if vfs_exists(prev_vfs, vfs):
+                vfs_unlink(prev_vfs, vfs=vfs)
+            # Copy last to prev via VFS
+            data = vfs_read_bytes(last_vfs, vfs=vfs)
+            vfs_write_bytes(prev_vfs, data, vfs=vfs)
 
-    size = last.stat().st_size
-    record_event(
-        conn,
-        kind="workspace.snapshot",
-        summary=f"backed up {db_path.name} to {last}",
-        payload={
-            "db_path": str(db_path),
-            "backup_root": str(backup_root),
-            "last": str(last),
-            "prev": str(prev),
+        conn.commit()
+        dst = sqlite3.connect(tmp_path)
+        try:
+            conn.backup(dst)
+        finally:
+            dst.close()
+
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+        vfs_write_bytes(last_vfs, data, vfs=vfs)
+
+        st = vfs_stat(last_vfs, vfs)
+        size = st.size
+
+        record_event(
+            conn,
+            kind="workspace.snapshot",
+            summary=f"backed up {db_name} to {last_local}",
+            payload={
+                "db_path": db_file,
+                "backup_root": _vfs_to_local_path(backup_root, vfs),
+                "last": last_local,
+                "prev": prev_local,
+                "bytes": size,
+            },
+        )
+        conn.commit()
+        return {
+            "ok": True,
+            "message": f"backed up {db_file} to {last_local} ({size} bytes)",
+            "db_path": db_file,
+            "last": last_local,
+            "prev": prev_local,
             "bytes": size,
-        },
-    )
-    conn.commit()
-    return {
-        "ok": True,
-        "message": f"backed up {db_path} to {last} ({size} bytes)",
-        "db_path": str(db_path),
-        "last": str(last),
-        "prev": str(prev),
-        "bytes": size,
-    }
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"snapshot failed: {e}"}
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
@@ -962,7 +1216,9 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
     # DB size
     if db_path:
         try:
-            sz = Path(db_path).stat().st_size
+            vfs = current_vfs()
+            st = vfs_stat(db_path, vfs)
+            sz = st.size
             mb = sz / (1024 * 1024)
             if mb >= 250:
                 add("warn", "db_large", f"AGENTS.db is {mb:.0f} MB -- consider `frog db gc`")
@@ -2122,52 +2378,504 @@ def _looks_like_repo_boundary(root_path: Path, current: Path, dirnames: list[str
 
 
 def discover_repos(conn, *, root: str | None = None, scan: bool = True) -> dict:
-    root_path = Path(root or workspace_root()).expanduser().resolve()
+    vfs = current_vfs()
+    # Convert local root path to VFS path
+    root_local = root or vfs_workspace_root(vfs)
+
+    # If current VFS doesn't match the root, create a new LocalVFS for this root
+    # This ensures test isolation and correct behavior when VFS state is polluted
+    if isinstance(vfs, LocalVFS):
+        try:
+            # Check if root_local is under VFS root
+            Path(root_local).resolve().relative_to(vfs._root)
+        except ValueError:
+            # Root is outside VFS root - create a new VFS for this root
+            vfs = LocalVFS(root_local)
+            set_vfs(vfs)
+
+    root_vfs = vfs_from_local_path(root_local, vfs)
+
+    # Try to get cached result
+    cached = _discover_repos_get_cache(conn, root_vfs, vfs)
+    if cached:
+        # Re-register any new repos from cache
+        for repo in cached["repos"]:
+            register_repo(
+                conn,
+                repo_path=repo["repo_path"],
+                name=repo["name"],
+                kind=repo["kind"],
+                status=repo["status"],
+                third_party=repo["third_party"],
+                notes=repo.get("notes", ""),
+            )
+        conn.commit()
+        return {
+            "ok": True,
+            "root": root_vfs,
+            "repos": cached["repos"],
+            "counts": {"discovered": len(cached["repos"]), "scanned": 0, "cached": True},
+        }
+
+    # Use SSH-optimized discovery if VFS supports it
+    if hasattr(vfs, 'find_manifests_in_repos'):
+        return _discover_repos_ssh_optimized(conn, root_vfs, vfs, scan)
+
+    # If using LocalVFS but root is outside VFS root, fall back to local discovery
+    if isinstance(vfs, LocalVFS):
+        # root parameter is the original local path passed by the caller
+        # Use it directly for local fallback instead of converting from VFS path
+        root_local = root
+        if not root_local:
+            root_local = _vfs_to_local_path(vfs_workspace_root(vfs), vfs)
+
+        # Check if root_local is under VFS root
+        try:
+            Path(root_local).resolve().relative_to(vfs._root)
+            # Root is under VFS root, proceed with VFS-based discovery
+        except ValueError:
+            # Root is outside VFS root, use local filesystem discovery
+            return _discover_repos_local_fallback(conn, root_local, scan)
+
+        # If root is under VFS root, we still need to convert root to VFS path
+        # for the VFS-based discovery code below
+        root_vfs = vfs_from_local_path(root_local, vfs)
+
     discovered: list[dict] = []
     seen: set[str] = set()
     scanned = 0
-    repo_roots: list[Path] = []
-    for current_root, dirnames, filenames in os.walk(root_path):
-        dirnames[:] = [name for name in dirnames if name not in DISCOVERY_EXCLUDED_DIRS]
-        current = Path(current_root)
-        if any(_is_within(current, existing) for existing in repo_roots):
-            dirnames[:] = [name for name in dirnames if (current / name / ".git").exists()]
+
+    # Phase 1: manifest-first discovery. A repo with a build manifest is a repo,
+    # whether or not it has a .git directory yet.
+    for repo_root_vfs in _discover_repos_manifest_first(root_vfs, vfs):
+        repo_root_local = _vfs_to_local_path(repo_root_vfs, vfs)
+        if not repo_root_local or repo_root_local in seen:
             continue
-        if not _looks_like_repo_boundary(root_path, current, dirnames, filenames):
-            continue
-        repo_path = str(current.resolve())
-        if repo_path in seen:
-            continue
-        seen.add(repo_path)
-        kind, third_party = _infer_repo_kind(current)
+        seen.add(repo_root_local)
+        kind, third_party = _infer_repo_kind(Path(repo_root_local))
         info = register_repo(
             conn,
-            repo_path=repo_path,
-            name=current.name,
+            repo_path=repo_root_local,
+            name=vfs_name(repo_root_vfs, vfs),
             kind=kind,
             status="active",
             third_party=third_party,
-            notes=f"discovered by frog under {root_path}",
+            notes=f"discovered by frog under {root_vfs}",
         )
-        repo_roots.append(current.resolve())
         if scan:
-            scan_result = repo_scan(conn, repo_path)
-            if scan_result.get("ok", True):
+            if repo_scan(conn, repo_root_local).get("ok", True):
                 scanned += 1
         discovered.append(info["repo"])
+
+    # Phase 2: also check for git repos without manifests. This works for every
+    # VFS type. Resilience is the point here - one unreadable or malformed repo
+    # must not abort discovery of the rest, which is the bug the resilience
+    # tests exist for. A failure here is recorded, never swallowed silently.
+    try:
+        git_roots = _discover_repos_git_fallback(root_vfs, vfs, seen)
+    except Exception as error:  # noqa: BLE001 - deliberate: see above
+        record_event(
+            conn,
+            kind="repo.discovered",
+            summary=f"git fallback under {root_vfs} failed: {error}",
+            payload={"root": root_vfs, "error": str(error)},
+        )
+        git_roots = []
+
+    for repo_root_vfs in git_roots:
+        repo_root_local = _vfs_to_local_path(repo_root_vfs, vfs)
+        if not repo_root_local or repo_root_local in seen:
+            continue
+        seen.add(repo_root_local)
+        kind, third_party = _infer_repo_kind(Path(repo_root_local))
+        info = register_repo(
+            conn,
+            repo_path=repo_root_local,
+            name=vfs_name(repo_root_vfs, vfs),
+            kind=kind,
+            status="active",
+            third_party=third_party,
+            notes=f"discovered by frog under {root_vfs}",
+        )
+        if scan:
+            if repo_scan(conn, repo_root_local).get("ok", True):
+                scanned += 1
+        discovered.append(info["repo"])
+
+    _discover_repos_set_cache(conn, root_vfs, vfs, discovered)
     record_event(
         conn,
         kind="repo.discovered",
-        summary=f"discovered {len(discovered)} repos under {root_path}",
-        payload={"root": str(root_path), "repo_count": len(discovered), "scanned": scanned},
+        summary=f"discovered {len(discovered)} repos under {root_vfs}",
+        payload={"root": root_vfs, "repo_count": len(discovered), "scanned": scanned},
     )
     conn.commit()
     return {
         "ok": True,
-        "root": str(root_path),
+        "root": root_vfs,
         "repos": sorted(discovered, key=lambda item: (item["name"], item["repo_path"])),
-        "counts": {"discovered": len(discovered), "scanned": scanned},
+        "counts": {"discovered": len(discovered), "scanned": scanned, "cached": False},
     }
+
+
+def _discover_repos_ssh_optimized(conn, root_vfs: str, vfs, scan: bool) -> dict:
+    """SSH-optimized repository discovery using remote find/git commands."""
+    discovered: list[dict] = []
+    seen: set[str] = set()
+    scanned = 0
+
+    # Use SSH-optimized method to find manifests grouped by git repo
+    manifest_map = vfs.find_manifests_in_repos(DISCOVERY_MANIFESTS, root_vfs)
+
+    for repo_root_vfs, manifests in manifest_map.items():
+        repo_root_local = _vfs_to_local_path(repo_root_vfs, vfs)
+
+        if repo_root_local in seen:
+            continue
+        seen.add(repo_root_local)
+
+        kind, third_party = _infer_repo_kind(Path(repo_root_local))
+        info = register_repo(
+            conn,
+            repo_path=repo_root_local,
+            name=vfs_name(repo_root_vfs, vfs),
+            kind=kind,
+            status="active",
+            third_party=third_party,
+            notes=f"discovered by frog under {root_vfs}",
+        )
+
+        if scan:
+            scan_result = repo_scan(conn, repo_root_local)
+            if scan_result.get("ok", True):
+                scanned += 1
+    # Also check for git repos without manifests (fallback) - works for all VFS
+    # types. One bad repo must not abort discovery of the rest, so a failure is
+    # recorded as an event rather than printed and discarded.
+    try:
+        git_roots = _discover_repos_git_fallback(root_vfs, vfs, seen)
+    except Exception as error:  # noqa: BLE001 - deliberate: see above
+        record_event(
+            conn,
+            kind="repo.discovered",
+            summary=f"git fallback under {root_vfs} failed: {error}",
+            payload={"root": root_vfs, "error": str(error)},
+        )
+        git_roots = []
+
+    for repo_root_vfs in git_roots:
+        repo_root_local = _vfs_to_local_path(repo_root_vfs, vfs)
+        if not repo_root_local or repo_root_local in seen:
+            continue
+        seen.add(repo_root_local)
+
+        kind, third_party = _infer_repo_kind(Path(repo_root_local))
+        info = register_repo(
+            conn,
+            repo_path=repo_root_local,
+            name=vfs_name(repo_root_vfs, vfs),
+            kind=kind,
+            status="active",
+            third_party=third_party,
+            notes=f"discovered by frog under {root_vfs}",
+        )
+
+        if scan:
+            if repo_scan(conn, repo_root_local).get("ok", True):
+                scanned += 1
+        discovered.append(info["repo"])
+    # Cache the result
+    _discover_repos_set_cache(conn, root_vfs, vfs, discovered)
+
+    record_event(
+        conn,
+        kind="repo.discovered",
+        summary=f"discovered {len(discovered)} repos under {root_vfs}",
+        payload={"root": root_vfs, "repo_count": len(discovered), "scanned": scanned},
+    )
+    conn.commit()
+    return {
+        "ok": True,
+        "root": root_vfs,
+        "repos": sorted(discovered, key=lambda item: (item["name"], item["repo_path"])),
+        "counts": {"discovered": len(discovered), "scanned": scanned, "cached": False, "ssh_optimized": True},
+    }
+
+
+def _discover_repos_manifest_first(root_vfs: str, vfs: VFS) -> list[str]:
+    """Find all manifest files, return unique repo roots (parent dirs)."""
+    manifest_roots: set[str] = set()
+
+    for manifest in DISCOVERY_MANIFESTS:
+        # Use VFS glob to find all manifest files
+        matches = vfs_glob(root_vfs, f"**/{manifest}", vfs=vfs)
+        for match in matches:
+            parent = vfs_parent(match, vfs)
+            if parent and parent != "/":
+                manifest_roots.add(parent)
+
+    return sorted(manifest_roots)
+
+
+def _discover_repos_git_fallback(root_vfs: str, vfs: VFS, seen: set[str]) -> list[str]:
+    """Find .git directories that weren't caught by manifest discovery."""
+    git_roots: set[str] = set()
+
+    # For LocalVFS, use direct filesystem access for reliability
+    if isinstance(vfs, LocalVFS):
+        return _discover_repos_git_fallback_local(root_vfs, vfs, seen)
+
+    # For remote VFS, use VFS glob
+    # Look for .git/HEAD files
+    matches = vfs_glob(root_vfs, "**/.git/HEAD", vfs=vfs)
+    for match in matches:
+        # Parent of .git is the repo root
+        dot_git = vfs_parent(match, vfs)
+        repo_root = vfs_parent(dot_git, vfs)
+        if repo_root and repo_root != "/":
+            repo_root_local = _vfs_to_local_path(repo_root, vfs)
+            if repo_root_local not in seen:
+                git_roots.add(repo_root)
+
+    # Also check for .git as file (worktree)
+    matches = vfs_glob(root_vfs, "**/.git", vfs=vfs)
+    for match in matches:
+        if vfs_is_file(match, vfs):
+            repo_root = vfs_parent(match, vfs)
+            if repo_root and repo_root != "/":
+                repo_root_local = _vfs_to_local_path(repo_root, vfs)
+                if repo_root_local not in seen:
+                    git_roots.add(repo_root)
+
+    return sorted(git_roots)
+
+
+def _discover_repos_git_fallback_local(root_vfs: str, vfs: LocalVFS, seen: set[str]) -> list[str]:
+    """Find .git directories using local filesystem access."""
+    git_roots: set[str] = set()
+
+    # Convert VFS root to local path
+    root_local = _vfs_to_local_path(root_vfs, vfs)
+    root_path = Path(root_local)
+
+    if not root_path.exists():
+        return []
+
+    # Walk the directory tree looking for .git directories
+    for current_root, dirnames, filenames in os.walk(root_path):
+        # Check for .git directory with HEAD
+        git_dir = Path(current_root) / ".git"
+        if git_dir.exists():
+            head_file = git_dir / "HEAD"
+            if head_file.exists() or git_dir.is_file():
+                repo_root = Path(current_root)
+                repo_root_vfs = vfs_from_local_path(str(repo_root), vfs)
+                repo_root_local = _vfs_to_local_path(repo_root_vfs, vfs)
+                if repo_root_local not in seen:
+                    git_roots.add(repo_root_vfs)
+            # Don't recurse into .git
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+
+    return sorted(git_roots)
+
+
+def _discover_repos_get_cache(conn, root_vfs: str, vfs: VFS) -> dict | None:
+    """Get cached discovery result if valid."""
+    try:
+        # Compute cache key: workspace + root + git HEAD
+        cache_key = _discover_repos_cache_key(root_vfs, vfs)
+        row = conn.execute(
+            "SELECT payload_json FROM repo_discovery_cache WHERE cache_key = ?",
+            (cache_key,)
+        ).fetchone()
+        if row:
+            import json
+            cached = json.loads(row["payload_json"])
+            # Verify cache is still valid (git HEAD unchanged)
+            if _discover_repos_cache_valid(root_vfs, vfs, cached):
+                return cached
+    except sqlite3.Error:
+        pass
+    return None
+
+
+def _discover_repos_local_fallback(conn, root_local: str, scan: bool) -> dict:
+    """Full local filesystem discovery fallback when VFS is not properly configured."""
+    import os
+    from pathlib import Path
+
+    discovered: list[dict] = []
+    seen: set[str] = set()
+    scanned = 0
+    root_path = Path(root_local)
+
+    if not root_path.exists():
+        return {
+            "ok": True,
+            "root": root_local,
+            "repos": [],
+            "counts": {"discovered": 0, "scanned": 0, "cached": False, "local_fallback": True},
+        }
+
+    # Phase 1: Manifest-first discovery using os.walk
+    manifest_roots = []
+    for current_root, dirnames, filenames in os.walk(root_path):
+        # Check for manifests
+        for manifest in DISCOVERY_MANIFESTS:
+            if manifest in filenames:
+                manifest_roots.append(Path(current_root))
+                break
+        # Don't recurse into excluded dirs
+        dirnames[:] = [d for d in dirnames if d not in DISCOVERY_EXCLUDED_DIRS]
+
+    seen: set[str] = set()
+    scanned = 0
+    discovered: list[dict] = []
+
+    # Phase 2: Process manifest roots
+    for repo_root in manifest_roots:
+        repo_root_local = str(repo_root.resolve())
+        if repo_root_local in seen:
+            continue
+        seen.add(repo_root_local)
+
+        kind, third_party = _infer_repo_kind(repo_root)
+        info = register_repo(
+            conn,
+            repo_path=repo_root_local,
+            name=repo_root.name,
+            kind=kind,
+            status="active",
+            third_party=third_party,
+            notes=f"discovered by frog under {root_local}",
+        )
+
+        if scan:
+            scan_result = repo_scan(conn, repo_root_local)
+            if scan_result.get("ok", True):
+                scanned += 1
+        discovered.append(info["repo"])
+
+    # Phase 3: Git fallback
+    for current_root, dirnames, filenames in os.walk(root_path):
+        git_dir = Path(current_root) / ".git"
+        if git_dir.exists():
+            head_file = git_dir / "HEAD"
+            if head_file.exists() or git_dir.is_file():
+                repo_root = Path(current_root)
+                repo_root_local = str(repo_root.resolve())
+                if repo_root_local in seen:
+                    dirnames[:] = [d for d in dirnames if d != ".git"]
+                    continue
+                seen.add(repo_root_local)
+
+                kind, third_party = _infer_repo_kind(Path(current_root))
+                info = register_repo(
+                    conn,
+                    repo_path=repo_root_local,
+                    name=Path(current_root).name,
+                    kind=kind,
+                    status="active",
+                    third_party=third_party,
+                    notes=f"discovered by frog under {root_local}",
+                )
+
+                if scan:
+                    scan_result = repo_scan(conn, repo_root_local)
+                    if scan_result.get("ok", True):
+                        scanned += 1
+                # Get the repo info from register_repo
+                repo_info_result = repo_info(conn, repo_root_local)
+                if repo_info_result.get("ok"):
+                    discovered.append(repo_info_result["repo"])
+                else:
+                    # Fallback
+                    discovered.append({
+                        "repo_path": repo_root_local,
+                        "name": Path(current_root).name,
+                        "kind": kind,
+                        "status": "active",
+                        "third_party": third_party,
+                    })
+        # Don't recurse into .git
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+
+    record_event(
+        conn,
+        kind="repo.discovered",
+        summary=f"discovered {len(discovered)} repos under {root_local}",
+        payload={"root": root_local, "repo_count": len(discovered), "scanned": scanned},
+    )
+    conn.commit()
+    return {
+        "ok": True,
+        "root": root_local,
+        "repos": sorted(discovered, key=lambda item: (item["name"], item["repo_path"])),
+        "counts": {"discovered": len(discovered), "scanned": scanned, "cached": False, "local_fallback": True},
+    }
+
+
+def _discover_repos_set_cache(conn, root_vfs: str, vfs: VFS, repos: list[dict]) -> None:
+    """Store discovery result in cache."""
+    try:
+        cache_key = _discover_repos_cache_key(root_vfs, vfs)
+        import json
+        payload = {
+            "repos": repos,
+            "git_head": _get_git_head(root_vfs, vfs),
+            "cached_at": utc_now_iso(),
+        }
+        conn.execute(
+            """INSERT OR REPLACE INTO repo_discovery_cache
+               (cache_key, payload_json, created_at) VALUES (?, ?, ?)""",
+            (cache_key, json.dumps(payload), utc_now_iso()),
+        )
+    except sqlite3.Error:
+        pass
+
+
+def _discover_repos_cache_key(root_vfs: str, vfs: VFS) -> str:
+    """Generate cache key: workspace + root + git HEAD."""
+    import hashlib
+    git_head = _get_git_head(root_vfs, vfs)
+    key_data = f"{root_vfs}:{git_head}"
+    return hashlib.sha256(key_data.encode()).hexdigest()[:32]
+
+
+def _get_git_head(root_vfs: str, vfs: VFS) -> str:
+    """Get git HEAD commit hash for cache invalidation."""
+    try:
+        # Try to find a git repo and get HEAD
+        head_path = vfs_join(root_vfs, ".git", "HEAD", vfs=vfs)
+        if vfs_is_file(head_path, vfs):
+            content = vfs_read_text(head_path, vfs=vfs).strip()
+            if content.startswith("ref: "):
+                # Follow ref
+                ref_path = vfs_join(root_vfs, ".git", content[5:].strip(), vfs=vfs)
+                if vfs_is_file(ref_path, vfs):
+                    return vfs_read_text(ref_path, vfs=vfs).strip()
+            return content
+    except Exception:
+        pass
+    return ""
+
+
+def _discover_repos_cache_valid(root_vfs: str, vfs: VFS, cached: dict) -> bool:
+    """Check if cached result is still valid."""
+    current_head = _get_git_head(root_vfs, vfs)
+    return cached.get("git_head") == current_head
+
+
+# Create cache table if not exists (run once)
+def _ensure_discovery_cache_table(conn) -> None:
+    """Ensure the discovery cache table exists."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS repo_discovery_cache (
+            cache_key TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
 
 
 def _is_within(path: Path, root: Path) -> bool:

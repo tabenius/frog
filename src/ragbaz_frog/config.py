@@ -4,13 +4,124 @@ import json
 import os
 import sqlite3
 from pathlib import Path
+from typing import Optional
 
 from ragbaz_frog import DEFAULT_CONFIG_PATH
 from ragbaz_frog import store
 
 
+# Config file search order (first match wins)
+# 1. Explicit --config flag
+# 2. $FROG_CONFIG env var
+# 3. /etc/frog/control.yaml or /etc/frog/control.json
+# 4. ~/.config/frog/config.yaml or ~/.config/frog/config.json (fail-close if both exist)
+# 5. AUTO-MIGRATE from ~/.config/ragbaz-frog/frog.json to ~/.config/frog/config.yaml and restart
+
+CONFIG_SEARCH_PATHS = [
+    "/etc/frog/control.yaml",
+    "/etc/frog/control.json",
+]
+
+LEGACY_CONFIG_PATH = Path.home() / ".config" / "ragbaz-frog" / "frog.json"
+NEW_CONFIG_DIR = Path.home() / ".config" / "frog"
+NEW_CONFIG_YAML = NEW_CONFIG_DIR / "config.yaml"
+NEW_CONFIG_JSON = NEW_CONFIG_DIR / "config.json"
+
+
 def config_path(path: str | None = None) -> Path:
-    return Path(path or DEFAULT_CONFIG_PATH).expanduser().resolve()
+    """Resolve config file path with precedence."""
+    # Explicit path wins
+    if path:
+        return Path(path).expanduser().resolve()
+
+    # Environment variable
+    env_path = os.environ.get("FROG_CONFIG")
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+
+    # System-wide config
+    for p in CONFIG_SEARCH_PATHS:
+        pp = Path(p)
+        if pp.exists():
+            return pp
+
+    # User config - check for both YAML and JSON, fail-close if both
+    if NEW_CONFIG_YAML.exists() and NEW_CONFIG_JSON.exists():
+        raise RuntimeError(
+            f"Both {NEW_CONFIG_YAML} and {NEW_CONFIG_JSON} exist. "
+            "Remove one to avoid ambiguity."
+        )
+    if NEW_CONFIG_YAML.exists():
+        return NEW_CONFIG_YAML
+    if NEW_CONFIG_JSON.exists():
+        return NEW_CONFIG_JSON
+
+    # Auto-migrate from legacy location
+    if LEGACY_CONFIG_PATH.exists():
+        _migrate_legacy_config()
+        # After migration, recurse to pick up new config
+        return config_path()
+
+    # No config exists - return new default location (will be created on first save)
+    return NEW_CONFIG_YAML
+
+
+def _migrate_legacy_config() -> None:
+    """Migrate legacy ~/.config/ragbaz-frog/frog.json to ~/.config/frog/config.yaml."""
+    if not LEGACY_CONFIG_PATH.exists():
+        return
+
+    # Load legacy config
+    legacy_data = json.loads(LEGACY_CONFIG_PATH.read_text(encoding="utf-8"))
+
+    # Ensure new config directory exists
+    NEW_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Write new config as YAML
+    try:
+        import yaml
+        NEW_CONFIG_YAML.write_text(yaml.safe_dump(legacy_data, sort_keys=True, indent=2), encoding="utf-8")
+    except ImportError:
+        # Fallback to JSON if PyYAML not available
+        NEW_CONFIG_JSON.write_text(json.dumps(legacy_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    # Backup legacy config
+    backup = LEGACY_CONFIG_PATH.with_suffix(".json.bak")
+    LEGACY_CONFIG_PATH.rename(backup)
+
+    print(f"[frog] Migrated config: {LEGACY_CONFIG_PATH} -> {NEW_CONFIG_YAML if NEW_CONFIG_YAML.exists() else NEW_CONFIG_JSON}")
+    print(f"[frog] Legacy config backed up to: {backup}")
+
+
+def _load_config_file(path: Path) -> dict:
+    """Load config from file, auto-detect YAML/JSON."""
+    content = path.read_text(encoding="utf-8")
+    if path.suffix in (".yaml", ".yml"):
+        try:
+            import yaml
+            return yaml.safe_load(content) or {}
+        except ImportError:
+            raise RuntimeError(
+                f"Config file {path} is YAML but PyYAML is not installed. "
+                "Install with: pip install pyyaml"
+            )
+    return json.loads(content)
+
+
+def _write_config_file(path: Path, payload: dict) -> None:
+    """Write config to file, format based on extension."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix in (".yaml", ".yml"):
+        try:
+            import yaml
+            path.write_text(yaml.safe_dump(payload, sort_keys=True, indent=2), encoding="utf-8")
+        except ImportError:
+            raise RuntimeError(
+                f"Config file {path} is YAML but PyYAML is not installed. "
+                "Install with: pip install pyyaml"
+            )
+    else:
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def infer_local_root() -> str:
@@ -38,6 +149,7 @@ def default_config() -> dict:
                 "host": "local",
                 "root": root,
                 "db": f"{root.rstrip('/')}/AGENTS.db",
+                "db_uri": f"file://{root}",
                 "notes": "auto-created on first frog run",
             }
         },
@@ -50,8 +162,7 @@ def default_config() -> dict:
 
 def save_config(payload: dict, path: str | None = None) -> str:
     target = config_path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_config_file(target, payload)
     return str(target)
 
 
@@ -59,7 +170,7 @@ def ensure_config(path: str | None = None) -> dict:
     target = config_path(path)
     changed = False
     if target.exists():
-        payload = json.loads(target.read_text(encoding="utf-8"))
+        payload = _load_config_file(target)
     else:
         payload = default_config()
         save_config(payload, path)
@@ -177,6 +288,7 @@ def add_workspace(
     host_name: str,
     root: str,
     db: str | None = None,
+    db_uri: str | None = None,
     notes: str | None = None,
     use_default: bool = False,
     path: str | None = None,
@@ -184,13 +296,18 @@ def add_workspace(
     data = load_config(path)
     if host_name not in data["hosts"]:
         return {"ok": False, "error": f"unknown host: {host_name}"}
-    data["workspaces"][name] = {
+    workspace_data = {
         "name": name,
         "host": host_name,
         "root": root,
         "db": db or f"{root.rstrip('/')}/AGENTS.db",
         "notes": notes,
     }
+    if db_uri:
+        workspace_data["db_uri"] = db_uri
+    elif data["hosts"][host_name].get("transport") != "local":
+        workspace_data["db_uri"] = f"ssh://{data['hosts'][host_name].get('ssh_target', '')}{root}"
+    data["workspaces"][name] = workspace_data
     if use_default or not data.get("current_workspace"):
         data["current_workspace"] = name
     saved_to = save_config(data, path)

@@ -2582,42 +2582,45 @@ def main(argv: list[str] | None = None) -> int:
                 "fix": f"frog --db {args.db} db migrate",
             }, args.json)
         _record_command(conn, argv)
-        if args.command == "new":
-            return _emit(
-                store.init_repo(conn, args.path_or_name, kind=args.kind, notes=args.notes),
-                args.json,
-            )
-        if args.command == "agent-instructions":
-            return _emit(store.write_agent_instructions(conn, args.path, force=args.force), args.json)
-        if args.command == "db" and getattr(args, "init_command", None) == "gc":
-            return _emit(
-                store.db_gc(conn, older_than_days=args.older_than, keep=args.keep),
-                args.json,
-            )
-        if args.command == "doctor":
-            return _emit(store.doctor(conn, args.db, fix=not args.no_fix), args.json)
-        if args.command == "whereis":
-            if args.local_only:
-                return _emit(store.whereis(conn, args.repo_key), args.json)
-            return _emit(_whereis_federated(conn, args.repo_key, config_path=args.config), args.json)
-        if args.command == "setup":
-            return _emit(store.setup_agent(conn, args.agent,
-                target_dir=args.setup_dir, dry_run=args.setup_dry,
-                force=args.force), args.json)
-        if args.command == "export":
-            if args.export_command == "todo":
-                ref = args.repo_ref
-                if ref == ".":
-                    inf = store.infer_repo_from_cwd(conn)
-                    ref = inf["repo_path"] if inf else None
-                res = store.export_tasks_markdown(
-                    conn, repo_ref=ref,
-                    workflow_status=args.workflow_status, tree=args.tree)
-                if res.get("ok") and not args.json:
-                    md = res["markdown"]
-                    if args.out and args.into:
-                        return _emit({"ok": False,
-                            "error": "use either --out or --into, not both"}, False)
+        # Set up VFS context for the workspace
+        from ragbaz_frog.vfs_store import workspace_vfs_context
+        with workspace_vfs_context(args.workspace, args.config):
+            if args.command == "new":
+                return _emit(
+                    store.init_repo(conn, args.path_or_name, kind=args.kind, notes=args.notes),
+                    args.json,
+                )
+            if args.command == "agent-instructions":
+                return _emit(store.write_agent_instructions(conn, args.path, force=args.force), args.json)
+            if args.command == "db" and getattr(args, "init_command", None) == "gc":
+                return _emit(
+                    store.db_gc(conn, older_than_days=args.older_than, keep=args.keep),
+                    args.json,
+                )
+            if args.command == "doctor":
+                return _emit(store.doctor(conn, args.db, fix=not args.no_fix), args.json)
+            if args.command == "whereis":
+                if args.local_only:
+                    return _emit(store.whereis(conn, args.repo_key), args.json)
+                return _emit(_whereis_federated(conn, args.repo_key, config_path=args.config), args.json)
+            if args.command == "setup":
+                return _emit(store.setup_agent(conn, args.agent,
+                    target_dir=args.setup_dir, dry_run=args.setup_dry,
+                    force=args.force), args.json)
+            if args.command == "export":
+                if args.export_command == "todo":
+                    ref = args.repo_ref
+                    if ref == ".":
+                        inf = store.infer_repo_from_cwd(conn)
+                        ref = inf["repo_path"] if inf else None
+                    res = store.export_tasks_markdown(
+                        conn, repo_ref=ref,
+                        workflow_status=args.workflow_status, tree=args.tree)
+                    if res.get("ok") and not args.json:
+                        md = res["markdown"]
+                        if args.out and args.into:
+                            return _emit({"ok": False,
+                                "error": "use either --out or --into, not both"}, False)
                     if args.section and not args.into:
                         return _emit({"ok": False,
                             "error": "--section requires --into FILE"}, False)
