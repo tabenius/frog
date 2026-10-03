@@ -1,6 +1,6 @@
 import unittest
 from _util import fresh_db
-from ragbaz_frog import store, tui
+from ragbaz_frog import design, store, tui
 
 
 def snap_with(conn):
@@ -197,40 +197,50 @@ class TuiRichTests(unittest.TestCase):
 
 
 class TuiSegmentColors(unittest.TestCase):
+    """The board's colour coding is now a *role* per segment rather than an
+    xterm index: the assertion is which role a segment carries, and the colour
+    behind it is the token file's business."""
+
     def test_segments_match_board_color_coding(self):
         tk = {"slug": "demo", "priority": "p1", "assigned_agent": "claude",
               "unmet_deps": ["a", "b", "c"]}
         segs = tui.task_segments(tk, ["demo"])
-        m = {text.strip().split()[0] if " " in text else text: code
-             for text, code in segs}
-        codes = {c for _, c in segs}
-        # base uses the p1 priority colour, NOT a generic one
-        self.assertEqual(segs[0][1], tui._PRIO_C["p1"])
-        # board parity: ready=220, agent=39
-        self.assertIn(tui._READY_C, codes)
-        self.assertIn(tui._AGENT_C, codes)
-        agent_seg = next(s for s in segs if "◆" in s[0])
-        self.assertEqual(agent_seg[1], 39)
+        roles = {role for _, role in segs}
+        # base uses the p1 priority role, NOT a generic one
+        self.assertEqual(segs[0][1], tui.priority_role("p1"))
+        # board parity: ready=status.ok, agent=ink.code
+        self.assertIn("status.ok", roles)
+        self.assertIn("ink.code", roles)
+        agent_seg = next(s for s in segs if design.glyph("bullet") in s[0])
+        self.assertEqual(agent_seg[1], "ink.code")
         self.assertIn("claude", agent_seg[0])
-        self.assertNotIn("⛓", "".join(text for text, _ in segs))
+        self.assertNotIn(design.glyph("lock"), "".join(text for text, _ in segs))
 
     def test_segments_minimal_when_no_marks(self):
         tk = {"slug": "x", "priority": "p3"}
         segs = tui.task_segments(tk, [])
         self.assertEqual(len(segs), 1)
-        self.assertEqual(segs[0][1], tui._PRIO_C["p3"])
+        self.assertEqual(segs[0][1], tui.priority_role("p3"))
 
     def test_named_priority_levels_use_matching_color_bands(self):
         expected = {
-            "high": tui._PRIO_C["p1"],
-            "medium": tui._PRIO_C["p2"],
-            "low": tui._PRIO_C["p3"],
+            "high": tui.priority_role("p1"),
+            "medium": tui.priority_role("p2"),
+            "low": tui.priority_role("p3"),
         }
-        for priority, color in expected.items():
+        for priority, role in expected.items():
             with self.subTest(priority=priority):
                 tk = {"slug": priority, "priority": priority}
-                self.assertEqual(tui.task_segments(tk, [])[0][1], color)
-                self.assertEqual(tui.priority_color(priority.upper()), color)
+                self.assertEqual(tui.task_segments(tk, [])[0][1], role)
+                self.assertEqual(tui.priority_role(priority.upper()), role)
+
+    def test_priority_is_the_ink_ramp_not_a_hue(self):
+        # priority is emphasis, so it walks the ink ramp and the p0..p3 text is
+        # what actually carries the level.
+        ramp = [tui.priority_role(p) for p in ("p0", "p1", "p2", "p3")]
+        self.assertEqual(ramp, ["ink.emphasis", "ink.body", "ink.muted",
+                                "ink.faint"])
+        self.assertEqual(len(set(ramp)), 4, "four distinct roles")
 
     def test_time_prefix_for_done_and_in_progress_tasks(self):
         for status in ("done", "in_progress"):
@@ -248,20 +258,25 @@ class TuiSegmentColors(unittest.TestCase):
         self.assertEqual(len(lines), 3)
         self.assertIn("blocked", lines[0][0][0])
         self.assertNotIn("root", lines[0][0][0])
-        self.assertEqual(lines[1][0][1], tui._BLOCK_C)
-        self.assertIn("└─ ⛓ root", lines[1][0][0])
-        self.assertIn("└─ ⛓ api", lines[2][0][0])
+        self.assertEqual(lines[1][0][1], "status.error")
+        mark = f"  {design.glyph('corner')} {design.glyph('lock')} "
+        self.assertIn(f"{mark}root", lines[1][0][0])
+        self.assertIn(f"{mark}api", lines[2][0][0])
 
     def test_help_overlay_lines_are_boxed_and_padded(self):
+        g = design.glyph
         lines = tui.help_overlay_lines("created desc")
         widths = {len(line) for line in lines}
         self.assertEqual(len(widths), 1)
-        self.assertTrue(lines[0].startswith("┌"))
-        self.assertTrue(lines[0].endswith("┐"))
+        self.assertTrue(lines[0].startswith(g("box_tl")))
+        self.assertTrue(lines[0].endswith(g("box_tr")))
+        self.assertTrue(lines[-1].startswith(g("box_bl")))
+        self.assertTrue(lines[-1].endswith(g("box_br")))
         for line in lines[1:-1]:
-            self.assertTrue(line.startswith("│  "))
-            self.assertTrue(line.endswith("  │"))
+            self.assertTrue(line.startswith(g("box_v")))
+            self.assertTrue(line.endswith(g("box_v")))
         self.assertIn("sort now", "\n".join(lines))
+        self.assertIn("created desc", "\n".join(lines))
 
 if __name__ == "__main__":
     unittest.main()

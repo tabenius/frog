@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import sys
 import unittest
@@ -89,7 +90,10 @@ class CliRender(unittest.TestCase):
             }],
         })
         self.assertEqual(rc, 0)
-        self.assertIn("\x1b[34m", out, "claim/in-progress output should be blue")
+        # the claim role's own escape, resolved through the tokens -- the
+        # assertion is that the role is painted, not which index it lands on
+        self.assertIn(main_cli._sgr("claim"), out,
+                      "claim/in-progress output uses the claim role")
         text = plain(out)
         self.assertIn("Activity: frog", text)
         self.assertIn("Tasks", text)
@@ -111,7 +115,8 @@ class CliRender(unittest.TestCase):
             "source_latest_mtime": 1779100000.0,
         })
         self.assertEqual(rc, 0)
-        self.assertIn("\x1b[31m", out, "missing artifacts should be red")
+        self.assertIn(main_cli._sgr("error"), out,
+                      "missing artifacts use the error role")
         text = plain(out)
         self.assertIn("Artifacts: frog", text)
         self.assertIn("build:dist", text)
@@ -350,6 +355,24 @@ class CliRender(unittest.TestCase):
         text = main_cli._colorize_help("usage: frog [-h]\noptions:\n")
         self.assertIn("\x1b[", text)
         self.assertIn("frog", text)
+
+    def test_no_color_output_is_the_colourless_rendering(self):
+        # mono is a first-class theme: its bytes are the colourless rendering,
+        # not a paler version of the coloured one.
+        payload = {"ok": True, "task": {"slug": "done-task", "title": "Done",
+                                        "repo_path": "/data/src/frog",
+                                        "priority": "p1",
+                                        "workflow_status": "done",
+                                        "git_status": "done"}}
+        main_cli._COLOR_ENABLED = True
+        _, coloured = render(payload)
+        os.environ["FROG_THEME"] = "mono"
+        try:
+            _, mono = render(payload)
+        finally:
+            del os.environ["FROG_THEME"]
+        self.assertEqual(plain(mono), plain(coloured))
+        self.assertNotIn("\x1b[", mono)
 
 
 if __name__ == "__main__":

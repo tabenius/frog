@@ -91,10 +91,10 @@ class Board(unittest.TestCase):
         frame = main_cli._board_frame(store.board_snapshot(self.conn),
                                       color=False, width=120)
         # the blocked task's line names the actual blocker, not just a count
-        bl = [l for l in frame.splitlines() if l.strip().endswith("root1")
-              or "\u2190 root1" in l]
+        bl = [l for l in frame.splitlines() if l.strip().endswith("root1")]
         self.assertTrue(bl, f"expected a blocked line naming root1; got:\n{frame}")
-        self.assertIn("\u26d3", frame)  # chain glyph present
+        # the blocker mark is a glyph key now, not a chain character
+        self.assertIn(main_cli.design.glyph("lock"), frame)
 
     def test_header_is_uppercase_with_ascii_frog(self):
         mk(self.conn, "h")

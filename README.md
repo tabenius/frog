@@ -132,6 +132,43 @@ for remote SSH-backed workspaces.
 - The database stores coordination metadata, not full architecture or product
   docs.
 
+## Terminal styling
+
+Both surfaces — the curses TUI (`frog tui`) and the CLI (`frog board`, every
+human-readable table) — read the ragbaz design system rather than holding a
+palette. There is no colour, glyph or frame decision in this repository.
+
+- `src/ragbaz_frog/_design.py` is the vendored, generated token module, kept
+  verbatim. The token files in `../design-system` are the source of truth;
+  regenerate there and re-vendor, never edit here.
+- `src/ragbaz_frog/design.py` is the only place that resolves a role to a
+  colour, a glyph key to a character, or a terminal size to a frame. Both
+  surfaces read frog's vocabulary → role map from it, which is how `frog board`
+  and the TUI keep board parity.
+- `frog tui`'s keys are declared once, in `tui.BINDINGS`. The legend, the
+  always-visible hint strip and the dispatcher all resolve from that table, so
+  the help cannot advertise a binding the dispatcher lacks.
+
+### `FROG_THEME`
+
+| value | for |
+|---|---|
+| *(unset)* | the token file's default, `ragbaz`: warm sepia, a **light** palette |
+| `ragbaz-night` | dark terminals — **set this on a dark terminal** |
+| `ragbaz-white` | high-contrast light |
+| `mono` | no colour at all; bold, dim and reverse only |
+
+`mono` is a real theme, not a fallback, and it is the right choice when output
+is being piped, logged, or read by someone who does not want colour. Colour is
+also off when `NO_COLOR` is set (to any value, including empty), when
+`TERM=dumb`, and when output is not a terminal; `--no-color` wins over all of
+them. `FORCE_COLOR` turns colour back on.
+
+What the tokens could not express — five glyphs with no key, the light
+palette's collapse at the 16-colour rung, the one place frog's colour policy
+disagrees with Sylvae's — is recorded in
+[`docs/design-system-gaps.md`](docs/design-system-gaps.md).
+
 ## Multi-agent coordination (evolution)
 
 frog's differentiator is the coordination/scheduling/forensics layer:

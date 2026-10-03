@@ -18,6 +18,7 @@ from ragbaz_frog import cli_completion
 from ragbaz_frog import cli_help
 from ragbaz_frog import cli_render
 from ragbaz_frog import config as frog_config
+from ragbaz_frog import design
 from ragbaz_frog import mcp_server
 from ragbaz_frog import store
 from ragbaz_frog import gateway
@@ -84,22 +85,6 @@ LOCK_KIND_HELP = (
 )
 
 
-_ANSI = {
-    "reset": "\033[0m",
-    "muted": "\033[90m",
-    "meta": "\033[36m",
-    "path": "\033[36m",
-    "success": "\033[32m",
-    "claim": "\033[34m",
-    "lock": "\033[33m",
-    "warn": "\033[33m",
-    "error": "\033[31m",
-    "p0": "\033[31m",
-    "p1": "\033[33m",
-    "p2": "\033[36m",
-    "p3": "\033[90m",
-}
-
 _COLOR_ENABLED = True
 _PAGE_HUMAN_OUTPUT = False
 _PAGER_ENABLED = True
@@ -110,12 +95,35 @@ def _use_color() -> bool:
     return _COLOR_ENABLED
 
 
+def _rung() -> str:
+    """Which rung of the colour ladder this output is drawn at.
+
+    `--no-color`, `NO_COLOR`, `TERM=dumb` and a pipe all resolve to `none`
+    through the shared policy. A caller that has explicitly switched colour on
+    -- the positive of `--no-color`, which `main()` resolves from the same
+    policy, or an embedder setting `_COLOR_ENABLED` -- is floored at `ansi256`
+    rather than silently degrading to nothing on a TERM-less stream.
+    """
+    return design.colour_mode(requested=_use_color(), floor="ansi256")
+
+
+def _role(role: str) -> str:
+    """frog's CLI colour vocabulary -> a semantic role in the design system."""
+    return design.CLI_ROLE.get(role, "ink.body")
+
+
+def _sgr(role: str) -> str:
+    """The escape for one role, resolved through the tokens. Empty when colour
+    is off, which is what makes `mono` and a pipe emit no colour at all."""
+    if not _use_color():
+        return ""
+    return design.sgr(_role(role), mode=_rung())
+
+
 def _color(value: object, role: str) -> str:
+    prefix = _sgr(role)
     text = str(value)
-    code = _ANSI.get(role)
-    if not code or not _use_color():
-        return text
-    return f"{code}{text}{_ANSI['reset']}"
+    return f"{prefix}{text}{design.RESET}" if prefix else text
 
 
 def _pager_command() -> list[str] | None:
@@ -177,7 +185,8 @@ def _pad_visible(value: object, width: int) -> str:
 
 
 def _clip_visible(value: object, width: int | None) -> str:
-    return cli_render.clip_visible(value, width, reset=_ANSI["reset"])
+    return cli_render.clip_visible(value, width, reset=design.RESET,
+                                   mark=design.glyph("ellipsis"))
 
 
 def _render_table(
@@ -219,20 +228,14 @@ class FrogArgumentParser(argparse.ArgumentParser):
 
 
 def _status_role(value: object) -> str:
-    status = str(value or "").lower()
-    if status in {"done", "finished", "released", "passed", "active", "clean", "ok"}:
-        return "success"
-    if status in {"in_progress", "claimed", "assigned", "running"}:
-        return "claim"
-    if status in {"blocked", "failed", "missing", "error"}:
-        return "error"
-    if status in {"stale", "warn", "warning"}:
-        return "warn"
-    return "meta"
+    """The colour name for a status word. The word itself is always printed
+    beside it, which is what makes the reading colour-independent: `mono` and a
+    pipe lose the colour, not the fact."""
+    return design.status_name(value)
 
 
 def _status_text(value: object) -> str:
-    return _color(value, _status_role(value))
+    return design.cli_status_text(value, mode=_rung())
 
 
 def _priority_text(value: object) -> str:
@@ -761,7 +764,7 @@ def _render_kv(rows: list[tuple[str, object]]) -> None:
     for label, value in rows:
         raw = value if value not in (None, "") else "-"
         role = "path" if label.lower() in {"path", "db", "root", "local_root"} else _status_role(raw)
-        print(f"{_color(label, 'muted'):<{width + (len(_ANSI['muted']) + len(_ANSI['reset']) if _use_color() else 0)}}  {_color(raw, role)}")
+        print(f"{_pad_visible(_color(label, 'muted'), width)}  {_color(raw, role)}")
 
 
 def _render_doctor(payload: dict) -> int:
@@ -931,7 +934,7 @@ def _render_status_summary(payload: dict) -> None:
     width = max(len(row["workflow_status"]) for row in rows)
     for row in rows:
         status = row["workflow_status"]
-        print(f"  {_color(status, _status_role(status)):<{width + (len(_ANSI[_status_role(status)]) + len(_ANSI['reset']) if _use_color() else 0)}}  {row['count']}")
+        print(f"  {_pad_visible(_color(status, _status_role(status)), width)}  {row['count']}")
 
 
 def _render_ps_summary(payload: dict) -> None:
@@ -1158,30 +1161,15 @@ def _payload_with_view(payload: dict, args) -> dict:
 
 
 def _event_color(kind: str) -> str:
-    role = _event_role(kind)
-    return _ANSI.get(role, "\033[0m") if _use_color() else ""
-
-
-def _event_role(kind: str) -> str:
-    if kind in {"task.finished", "lock.released"}:
-        return "success"
-    if kind in {"task.claimed", "task.assigned"}:
-        return "claim"
-    if kind.startswith("lock."):
-        return "lock"
-    if kind.startswith("task."):
-        return "meta"
-    if kind.startswith("repo.run") or kind.startswith("repo."):
-        return "success"
-    if kind.startswith("file.") or kind.startswith("workspace."):
-        return "meta"
-    if kind.startswith("frog.command"):
-        return "muted"
-    return "muted"
+    if not _use_color():
+        return ""
+    return design.sgr(design.event_role(kind), mode=_rung())
 
 
 def _event_kind_text(kind: str) -> str:
-    return _color(kind, _event_role(kind))
+    """The event kind in its role's colour. `design.event_role` is the same
+    table `frog board`'s recent strip reads, so the two cannot drift."""
+    return design.paint(kind, design.event_role(kind), mode=_rung())
 
 
 def _event_payload(event: dict) -> dict:
@@ -1221,7 +1209,7 @@ def _lock_release_audit_text(event: dict) -> str:
 
 def _print_event(event: dict) -> None:
     color = _event_color(event["kind"])
-    reset = "\033[0m" if color else ""
+    reset = design.RESET if color else ""
     origin = event.get("origin_box_id")
     origin_text = f" {_color('@' + origin, 'claim')}" if origin else ""
     print(
@@ -1470,19 +1458,26 @@ def _whereis_federated(conn, repo_key: str, *, config_path: str | None = None) -
     return merged
 
 
+# The frog wordmark. It is ASCII art with no glyph key behind it and no
+# `ascii` rendering in the token file, so it cannot be expressed through the
+# glyph set; recorded in docs/design-system-gaps.md rather than reinvented here.
 _FROG_ART = [
     "     ___",
     "    ╱◕ ◕╲›",
     "   ( ˙ᴥ˙ )",
     "   ╱╲___╱╲",
 ]
-_PRIO_COLOR = {"p0": "196", "p1": "208", "p2": "214", "p3": "245"}
-_COL_ORDER = [("idea", "IDEA", "39"), ("blocked", "BLOCKED", "203"),
-              ("in_progress", "IN PROGRESS", "208"), ("done", "DONE", "78")]
+# Column label + role. The role, not a colour index: the board and the TUI read
+# the same COLUMN_ROLE so they cannot drift apart.
+_COL_ORDER = [(key, label, design.COLUMN_ROLE[key]) for key, label in (
+    ("idea", "IDEA"), ("blocked", "BLOCKED"),
+    ("in_progress", "IN PROGRESS"), ("done", "DONE"))]
 
 
-def _c(s: str, code: str, color: bool) -> str:
-    return f"\033[38;5;{code}m{s}\033[0m" if color else s
+def _c(s: str, role: str, color: bool) -> str:
+    """Paint with a semantic role. `color=False` (or a colourless theme) leaves
+    the text untouched, so `mono` output is byte-identical to the plain one."""
+    return design.paint(s, role, mode=_rung()) if color else str(s)
 
 
 def _board_frame(snap: dict, *, color: bool = True, changed: set | None = None,
@@ -1494,56 +1489,65 @@ def _board_frame(snap: dict, *, color: bool = True, changed: set | None = None,
     width = max(40, int(width))
     cols = snap["columns"]
     out = []
+    g = design.glyph
+    mark_w = len(g("ellipsis"))
 
     def _clip(s: str, budget: int) -> str:
-        budget = max(1, budget)
+        budget = max(mark_w, budget)
         if len(s) <= budget:
             return s
-        return s[: budget - 1] + "\u2026"
+        return s[: budget - mark_w] + g("ellipsis")
 
-    title = _c("RAGBAZ", "208", color) + _c("/frog", "39", color) + "  TASK BOARD"
+    title = (_c("RAGBAZ", "ink.link", color) + _c("/frog", "ink.code", color)
+             + "  TASK BOARD")
     out.append(title)
     for _ln in _FROG_ART:
-        out.append(_c(_ln, "78", color))
+        out.append(_c(_ln, "status.ok", color))
     out.append("")
-    for key, label, code in _COL_ORDER:
+    for key, label, role in _COL_ORDER:
         items = cols.get(key, [])
-        head = _c(f"{label} ({len(items)})", code, color)
+        head = _c(f"{label} ({len(items)})", role, color)
         out.append(head)
         if not items:
-            out.append("  " + _c("·", "240", color))
+            out.append("  " + _c(g("dot_empty"), "ink.faint", color))
         for tk in items:
-            pc = _PRIO_COLOR.get((tk["priority"] or "p3").lower(), "245")
-            badge = _c(tk["priority"] or "p?", pc, color)
+            pr = tk["priority"] or "p?"
+            badge = _c(pr, design.priority_role(pr), color)
             mark = ""
             mark_plain = ""
             if tk["slug"] in snap.get("ready", []):
-                mark += _c(" ★", "220", color); mark_plain += " ★"
+                # ready is a status, so it gets the status glyph: the word and
+                # the shape survive mono even though the colour cannot.
+                seg = f" {g('check')}"
+                mark += _c(seg, "status.ok", color); mark_plain += seg
             if tk.get("assigned_agent"):
-                seg = f" ◆{tk['assigned_agent']}"
-                mark += _c(seg, "39", color); mark_plain += seg
+                seg = f" {g('bullet')}{tk['assigned_agent']}"
+                mark += _c(seg, "ink.code", color); mark_plain += seg
             if tk.get("unmet_deps"):
                 deps = tk["unmet_deps"]
-                shown = ", ".join(deps[:3]) + ("\u2026" if len(deps) > 3 else "")
-                seg = f" \u26d3 {len(deps)} \u2190 {shown}"
-                mark += _c(seg, "203", color); mark_plain += seg
+                shown = ", ".join(deps[:3]) + (g("ellipsis") if len(deps) > 3 else "")
+                # `corner` rather than a left arrow: there is no horizontal
+                # arrow key, and a connector still says "this one depends on
+                # that one". See docs/design-system-gaps.md.
+                seg = f" {g('lock')} {len(deps)} {g('corner')} {shown}"
+                mark += _c(seg, "status.error", color); mark_plain += seg
             is_changed = tk["slug"] in changed
-            flash = _c("▸ ", "220", color) if is_changed else "  "
-            prefix_plain = f"{'▸ ' if is_changed else '  '}{tk['priority'] or 'p?'} {tk['slug']}  "
+            select = g("marker_select") if is_changed else ""
+            flash = _c(f"{select} ", "status.warn", color) if is_changed else "  "
+            flash_plain = f"{select} " if is_changed else "  "
+            prefix_plain = f"{flash_plain}{pr} {tk['slug']}  "
             budget = width - len(prefix_plain) - len(mark_plain)
             title_txt = _clip(tk["title"] or "", budget)
             out.append(f"{flash}{badge} {tk['slug']}  {title_txt}{mark}")
         out.append("")
-    out.append(_c("recent", "245", color))
+    out.append(_c("recent", "ink.muted", color))
     for ev in snap.get("recent", [])[-10:]:
         k = ev["kind"]
-        kc = "220" if k == "task.unblocked" else (
-            "78" if k == "task.finished" else (
-            "39" if k == "task.claimed" else "245"))
+        krole = design.event_role(k)
         ts = ev["created_at"][11:19]
         rec_prefix_plain = f"  {ts}  {k}  "
         summary = _clip(ev["summary"] or "", width - len(rec_prefix_plain))
-        out.append(f"  {ts}  {_c(k, kc, color)}  {summary}")
+        out.append(f"  {ts}  {_c(k, krole, color)}  {summary}")
     return "\n".join(out)
 
 
@@ -2380,7 +2384,11 @@ def main(argv: list[str] | None = None) -> int:
     _PAGER_ENABLED = "--no-pager" not in argv
     parser = build_parser()
     args = parser.parse_args(argv)
-    _COLOR_ENABLED = not getattr(args, "no_color", False)
+    # `--no-color` first, then the shared policy: NO_COLOR (any value) and
+    # TERM=dumb off, FORCE_COLOR on and beating NO_COLOR, and a pipe off. The
+    # theme decides the rest -- `mono` is a colourless theme, not a fallback.
+    _COLOR_ENABLED = (not getattr(args, "no_color", False)
+                      and design.colour_on(requested=True))
     _PAGER_ENABLED = not getattr(args, "no_pager", False)
     _PAGE_HUMAN_OUTPUT = _should_page_for_args(args)
     db_explicit = args.db is not None
