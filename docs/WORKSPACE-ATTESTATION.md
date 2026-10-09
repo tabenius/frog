@@ -26,10 +26,15 @@ the latter dependency resolution.
 
 ## Collect a new bundle
 
-From a workspace containing sibling WeftMark and Nostoi checkouts:
+From the workspace root, select the actual WeftMark checkout path. The current
+sibling layout uses `$PWD/weftmark`; the historical `/data/src` layout documented
+in the README uses `$PWD/experiments/WeftMark`. Paths are case-sensitive, so
+substitute your checkout path rather than assuming a directory name:
 
 ```bash
-python3 weftmark/scripts/attest-workspace.py \
+WEFTMARK_REPO="${WEFTMARK_REPO:-$PWD/weftmark}"
+# Historical layout: WEFTMARK_REPO="$PWD/experiments/WeftMark"
+python3 "$WEFTMARK_REPO/scripts/attest-workspace.py" \
   --workspace "$PWD" \
   --output /path/to/delivery/attestations
 ```
@@ -47,6 +52,10 @@ replacement on WeftMark's committed historical bundle.
 ## Verify
 
 Follow WeftMark's `attestations/VERIFY.md` and `attestations/GUARANTEES.md`.
+Have WeftMark's verification script and a trusted local Nostoi Python reference
+available before going offline; the historical bundle does not embed a verifier.
 Verify the detached signature and pinned signer fingerprint, then verify the
 Nostoi chain and its binding to the signed attestation's sequence and digest.
+A fingerprint claimed by the JSON is insufficient: compare GPG's actual signer
+status, and bind `manifest.json` to the body of the signed chain record.
 A valid signature establishes integrity/authorship, not freshness or code quality.
