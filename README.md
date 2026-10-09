@@ -7,6 +7,11 @@ state in `/data/src/AGENTS.db`.
 
 ## Related projects: WeftMark and Sylvae
 
+Workspace attestation tooling and its historical bundle are owned by WeftMark:
+`scripts/attest-workspace.py` and `attestations/` in that repository. See
+[workspace attestation ownership and usage](docs/WORKSPACE-ATTESTATION.md) and
+[agent instructions](AGENTS.md); Frog provides identity and coordination data.
+
 Two other repos in this workspace sit near frog's territory. Neither replaces
 it today; read this before assuming either one does.
 
