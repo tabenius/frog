@@ -16,6 +16,7 @@ from pathlib import Path
 
 from _util import fresh_db
 from ragbaz_frog import store
+from ragbaz_frog.vfs import LocalVFS
 
 
 def _init_git_repo(tmp_path: Path) -> Path:
@@ -81,6 +82,43 @@ class DiscoverBoundaryTests(unittest.TestCase):
         (worktree / ".git").write_text("gitdir: /somewhere/else/.git/worktrees/a-worktree\n")
         result = store.discover_repos(self.conn, root=str(worktree), scan=False)
         self.assertEqual(result["counts"]["discovered"], 1, result)
+
+    def test_vfs_manifests_exclude_dependencies_and_include_explicit_root(self):
+        root = self.tmp_path / "project"
+        root.mkdir()
+        (root / "package.json").write_text('{"name":"project"}')
+        for directory in ["node_modules/pkg", ".venv/pkg", "build/generated", "src/component"]:
+            child = root / directory
+            child.mkdir(parents=True)
+            (child / "package.json").write_text('{"name":"child"}')
+        roots = store._discover_repos_manifest_first("/", LocalVFS(str(root)))
+        self.assertEqual(set(roots), {"/", "/src/component"})
+
+    def test_git_fallback_prunes_excluded_dirs_and_keeps_real_nested_repos(self):
+        root = self.tmp_path / "workspace"
+        root.mkdir()
+        for directory in ["node_modules", "build", "src"]:
+            parent = root / directory
+            parent.mkdir()
+            _init_git_repo(parent)
+        roots = store._discover_repos_git_fallback_local("/", LocalVFS(str(root)), set())
+        self.assertEqual(roots, ["/src/bare-skills-repo"])
+
+    def test_explicit_repo_named_build_is_not_excluded(self):
+        root = self.tmp_path / "build"
+        root.mkdir()
+        (root / "package.json").write_text('{"name":"build"}')
+        self.assertEqual(store._discover_repos_manifest_first("/", LocalVFS(str(root))), ["/"])
+
+    def test_discovery_does_not_register_installed_packages(self):
+        root = self.tmp_path / "project"
+        root.mkdir()
+        (root / "package.json").write_text('{"name":"project"}')
+        installed = root / "node_modules/pkg"
+        installed.mkdir(parents=True)
+        (installed / "package.json").write_text('{"name":"pkg"}')
+        result = store.discover_repos(self.conn, root=str(root), scan=False)
+        self.assertEqual([r["repo_path"] for r in result["repos"]], [str(root)])
 
 
 if __name__ == "__main__":
