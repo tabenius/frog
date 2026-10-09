@@ -58,6 +58,20 @@ class Snapshot(unittest.TestCase):
         finally:
             cp.close(); cl.close()
 
+    def test_absolute_destination_outside_workspace_without_existing_files(self):
+        previous_vfs = store.current_vfs()
+        with tempfile.TemporaryDirectory() as workspace:
+            store.set_vfs(store.LocalVFS(workspace))
+            try:
+                dest = Path(self.dest) / "new-backups"
+                r = store.snapshot_workspace(self.conn, dest=str(dest))
+                self.assertTrue(r["ok"], r)
+                self.assertEqual(Path(r["last"]), dest / "AGENTS.db.last")
+                self.assertTrue((dest / "AGENTS.db.last").is_file())
+                self.assertFalse((Path(workspace) / str(dest).lstrip("/")).exists())
+            finally:
+                store.set_vfs(previous_vfs)
+
     def test_records_event(self):
         store.snapshot_workspace(self.conn, dest=self.dest)
         kinds = [r[0] for r in self.conn.execute(

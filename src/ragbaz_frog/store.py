@@ -54,6 +54,7 @@ from .vfs_store import (
     _is_path_under_vfs_root,
 )
 from .vfs import LocalVFS, current_vfs, set_vfs
+from .paths import repo_relative as _repo_relative, resolve as _resolve_path, resolve_file as _resolve_file
 
 # The historical layout (the konsonans host). Use workspace_root(): the
 # configured workspace wins, and RAGBAZ_SRC_ROOT over both.
@@ -1126,6 +1127,14 @@ def snapshot_workspace(conn, *, dest: str | None = None) -> dict:
 
     vfs = current_vfs()
     db_name = vfs_name(db_file, vfs)
+    # CLI absolute destinations are host paths, not workspace-relative VFS
+    # paths. Root the local backup adapter at / so new files resolve correctly
+    # even before they exist (and regardless of a shadow path in the workspace).
+    if dest and isinstance(vfs, LocalVFS):
+        expanded_dest = os.path.expanduser(dest)
+        if os.path.isabs(expanded_dest):
+            vfs = LocalVFS("/")
+            dest = expanded_dest
     backup_root = vfs_join(vfs_workspace_root(vfs), "backups", vfs=vfs) if not dest else vfs_resolve(dest, vfs)
     vfs_mkdir(backup_root, parents=True, exist_ok=True, vfs=vfs)
     last_vfs = vfs_join(backup_root, f"{db_name}.last", vfs=vfs)
@@ -2398,8 +2407,11 @@ def discover_repos(conn, *, root: str | None = None, scan: bool = True) -> dict:
     # Try to get cached result
     cached = _discover_repos_get_cache(conn, root_vfs, vfs)
     if cached:
+        cached_repos = [repo for repo in cached["repos"]
+                        if not _discovery_path_excluded(
+                            vfs_from_local_path(repo["repo_path"], vfs), root_vfs, vfs)]
         # Re-register any new repos from cache
-        for repo in cached["repos"]:
+        for repo in cached_repos:
             register_repo(
                 conn,
                 repo_path=repo["repo_path"],
@@ -2413,8 +2425,8 @@ def discover_repos(conn, *, root: str | None = None, scan: bool = True) -> dict:
         return {
             "ok": True,
             "root": root_vfs,
-            "repos": cached["repos"],
-            "counts": {"discovered": len(cached["repos"]), "scanned": 0, "cached": True},
+            "repos": cached_repos,
+            "counts": {"discovered": len(cached_repos), "scanned": 0, "cached": True},
         }
 
     # Use SSH-optimized discovery if VFS supports it
@@ -2528,6 +2540,8 @@ def _discover_repos_ssh_optimized(conn, root_vfs: str, vfs, scan: bool) -> dict:
     manifest_map = vfs.find_manifests_in_repos(DISCOVERY_MANIFESTS, root_vfs)
 
     for repo_root_vfs, manifests in manifest_map.items():
+        if _discovery_path_excluded(repo_root_vfs, root_vfs, vfs):
+            continue
         repo_root_local = _vfs_to_local_path(repo_root_vfs, vfs)
 
         if repo_root_local in seen:
@@ -2602,6 +2616,22 @@ def _discover_repos_ssh_optimized(conn, root_vfs: str, vfs, scan: bool) -> dict:
     }
 
 
+def _discovery_path_excluded(path: str, root_vfs: str, vfs: VFS) -> bool:
+    """Apply exclusions below the explicit root, consistently across VFSes.
+
+    An explicitly requested repo named 'build' is still discoverable. Paths
+    outside the requested root must not enter a cached/discovered result.
+    """
+    resolved = vfs_resolve(path, vfs).rstrip("/")
+    root = vfs_resolve(root_vfs, vfs).rstrip("/")
+    if resolved == root:
+        return False
+    if not resolved.startswith(root + "/"):
+        return True
+    return any(part in DISCOVERY_EXCLUDED_DIRS
+               for part in resolved[len(root):].split("/") if part)
+
+
 def _discover_repos_manifest_first(root_vfs: str, vfs: VFS) -> list[str]:
     """Find all manifest files, return unique repo roots (parent dirs)."""
     manifest_roots: set[str] = set()
@@ -2611,7 +2641,7 @@ def _discover_repos_manifest_first(root_vfs: str, vfs: VFS) -> list[str]:
         matches = vfs_glob(root_vfs, f"**/{manifest}", vfs=vfs)
         for match in matches:
             parent = vfs_parent(match, vfs)
-            if parent and parent != "/":
+            if parent and not _discovery_path_excluded(parent, root_vfs, vfs):
                 manifest_roots.add(parent)
 
     return sorted(manifest_roots)
@@ -2632,7 +2662,7 @@ def _discover_repos_git_fallback(root_vfs: str, vfs: VFS, seen: set[str]) -> lis
         # Parent of .git is the repo root
         dot_git = vfs_parent(match, vfs)
         repo_root = vfs_parent(dot_git, vfs)
-        if repo_root and repo_root != "/":
+        if repo_root and not _discovery_path_excluded(repo_root, root_vfs, vfs):
             repo_root_local = _vfs_to_local_path(repo_root, vfs)
             if repo_root_local not in seen:
                 git_roots.add(repo_root)
@@ -2642,7 +2672,7 @@ def _discover_repos_git_fallback(root_vfs: str, vfs: VFS, seen: set[str]) -> lis
     for match in matches:
         if vfs_is_file(match, vfs):
             repo_root = vfs_parent(match, vfs)
-            if repo_root and repo_root != "/":
+            if repo_root and not _discovery_path_excluded(repo_root, root_vfs, vfs):
                 repo_root_local = _vfs_to_local_path(repo_root, vfs)
                 if repo_root_local not in seen:
                     git_roots.add(repo_root)
@@ -2663,6 +2693,7 @@ def _discover_repos_git_fallback_local(root_vfs: str, vfs: LocalVFS, seen: set[s
 
     # Walk the directory tree looking for .git directories
     for current_root, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = [d for d in dirnames if d not in DISCOVERY_EXCLUDED_DIRS]
         # Check for .git directory with HEAD
         git_dir = Path(current_root) / ".git"
         if git_dir.exists():
@@ -2758,6 +2789,7 @@ def _discover_repos_local_fallback(conn, root_local: str, scan: bool) -> dict:
 
     # Phase 3: Git fallback
     for current_root, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = [d for d in dirnames if d not in DISCOVERY_EXCLUDED_DIRS]
         git_dir = Path(current_root) / ".git"
         if git_dir.exists():
             head_file = git_dir / "HEAD"
@@ -2838,7 +2870,7 @@ def _discover_repos_cache_key(root_vfs: str, vfs: VFS) -> str:
     """Generate cache key: workspace + root + git HEAD."""
     import hashlib
     git_head = _get_git_head(root_vfs, vfs)
-    key_data = f"{root_vfs}:{git_head}"
+    key_data = f"discovery-exclusions-v2:{root_vfs}:{git_head}"
     return hashlib.sha256(key_data.encode()).hexdigest()[:32]
 
 
@@ -4366,8 +4398,23 @@ def _lock_rows(
     rows = []
     for row in conn.execute(query, tuple(params)).fetchall():
         payload = dict(row)
-        payload["file_paths"] = json.loads(payload.pop("file_paths_json"))
+        stored_files = json.loads(payload.pop("file_paths_json"))
         payload["rel_files"] = json.loads(payload.pop("rel_files_json", "[]") or "[]")
+        # Normalise to where the files live now. A lock records the paths it was
+        # granted against, and a relocation invalidates those; comparing a stale
+        # stored path with a live queried one silently finds no overlap, which is
+        # exactly the silent-collision class locks exist to prevent. The granted
+        # values are kept verbatim for the audit trail.
+        lock_repo = payload.get("repo_path")
+        payload["stored_file_paths"] = list(stored_files)
+        if lock_repo and stored_files:
+            resolved_files = []
+            for f in stored_files:
+                res = _resolve_file(lock_repo, f)
+                resolved_files.append(res.path if res.ok and res.path else f)
+            payload["file_paths"] = resolved_files
+        else:
+            payload["file_paths"] = stored_files
         rows.append(payload)
     return rows
 
@@ -4375,14 +4422,10 @@ def _lock_rows(
 def _rel_files(repo_path: str | None, files: list[str]) -> list[str]:
     if not repo_path:
         return sorted(set(files or []))
-    root = Path(repo_path)
-    out = []
-    for f in files or []:
-        try:
-            out.append(Path(f).resolve().relative_to(root.resolve()).as_posix())
-        except ValueError:
-            out.append(str(f))            # outside the repo -> keep absolute
-    return sorted(set(out))
+    # repo_relative recovers a path recorded under a previous root instead of
+    # giving up and keeping it absolute, so the durable relative form is right
+    # even for a lock taken before the workspace moved.
+    return sorted({_repo_relative(repo_path, f) for f in files or []})
 
 
 def _locks_conflict(candidate: dict, lock: dict) -> bool:
@@ -6136,7 +6179,34 @@ def _targets_for_kind(conn, repo_path: str, target_kind: str) -> list[dict]:
         payload = dict(row)
         payload["artifact_paths"] = json.loads(payload.pop("artifact_paths_json"))
         targets.append(payload)
-    return targets
+    return [_resolve_target_workdir(repo_path, t) for t in targets]
+
+
+def _resolve_target_workdir(repo_path: str, target: dict) -> dict:
+    """Point a target's workdir at where its repo lives *now*.
+
+    Targets were recorded with an absolute workdir at discovery time, so after a
+    workspace move every one of them is stale. Resolving here -- rather than
+    trusting the column -- is what makes a relocation survivable without a
+    migration: the stored value is treated as a hint, and the repo's current
+    root is authoritative.
+
+    A target that cannot be resolved keeps its stored value and gains
+    `workdir_error`; `repo_run` turns that into a per-target failure instead of
+    letting one dead path abort a workspace-wide verification.
+    """
+    target = dict(target)
+    stored = target.get("workdir")
+    resolved = _resolve_path(repo_path, stored)
+    if resolved.ok:
+        target["workdir"] = resolved.path
+        if resolved.relocated:
+            target["workdir_relocated_from"] = str(stored)
+    else:
+        target["workdir_error"] = resolved.reason
+    # Repo-relative form, so a cache key survives the next relocation too.
+    target["workdir_relative"] = _repo_relative(repo_path, target.get("workdir"))
+    return target
 
 
 def _target_input_hash(target: dict) -> str:
@@ -6145,7 +6215,9 @@ def _target_input_hash(target: dict) -> str:
     to source mtimes for non-git trees."""
     h = hashlib.sha256()
     h.update(("cmd:" + (target.get("command") or "")).encode())
-    h.update(("wd:" + (target.get("workdir") or "")).encode())
+    # The repo-relative workdir, not the absolute one: two targets in different
+    # directories must not collide, and that distinction survives a relocation.
+    h.update(("wd:" + (target.get("workdir_relative") or ".")).encode())
     wd = target.get("workdir") or "."
     used_git = False
     try:
@@ -6182,6 +6254,14 @@ def _target_input_hash(target: dict) -> str:
 
 
 def _cached_success(conn, repo_path: str, target: dict, input_hash: str) -> bool:
+    """True when this exact target already ran successfully and nothing changed.
+
+    `workdir_relative` discriminates between two targets that share a command in
+    different directories, which is what the absolute column used to do -- but
+    an absolute path also changes when the workspace moves, which silently threw
+    away every cached run on the box. Rows recorded before this change store an
+    absolute path and simply miss; that costs one re-run, not correctness.
+    """
     row = conn.execute(
         """
         SELECT returncode FROM target_runs
@@ -6193,7 +6273,7 @@ def _cached_success(conn, repo_path: str, target: dict, input_hash: str) -> bool
             repo_path,
             target["target_kind"] if "target_kind" in target else target.get("_kind", ""),
             target["name"],
-            target["workdir"],
+            target.get("workdir_relative") or ".",
             target["command"],
             input_hash,
         ),
@@ -6234,7 +6314,7 @@ def _targets_for_files(conn, repo_path: str, files: list[str]) -> list[dict]:
     for row in rows:
         payload = dict(row)
         payload["artifact_paths"] = json.loads(payload.pop("artifact_paths_json"))
-        targets.append(payload)
+        targets.append(_resolve_target_workdir(repo_path, payload))
     if not targets:
         return []
     if not files:
@@ -6242,6 +6322,12 @@ def _targets_for_files(conn, repo_path: str, files: list[str]) -> list[dict]:
     affected = []
     unmatched = list(files)
     for tgt in targets:
+        # Resolve the workdir against the repo's current root. Comparing a
+        # stale absolute path against a live changed-file path matches nothing,
+        # so after a relocation every target looked unaffected -- the cache
+        # would then wrongly report a moved repo as unchanged.
+        if tgt.get("workdir_error"):
+            return targets  # cannot prove which target a change belongs to
         wd = str(Path(tgt["workdir"]).resolve())
         hit = False
         for f in files:
@@ -6409,6 +6495,36 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
     for target in targets:
         target = dict(target)
         target["target_kind"] = target_kind
+        if target.get("workdir_error"):
+            # One unresolvable target must not abort verification for the whole
+            # workspace: record it and carry on. Raising here is what turned a
+            # relocation into a total outage of `task finish`.
+            ok = False
+            results.append({
+                "name": target["name"],
+                "target_kind": target_kind,
+                "command": target["command"],
+                "workdir": target.get("workdir"),
+                "returncode": None,
+                "status": "unresolved",
+                "stdout": "",
+                "stderr": target["workdir_error"],
+            })
+            record_event(
+                conn,
+                kind=f"repo.run.{target_kind}",
+                summary=(
+                    f"unresolved {target_kind} target {target['name']}: "
+                    f"{target['workdir_error']}"
+                ),
+                repo_path=repo["repo_path"],
+                payload={
+                    "command": target["command"],
+                    "stored_workdir": target.get("workdir"),
+                    "error": target["workdir_error"],
+                },
+            )
+            continue
         input_hash = _target_input_hash(target)
         if use_cache and _cached_success(conn, repo["repo_path"], target, input_hash):
             results.append({
@@ -6425,7 +6541,8 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
                 """INSERT INTO target_runs(repo_path,target_kind,target_name,
                    workdir,command,input_hash,returncode,status,duration_ms,ran_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (repo["repo_path"], target_kind, target["name"], target["workdir"],
+                (repo["repo_path"], target_kind, target["name"],
+                 target["workdir_relative"],
                  target["command"], input_hash, 0, "cached", 0, utc_now_iso()),
             )
             record_event(
@@ -6458,7 +6575,8 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
             """INSERT INTO target_runs(repo_path,target_kind,target_name,
                workdir,command,input_hash,returncode,status,duration_ms,ran_at)
                VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (repo["repo_path"], target_kind, target["name"], target["workdir"],
+            (repo["repo_path"], target_kind, target["name"],
+             target["workdir_relative"],
              target["command"], input_hash, proc.returncode, "ran",
              duration_ms, utc_now_iso()),
         )
