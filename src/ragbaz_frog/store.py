@@ -54,6 +54,7 @@ from .vfs_store import (
     _is_path_under_vfs_root,
 )
 from .vfs import LocalVFS, current_vfs, set_vfs
+from .paths import resolve_repo_path, relative_repo_path, resolve_target
 
 # The historical layout (the konsonans host). Use workspace_root(): the
 # configured workspace wins, and RAGBAZ_SRC_ROOT over both.
@@ -1126,6 +1127,15 @@ def snapshot_workspace(conn, *, dest: str | None = None) -> dict:
 
     vfs = current_vfs()
     db_name = vfs_name(db_file, vfs)
+    if dest and Path(dest).expanduser().is_absolute() and isinstance(vfs, LocalVFS):
+        # CLI destinations are host paths, whereas VFS absolute paths are
+        # rooted inside the workspace. Avoid prefixing the workspace twice.
+        vfs = LocalVFS("/")
+        dest = str(Path(dest).expanduser())
+    elif dest and isinstance(vfs, LocalVFS):
+        # LocalVFS.resolve(relative) uses a host cwd, but its I/O expects
+        # VFS-rooted paths. Join against the VFS cwd before resolving.
+        dest = vfs_join(vfs.cwd(), dest, vfs=vfs)
     backup_root = vfs_join(vfs_workspace_root(vfs), "backups", vfs=vfs) if not dest else vfs_resolve(dest, vfs)
     vfs_mkdir(backup_root, parents=True, exist_ok=True, vfs=vfs)
     last_vfs = vfs_join(backup_root, f"{db_name}.last", vfs=vfs)
@@ -2377,6 +2387,10 @@ def _looks_like_repo_boundary(root_path: Path, current: Path, dirnames: list[str
     return len(relative_to_anchor.parts) <= max_depth
 
 
+def _discovery_path_allowed(path: str) -> bool:
+    return not any(part in DISCOVERY_EXCLUDED_DIRS for part in Path(path).parts)
+
+
 def discover_repos(conn, *, root: str | None = None, scan: bool = True) -> dict:
     vfs = current_vfs()
     # Convert local root path to VFS path
@@ -2398,6 +2412,8 @@ def discover_repos(conn, *, root: str | None = None, scan: bool = True) -> dict:
     # Try to get cached result
     cached = _discover_repos_get_cache(conn, root_vfs, vfs)
     if cached:
+        cached["repos"] = [repo for repo in cached["repos"]
+                           if _discovery_path_allowed(repo["repo_path"])]
         # Re-register any new repos from cache
         for repo in cached["repos"]:
             register_repo(
@@ -2528,6 +2544,8 @@ def _discover_repos_ssh_optimized(conn, root_vfs: str, vfs, scan: bool) -> dict:
     manifest_map = vfs.find_manifests_in_repos(DISCOVERY_MANIFESTS, root_vfs)
 
     for repo_root_vfs, manifests in manifest_map.items():
+        if not _discovery_path_allowed(repo_root_vfs):
+            continue
         repo_root_local = _vfs_to_local_path(repo_root_vfs, vfs)
 
         if repo_root_local in seen:
@@ -2549,6 +2567,7 @@ def _discover_repos_ssh_optimized(conn, root_vfs: str, vfs, scan: bool) -> dict:
             scan_result = repo_scan(conn, repo_root_local)
             if scan_result.get("ok", True):
                 scanned += 1
+        discovered.append(info["repo"])
     # Also check for git repos without manifests (fallback) - works for all VFS
     # types. One bad repo must not abort discovery of the rest, so a failure is
     # recorded as an event rather than printed and discarded.
@@ -2611,7 +2630,7 @@ def _discover_repos_manifest_first(root_vfs: str, vfs: VFS) -> list[str]:
         matches = vfs_glob(root_vfs, f"**/{manifest}", vfs=vfs)
         for match in matches:
             parent = vfs_parent(match, vfs)
-            if parent and parent != "/":
+            if parent and _discovery_path_allowed(parent):
                 manifest_roots.add(parent)
 
     return sorted(manifest_roots)
@@ -2632,7 +2651,7 @@ def _discover_repos_git_fallback(root_vfs: str, vfs: VFS, seen: set[str]) -> lis
         # Parent of .git is the repo root
         dot_git = vfs_parent(match, vfs)
         repo_root = vfs_parent(dot_git, vfs)
-        if repo_root and repo_root != "/":
+        if repo_root and _discovery_path_allowed(repo_root):
             repo_root_local = _vfs_to_local_path(repo_root, vfs)
             if repo_root_local not in seen:
                 git_roots.add(repo_root)
@@ -2642,7 +2661,7 @@ def _discover_repos_git_fallback(root_vfs: str, vfs: VFS, seen: set[str]) -> lis
     for match in matches:
         if vfs_is_file(match, vfs):
             repo_root = vfs_parent(match, vfs)
-            if repo_root and repo_root != "/":
+            if repo_root and _discovery_path_allowed(repo_root):
                 repo_root_local = _vfs_to_local_path(repo_root, vfs)
                 if repo_root_local not in seen:
                     git_roots.add(repo_root)
@@ -2663,6 +2682,10 @@ def _discover_repos_git_fallback_local(root_vfs: str, vfs: LocalVFS, seen: set[s
 
     # Walk the directory tree looking for .git directories
     for current_root, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = [d for d in dirnames if d not in DISCOVERY_EXCLUDED_DIRS]
+        if not _discovery_path_allowed(current_root):
+            dirnames[:] = []
+            continue
         # Check for .git directory with HEAD
         git_dir = Path(current_root) / ".git"
         if git_dir.exists():
@@ -2720,6 +2743,9 @@ def _discover_repos_local_fallback(conn, root_local: str, scan: bool) -> dict:
     # Phase 1: Manifest-first discovery using os.walk
     manifest_roots = []
     for current_root, dirnames, filenames in os.walk(root_path):
+        if not _discovery_path_allowed(current_root):
+            dirnames[:] = []
+            continue
         # Check for manifests
         for manifest in DISCOVERY_MANIFESTS:
             if manifest in filenames:
@@ -2758,6 +2784,10 @@ def _discover_repos_local_fallback(conn, root_local: str, scan: bool) -> dict:
 
     # Phase 3: Git fallback
     for current_root, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = [d for d in dirnames if d not in DISCOVERY_EXCLUDED_DIRS]
+        if not _discovery_path_allowed(current_root):
+            dirnames[:] = []
+            continue
         git_dir = Path(current_root) / ".git"
         if git_dir.exists():
             head_file = git_dir / "HEAD"
@@ -2765,7 +2795,6 @@ def _discover_repos_local_fallback(conn, root_local: str, scan: bool) -> dict:
                 repo_root = Path(current_root)
                 repo_root_local = str(repo_root.resolve())
                 if repo_root_local in seen:
-                    dirnames[:] = [d for d in dirnames if d != ".git"]
                     continue
                 seen.add(repo_root_local)
 
@@ -4366,23 +4395,28 @@ def _lock_rows(
     rows = []
     for row in conn.execute(query, tuple(params)).fetchall():
         payload = dict(row)
-        payload["file_paths"] = json.loads(payload.pop("file_paths_json"))
-        payload["rel_files"] = json.loads(payload.pop("rel_files_json", "[]") or "[]")
+        payload = _resolve_lock_paths(payload)
         rows.append(payload)
     return rows
+
+
+def _resolve_lock_paths(payload: dict) -> dict:
+    payload = dict(payload)
+    files = json.loads(payload.pop("file_paths_json", "[]"))
+    relative = json.loads(payload.pop("rel_files_json", "[]") or "[]")
+    root = payload.get("repo_path")
+    if root:
+        files = [str(resolve_repo_path(root, f)) for f in (relative or files)]
+        relative = [relative_repo_path(root, f) for f in files]
+    payload["file_paths"] = files
+    payload["rel_files"] = relative
+    return payload
 
 
 def _rel_files(repo_path: str | None, files: list[str]) -> list[str]:
     if not repo_path:
         return sorted(set(files or []))
-    root = Path(repo_path)
-    out = []
-    for f in files or []:
-        try:
-            out.append(Path(f).resolve().relative_to(root.resolve()).as_posix())
-        except ValueError:
-            out.append(str(f))            # outside the repo -> keep absolute
-    return sorted(set(out))
+    return sorted({relative_repo_path(repo_path, f) for f in files or []})
 
 
 def _locks_conflict(candidate: dict, lock: dict) -> bool:
@@ -4487,9 +4521,7 @@ def lock_acquire(
     try:
         rows = []
         for row in conn.execute("SELECT * FROM locks WHERE status = 'active'").fetchall():
-            r = dict(row)
-            r["file_paths"] = json.loads(r.pop("file_paths_json"))
-            r["rel_files"] = json.loads(r.pop("rel_files_json", "[]") or "[]")
+            r = _resolve_lock_paths(dict(row))
             rows.append(r)
         conflicts = [r for r in rows if _locks_conflict(candidate, r)]
         if conflicts and not force:
@@ -5567,7 +5599,7 @@ def _insert_target(
             target_kind,
             name,
             command,
-            workdir,
+            relative_repo_path(repo_path, workdir),
             runner,
             source,
             confidence,
@@ -5980,7 +6012,7 @@ def repo_targets(conn, repo_ref: str) -> dict:
     targets = []
     grouped: dict[str, list[dict]] = {}
     for row in rows:
-        payload = dict(row)
+        payload = resolve_target(dict(row))
         payload["artifact_paths"] = json.loads(payload.pop("artifact_paths_json"))
         targets.append(payload)
         grouped.setdefault(payload["target_kind"], []).append(payload)
@@ -6133,7 +6165,7 @@ def _targets_for_kind(conn, repo_path: str, target_kind: str) -> list[dict]:
     ).fetchall()
     targets = []
     for row in rows:
-        payload = dict(row)
+        payload = resolve_target(dict(row))
         payload["artifact_paths"] = json.loads(payload.pop("artifact_paths_json"))
         targets.append(payload)
     return targets
@@ -6145,8 +6177,8 @@ def _target_input_hash(target: dict) -> str:
     to source mtimes for non-git trees."""
     h = hashlib.sha256()
     h.update(("cmd:" + (target.get("command") or "")).encode())
-    h.update(("wd:" + (target.get("workdir") or "")).encode())
-    wd = target.get("workdir") or "."
+    wd = str(resolve_repo_path(target["repo_path"], target.get("workdir") or "."))
+    h.update(("wd:" + relative_repo_path(target["repo_path"], wd)).encode())
     used_git = False
     try:
         inside = subprocess.run(
@@ -6193,7 +6225,7 @@ def _cached_success(conn, repo_path: str, target: dict, input_hash: str) -> bool
             repo_path,
             target["target_kind"] if "target_kind" in target else target.get("_kind", ""),
             target["name"],
-            target["workdir"],
+            relative_repo_path(repo_path, target["workdir"]),
             target["command"],
             input_hash,
         ),
@@ -6232,7 +6264,7 @@ def _targets_for_files(conn, repo_path: str, files: list[str]) -> list[dict]:
     ).fetchall()
     targets = []
     for row in rows:
-        payload = dict(row)
+        payload = resolve_target(dict(row))
         payload["artifact_paths"] = json.loads(payload.pop("artifact_paths_json"))
         targets.append(payload)
     if not targets:
@@ -6409,6 +6441,7 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
     for target in targets:
         target = dict(target)
         target["target_kind"] = target_kind
+        cache_workdir = relative_repo_path(repo["repo_path"], target["workdir"])
         input_hash = _target_input_hash(target)
         if use_cache and _cached_success(conn, repo["repo_path"], target, input_hash):
             results.append({
@@ -6425,7 +6458,7 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
                 """INSERT INTO target_runs(repo_path,target_kind,target_name,
                    workdir,command,input_hash,returncode,status,duration_ms,ran_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (repo["repo_path"], target_kind, target["name"], target["workdir"],
+                (repo["repo_path"], target_kind, target["name"], cache_workdir,
                  target["command"], input_hash, 0, "cached", 0, utc_now_iso()),
             )
             record_event(
@@ -6437,10 +6470,13 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
             )
             continue
         started = time.monotonic()
-        proc = subprocess.run(
-            target["command"], cwd=target["workdir"], shell=True,
-            text=True, capture_output=True,
-        )
+        try:
+            proc = subprocess.run(
+                target["command"], cwd=target["workdir"], shell=True,
+                text=True, capture_output=True,
+            )
+        except OSError as exc:
+            proc = subprocess.CompletedProcess(target["command"], 127, "", str(exc))
         duration_ms = int((time.monotonic() - started) * 1000)
         if proc.returncode != 0:
             ok = False
@@ -6458,7 +6494,7 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
             """INSERT INTO target_runs(repo_path,target_kind,target_name,
                workdir,command,input_hash,returncode,status,duration_ms,ran_at)
                VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (repo["repo_path"], target_kind, target["name"], target["workdir"],
+            (repo["repo_path"], target_kind, target["name"], cache_workdir,
              target["command"], input_hash, proc.returncode, "ran",
              duration_ms, utc_now_iso()),
         )
