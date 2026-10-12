@@ -2583,7 +2583,7 @@ def main(argv: list[str] | None = None) -> int:
             }, args.json)
         _record_command(conn, argv)
         # Set up VFS context for the workspace
-        from ragbaz_frog.vfs_store import workspace_vfs_context
+        from ragbaz_frog.vfs import workspace_vfs_context
         with workspace_vfs_context(args.workspace, args.config):
             if args.command == "new":
                 return _emit(

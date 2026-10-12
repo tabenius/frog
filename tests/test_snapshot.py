@@ -1,10 +1,13 @@
 import sqlite3
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from _util import fresh_db
 from ragbaz_frog import store
+from ragbaz_frog.vfs import LocalVFS, current_vfs, set_vfs
 
 
 class Snapshot(unittest.TestCase):
@@ -63,6 +66,44 @@ class Snapshot(unittest.TestCase):
         kinds = [r[0] for r in self.conn.execute(
             "SELECT kind FROM event_log").fetchall()]
         self.assertIn("workspace.snapshot", kinds)
+
+    def test_absolute_destination_is_not_prefixed_with_workspace(self):
+        previous = current_vfs()
+        self.addCleanup(set_vfs, previous)
+        with tempfile.TemporaryDirectory() as workspace:
+            set_vfs(LocalVFS(workspace))
+            result = store.snapshot_workspace(self.conn, dest=self.dest)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(Path(result["last"]), Path(self.dest) / "AGENTS.db.last")
+            self.assertFalse((Path(workspace) / self.dest.lstrip("/")).exists())
+
+    def test_absolute_destination_rotation_with_workspace_vfs(self):
+        previous = current_vfs()
+        self.addCleanup(set_vfs, previous)
+        with tempfile.TemporaryDirectory() as workspace:
+            vfs = LocalVFS(workspace)
+            set_vfs(vfs)
+            self.test_rotates_last_to_prev()
+            self.assertIs(current_vfs(), vfs)
+
+    def test_tilde_destination_expands_to_host_home(self):
+        previous = current_vfs()
+        self.addCleanup(set_vfs, previous)
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            set_vfs(LocalVFS(workspace))
+            with patch.dict(os.environ, {"HOME": home}):
+                result = store.snapshot_workspace(self.conn, dest="~/snapshots")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(Path(result["last"]), Path(home) / "snapshots/AGENTS.db.last")
+
+    def test_relative_destination_stays_in_workspace(self):
+        previous = current_vfs()
+        self.addCleanup(set_vfs, previous)
+        with tempfile.TemporaryDirectory() as workspace:
+            set_vfs(LocalVFS(workspace))
+            result = store.snapshot_workspace(self.conn, dest="snapshots")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(Path(result["last"]), Path(workspace) / "snapshots/AGENTS.db.last")
 
 
 if __name__ == "__main__":
