@@ -157,7 +157,7 @@ def _should_page_for_args(args) -> bool:
         return False
     if args.command == "completion":
         return False
-    if args.command == "board":
+    if args.command in {"board", "web"}:
         return False
     if args.command == "mcp" and getattr(args, "mcp_command", None) == "serve":
         return False
@@ -1707,10 +1707,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Emit structured JSON output")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color in human output")
     parser.add_argument("--no-pager", action="store_true", help="Do not page long human output")
+    parser.add_argument('--hook', dest='hook_ids', type=int, action='append', help='Dispatch selected registered hook after committed changes; repeatable')
+    parser.add_argument('--webhook-url', action='append', help='One-shot HTTPS hook after committed changes; replaces configured selection')
+    parser.add_argument('--hook-signing-key-file', help='Owner-only signing-key file for one-shot webhooks')
+    parser.add_argument('--no-hooks', action='store_true', help='Disable automatic/one-shot hooks for this invocation')
+    parser.add_argument('--allow-shell-hooks', action='store_true', help='Explicitly trust locally registered command hooks')
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{db,new,agent,doctor,board,tui,whereis,setup,provider,gh,import,export,hook,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync,gateway}",
+        metavar="{db,new,agent,doctor,board,web,tui,whereis,setup,provider,gh,import,export,hook,agent-instructions,snapshot,ps,completion,status,log,config,mcp,repo,unit,task,lock,file,sync,gateway}",
     )
 
     db_cmd = sub.add_parser(
@@ -1821,12 +1826,16 @@ def build_parser() -> argparse.ArgumentParser:
     psync.add_argument("--source", required=True, choices=["asana", "linear", "jira"])
     psync.add_argument("--config-file", required=True, help="Provider adapter JSON config")
     psync.add_argument("--direction", choices=["pull", "push", "both"], default="both")
-    hook = sub.add_parser("hook", help="Manage event webhooks and event digests")
+    hook = sub.add_parser("hook", help="Manage committed-event delivery adapters and digests")
     hook_sub = hook.add_subparsers(dest="hook_command", required=True)
     hook_add = hook_sub.add_parser("add", help="Add or update an event webhook URL")
     hook_add.add_argument("url")
     hook_add.add_argument("--kind", default="webhook", choices=["webhook", "slack", "discord"])
     hook_add.add_argument("--disabled", action="store_true", help="Create the hook disabled")
+    hook_add.add_argument('--signing-key-file', help='Owner-only HMAC signing-key file (contents never stored)')
+    shell_hook = hook_sub.add_parser('add-shell', help='Register a fixed-argv local command; JSON events arrive on stdin')
+    shell_hook.add_argument('--disabled', action='store_true')
+    shell_hook.add_argument('argv', nargs=argparse.REMAINDER, help='-- /absolute/executable arg ...')
     hook_list = hook_sub.add_parser("list", help="List event webhooks")
     hook_list.add_argument("--include-disabled", action="store_true")
     hook_remove = hook_sub.add_parser("remove", help="Remove an event webhook")
@@ -1843,6 +1852,16 @@ def build_parser() -> argparse.ArgumentParser:
     docs_cmd.add_argument("--out", help="Write to FILE instead of stdout")
     tui_cmd.add_argument("--agent")
     board_cmd = sub.add_parser("board", help="Realtime colored task lifecycle board")
+    web_cmd = sub.add_parser("web", help="Read-only live kanban JSON and web board")
+    web_sub = web_cmd.add_subparsers(dest="web_command", required=True)
+    web_sub.add_parser("snapshot", help="Emit a private versioned kanban JSON projection")
+    web_serve = web_sub.add_parser("serve", help="Serve locally by default, or on an explicitly protected TLS bind")
+    web_serve.add_argument("--host", default="localhost")
+    web_serve.add_argument("--port", type=int, help="Explicit port; otherwise try 8788 and nearby free ports")
+    web_serve.add_argument("--token-file", help="Owner-only file containing the web bearer token")
+    web_serve.add_argument("--tls-cert")
+    web_serve.add_argument("--tls-key")
+    web_serve.add_argument("--public-origin", help="Allowed HTTPS origin for protected non-loopback access")
     board_cmd.add_argument("--once", action="store_true", help="Print one frame and exit")
     board_cmd.add_argument("--interval", type=float, default=5.0,
                            help="Max seconds between forced redraws (safety net)")
@@ -2316,8 +2335,8 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
     return store.repo_run(conn, repo_ref, run_action, use_cache=use_cache, only_targets=only)
 
 
-_GLOBAL_FLAGS_PASSTHROUGH = ("--json", "--no-color", "--no-pager")
-_GLOBAL_FLAGS_WITH_VALUE = ("--config", "--db", "--workspace")
+_GLOBAL_FLAGS_PASSTHROUGH = ("--json", "--no-color", "--no-pager", '--no-hooks', '--allow-shell-hooks')
+_GLOBAL_FLAGS_WITH_VALUE = ("--config", "--db", "--workspace", '--hook', '--webhook-url', '--hook-signing-key-file')
 
 # Workflow statuses that are NOT terminal -- the `--not-done` preset on
 # `frog task list` expands to this set. Keep in sync with _WF_DONE in
@@ -2351,6 +2370,8 @@ def _hoist_global_flags(argv: list[str]) -> list[str]:
     i = 0
     while i < len(argv):
         tok = argv[i]
+        if tok == '--':
+            remaining.extend(argv[i:]); break
         if tok in _GLOBAL_FLAGS_PASSTHROUGH:
             hoisted.append(tok)
             i += 1
@@ -2387,6 +2408,11 @@ def main(argv: list[str] | None = None) -> int:
     args._db_explicit = db_explicit
     if args.db is None:
         args.db = DEFAULT_DB_PATH
+    from ragbaz_frog import hooks
+    try:
+        hooks.preflight(args)
+    except (ValueError, OSError):
+        return _emit({'ok': False, 'error': 'invalid hook override or signing-key file; use HTTPS/loopback URLs and owner-only key files'}, args.json)
 
     if args.command == "completion":
         script = _completion_script(args.shell)
@@ -2404,6 +2430,23 @@ def main(argv: list[str] | None = None) -> int:
             return _emit({"ok": True, "markdown": md}, args.json)
         print(md)
         return 0
+    if args.command == "web":
+        import sqlite3
+        from ragbaz_frog import web_board
+        workspace = frog_config.resolve_workspace(args.workspace, args.config)
+        if workspace and workspace["host"].get("transport") != "local":
+            return _emit({"ok": False, "error": "Frog web reads a local database; expose the peer through its authenticated gateway"}, args.json)
+        if workspace and not db_explicit:
+            args.db = workspace["db"]
+        try:
+            if args.web_command == "snapshot":
+                return _emit(web_board.projection(args.db), True)
+            return web_board.serve(args.db, host=args.host, port=args.port, token_file=args.token_file,
+                                   tls_cert=args.tls_cert, tls_key=args.tls_key, public_origin=args.public_origin)
+        except (ValueError, OSError) as exc:
+            return _emit({"ok": False, "error": str(exc)}, args.json)
+        except sqlite3.Error:
+            return _emit({"ok": False, "error": "Frog projection unavailable; check the local database and run frog db migrate if needed"}, args.json)
     if args.command == "init":
         mig = store.migrate(args.db)
         conn = store.connect(args.db)
@@ -2581,6 +2624,7 @@ def main(argv: list[str] | None = None) -> int:
                 "behind": drift["behind"],
                 "fix": f"frog --db {args.db} db migrate",
             }, args.json)
+        hook_baseline = conn.execute('SELECT COALESCE(MAX(id), 0) FROM event_log').fetchone()[0]
         _record_command(conn, argv)
         # Set up VFS context for the workspace
         from ragbaz_frog.vfs import workspace_vfs_context
@@ -2688,9 +2732,18 @@ def main(argv: list[str] | None = None) -> int:
                         args.url,
                         kind=args.kind,
                         enabled=not args.disabled,
+                        signing_key_file=args.signing_key_file,
                     ),
                     args.json,
                 )
+            if args.hook_command == 'add-shell':
+                from ragbaz_frog import hooks
+                command = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
+                try:
+                    target = hooks.command_target(command)
+                except ValueError as error:
+                    return _emit({'ok': False, 'error': str(error)}, args.json)
+                return _emit(store.event_hook_add(conn, target, kind='shell', enabled=not args.disabled), args.json)
             if args.hook_command == "list":
                 return _emit(
                     store.event_hook_list(conn, include_disabled=args.include_disabled),
@@ -2704,6 +2757,7 @@ def main(argv: list[str] | None = None) -> int:
                         conn,
                         hook_id=args.hook_id,
                         limit=args.limit,
+                        allow_shell=args.allow_shell_hooks,
                     ),
                     args.json,
                 )
@@ -3010,5 +3064,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return _emit({"ok": False, "error": "unsupported command"}, args.json)
     finally:
+        if 'hook_baseline' in locals() and args.command not in ('hook', 'tui', 'gateway'):
+            from ragbaz_frog import hooks
+            try:
+                hooks.after_command(conn, args, hook_baseline)
+            except Exception as error:
+                print('frog: committed operation preserved; ' + hooks.safe_error(error), file=sys.stderr)
         store._workspace_context.reset(workspace_token)
         conn.close()

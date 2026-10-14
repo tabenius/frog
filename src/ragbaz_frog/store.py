@@ -4676,22 +4676,36 @@ def lock_reap(conn) -> dict:
     }
 
 
-def event_hook_add(conn, url: str, *, kind: str = "webhook", enabled: bool = True) -> dict:
+def event_hook_add(conn, url: str, *, kind: str = "webhook", enabled: bool = True,
+                   signing_key_file: str | None = None) -> dict:
+    from . import hooks
     url = (url or "").strip()
     kind = (kind or "webhook").strip() or "webhook"
-    if not (url.startswith("http://") or url.startswith("https://")):
-        return {"ok": False, "error": "hook url must start with http:// or https://"}
+    if kind == 'shell':
+        try:
+            if not url.startswith('exec:'):
+                raise ValueError('command target required')
+            url = hooks.command_target(json.loads(url[5:]))
+        except (ValueError, TypeError):
+            return {'ok': False, 'error': 'command hook requires JSON argv with an absolute executable path'}
+        if signing_key_file:
+            return {'ok': False, 'error': 'signing keys apply only to webhook adapters'}
+    elif kind not in ('webhook', 'slack', 'discord') or not hooks.valid_url(url):
+        return {'ok': False, 'error': 'webhook requires HTTPS (HTTP only on loopback), without credentials/query/fragment'}
+    if signing_key_file:
+        try:
+            hooks.read_key(signing_key_file)
+        except (ValueError, OSError):
+            return {'ok': False, 'error': 'signing key must be a readable owner-only file with 32–4096 bytes'}
+        signing_key_file = str(Path(signing_key_file).expanduser().resolve())
     now = utc_now_iso()
     conn.execute(
-        """
-        INSERT INTO event_hooks(url, kind, enabled, created_at, updated_at)
-        VALUES(?, ?, ?, ?, ?)
-        ON CONFLICT(url) DO UPDATE SET
-          kind = excluded.kind,
-          enabled = excluded.enabled,
-          updated_at = excluded.updated_at
-        """,
-        (url, kind, 1 if enabled else 0, now, now),
+        """INSERT INTO event_hooks(url, kind, enabled, created_at, updated_at, signing_key_file, payload_schema)
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(url) DO UPDATE SET kind=excluded.kind, enabled=excluded.enabled,
+          updated_at=excluded.updated_at, signing_key_file=excluded.signing_key_file,
+          payload_schema=excluded.payload_schema""",
+        (url, kind, 1 if enabled else 0, now, now, signing_key_file, hooks.SCHEMA),
     )
     record_event(conn, kind="hook.added", summary=f"added {kind} event hook", payload={"url": url, "kind": kind})
     conn.commit()
@@ -4733,26 +4747,13 @@ def _hook_events(conn, after_id: int, limit: int) -> list[dict]:
     return [_event_payload(row) for row in rows]
 
 
-def _post_json(url: str, body: dict, *, timeout: float = 5.0) -> tuple[int, str]:
-    data = json.dumps(body, sort_keys=True).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "frog/1"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            text = resp.read().decode("utf-8", "replace")
-            return int(resp.status), text
-    except urllib.error.HTTPError as exc:
-        text = exc.read().decode("utf-8", "replace")
-        return int(exc.code), text
-
-
 def event_hook_dispatch(conn, *, hook_id: int | None = None, limit: int = 50,
-                        request_fn=None) -> dict:
-    request_fn = request_fn or _post_json
+                        request_fn=None, allow_shell: bool = False) -> dict:
+    from . import hooks as adapters
+    if not 1 <= limit <= 100:
+        return {'ok': False, 'error': 'hook batch limit must be between 1 and 100'}
+    if conn.in_transaction:
+        return {'ok': False, 'error': 'commit the event transaction before dispatching hooks'}
     clauses = ["enabled = 1"]
     params = []
     if hook_id is not None:
@@ -4773,14 +4774,14 @@ def event_hook_dispatch(conn, *, hook_id: int | None = None, limit: int = 50,
             continue
         body = {"hook_id": hook["id"], "kind": hook["kind"], "events": events}
         try:
-            status, text = request_fn(hook["url"], body)
+            status, text = request_fn(hook["url"], body) if request_fn else adapters.deliver(hook, body, allow_shell=allow_shell)
             success = 200 <= int(status) < 300
             if success:
                 max_id = max(event["id"] for event in events)
                 conn.execute(
                     """
                     UPDATE event_hooks
-                    SET last_event_id = ?, last_status = ?, last_error = NULL,
+                    SET last_event_id = MAX(last_event_id, ?), last_status = ?, last_error = NULL,
                         last_sent_at = ?, updated_at = ?
                     WHERE id = ?
                     """,
@@ -4803,7 +4804,7 @@ def event_hook_dispatch(conn, *, hook_id: int | None = None, limit: int = 50,
                 })
         except Exception as exc:
             ok = False
-            err = str(exc)
+            err = adapters.safe_error(exc)
             conn.execute(
                 "UPDATE event_hooks SET last_error = ?, updated_at = ? WHERE id = ?",
                 (err[:500], utc_now_iso(), hook["id"]),
