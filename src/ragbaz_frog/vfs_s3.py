@@ -6,8 +6,9 @@ import contextlib
 import fnmatch
 import posixpath
 import stat
+from collections.abc import Iterator
 from datetime import datetime
-from typing import BinaryIO, Iterator, Optional, TextIO, Union
+from typing import BinaryIO, TextIO
 
 from .vfs import VFS, VFSStat, register_vfs
 
@@ -29,10 +30,10 @@ class S3VFS(VFS):
         bucket: str,
         prefix: str = "",
         region: str = "us-east-1",
-        endpoint_url: Optional[str] = None,
-        access_key_id: Optional[str] = None,
-        secret_access_key: Optional[str] = None,
-        session_token: Optional[str] = None,
+        endpoint_url: str | None = None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        session_token: str | None = None,
     ):
         if boto3 is None:
             raise RuntimeError("boto3 not installed: pip install boto3")
@@ -67,7 +68,7 @@ class S3VFS(VFS):
             return "/" + key
         if not key.startswith(self._prefix):
             return "/" + key
-        rel = key[len(self._prefix):].lstrip("/")
+        rel = key[len(self._prefix) :].lstrip("/")
         return "/" + rel if rel else "/"
 
     def _stat_from_head(self, head: dict, key: str) -> VFSStat:
@@ -116,17 +117,23 @@ class S3VFS(VFS):
     def stat(self, path: str) -> VFSStat:
         key = self._to_key(path)
         if key.endswith("/"):
-            return VFSStat(0, datetime.now().timestamp(), stat.S_IFDIR | 0o755, True, False)
+            return VFSStat(
+                0, datetime.now().timestamp(), stat.S_IFDIR | 0o755, True, False
+            )
         try:
             head = self._s3.head_object(Bucket=self._bucket, Key=key)
             return self._stat_from_head(head, key)
         except self._s3.exceptions.ClientError as e:
             if e.response["Error"]["Code"] == "404":
                 if self._dir_exists(key + "/"):
-                    return VFSStat(0, datetime.now().timestamp(), stat.S_IFDIR | 0o755, True, False)
+                    return VFSStat(
+                        0, datetime.now().timestamp(), stat.S_IFDIR | 0o755, True, False
+                    )
             raise
 
-    def read_text(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
+    def read_text(
+        self, path: str, encoding: str = "utf-8", errors: str = "strict"
+    ) -> str:
         data = self.read_bytes(path)
         return data.decode(encoding, errors=errors)
 
@@ -164,7 +171,11 @@ class S3VFS(VFS):
             self._copy_dir(src_key, dst_key)
             self._delete_dir(src_key)
         else:
-            self._s3.copy_object(Bucket=self._bucket, CopySource={"Bucket": self._bucket, "Key": src_key}, Key=dst_key)
+            self._s3.copy_object(
+                Bucket=self._bucket,
+                CopySource={"Bucket": self._bucket, "Key": src_key},
+                Key=dst_key,
+            )
             self._s3.delete_object(Bucket=self._bucket, Key=src_key)
 
     def _copy_dir(self, src_prefix: str, dst_prefix: str) -> None:
@@ -172,9 +183,13 @@ class S3VFS(VFS):
         for page in paginator.paginate(Bucket=self._bucket, Prefix=src_prefix):
             for obj in page.get("Contents", []):
                 src_key = obj["Key"]
-                rel = src_key[len(src_prefix):]
+                rel = src_key[len(src_prefix) :]
                 dst_key = posixpath.join(dst_prefix, rel)
-                self._s3.copy_object(Bucket=self._bucket, CopySource={"Bucket": self._bucket, "Key": src_key}, Key=dst_key)
+                self._s3.copy_object(
+                    Bucket=self._bucket,
+                    CopySource={"Bucket": self._bucket, "Key": src_key},
+                    Key=dst_key,
+                )
 
     def _delete_dir(self, prefix: str) -> None:
         to_delete = []
@@ -184,7 +199,9 @@ class S3VFS(VFS):
                 to_delete.append({"Key": obj["Key"]})
         if to_delete:
             for i in range(0, len(to_delete), 1000):
-                self._s3.delete_objects(Bucket=self._bucket, Delete={"Objects": to_delete[i:i+1000]})
+                self._s3.delete_objects(
+                    Bucket=self._bucket, Delete={"Objects": to_delete[i : i + 1000]}
+                )
 
     def listdir(self, path: str) -> list[str]:
         prefix = self._to_key(path)
@@ -193,13 +210,15 @@ class S3VFS(VFS):
 
         entries = set()
         paginator = self._s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/"):
+        for page in paginator.paginate(
+            Bucket=self._bucket, Prefix=prefix, Delimiter="/"
+        ):
             for prefix_obj in page.get("CommonPrefixes", []):
-                name = prefix_obj["Prefix"][len(prefix):].rstrip("/")
+                name = prefix_obj["Prefix"][len(prefix) :].rstrip("/")
                 if name:
                     entries.add(name)
             for obj in page.get("Contents", []):
-                name = obj["Key"][len(prefix):]
+                name = obj["Key"][len(prefix) :]
                 if name and "/" not in name:
                     entries.add(name)
         return sorted(entries)
@@ -216,7 +235,7 @@ class S3VFS(VFS):
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
-                rel = key[len(prefix):]
+                rel = key[len(prefix) :]
                 if "/" in rel:
                     dir_name = rel.split("/")[0]
                     dirs.add(dir_name)
@@ -237,8 +256,11 @@ class S3VFS(VFS):
         return matches
 
     @contextlib.contextmanager
-    def open(self, path: str, mode: str = "r", encoding: Optional[str] = None) -> Union[TextIO, BinaryIO]:
+    def open(
+        self, path: str, mode: str = "r", encoding: str | None = None
+    ) -> TextIO | BinaryIO:
         import io
+
         key = self._to_key(path)
 
         if "r" in mode:
@@ -254,7 +276,9 @@ class S3VFS(VFS):
             if "b" in mode:
                 yield buffer
             else:
-                wrapper = io.TextIOWrapper(buffer, encoding=encoding or "utf-8", write_through=True)
+                wrapper = io.TextIOWrapper(
+                    buffer, encoding=encoding or "utf-8", write_through=True
+                )
                 yield wrapper
             buffer.seek(0)
             self._s3.put_object(Bucket=self._bucket, Key=key, Body=buffer.getvalue())

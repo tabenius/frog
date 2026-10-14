@@ -3,6 +3,7 @@
 All GitHub I/O goes through the injectable `_gh_exec` seam (wraps the
 `gh` CLI) so the mapping logic is testable without network/auth.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,10 +27,14 @@ def _label_names(issue: dict) -> list[str]:
 def _issue_to_item(issue: dict) -> dict:
     labels = _label_names(issue)
     labels_lower = [label.lower() for label in labels]
-    prio = next((label.lower() for label in labels if label.lower() in _PRIO_LABELS), "p3")
-    status = "done" if issue.get("state", "").upper() == "CLOSED" else (
-        "in_progress" if _IN_PROGRESS_LABEL in labels_lower
-        else "open")
+    prio = next(
+        (label.lower() for label in labels if label.lower() in _PRIO_LABELS), "p3"
+    )
+    status = (
+        "done"
+        if issue.get("state", "").upper() == "CLOSED"
+        else ("in_progress" if _IN_PROGRESS_LABEL in labels_lower else "open")
+    )
     return {
         "external_id": str(issue["number"]),
         "title": issue.get("title") or f"issue {issue['number']}",
@@ -40,9 +45,20 @@ def _issue_to_item(issue: dict) -> dict:
 
 
 def pull(conn, repo: str, *, exec=_gh_exec) -> dict:
-    rc, out, err = exec(["issue", "list", "--repo", repo, "--state", "all",
-                         "--json", "number,title,state,labels,body,assignees",
-                         "--limit", "200"])
+    rc, out, err = exec(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--json",
+            "number,title,state,labels,body,assignees",
+            "--limit",
+            "200",
+        ]
+    )
     if rc != 0:
         return {"ok": False, "error": f"gh issue list failed: {err.strip()}"}
     try:
@@ -75,23 +91,44 @@ def push(conn, repo: str, *, exec=_gh_exec) -> dict:
             pushed.append({"action": "reopen", "issue": num})
         priority = tk.get("priority") or "p3"
         if priority in _PRIO_LABELS:
-            _run_checked(exec, ["issue", "edit", num, "--repo", repo,
-                                "--add-label", priority], errors)
+            _run_checked(
+                exec,
+                ["issue", "edit", num, "--repo", repo, "--add-label", priority],
+                errors,
+            )
             pushed.append({"action": "label", "issue": num, "label": priority})
         if tk["workflow_status"] == "in_progress":
-            _run_checked(exec, ["issue", "edit", num, "--repo", repo,
-                                "--add-label", _IN_PROGRESS_LABEL], errors)
-            pushed.append({"action": "label", "issue": num,
-                           "label": _IN_PROGRESS_LABEL})
+            _run_checked(
+                exec,
+                [
+                    "issue",
+                    "edit",
+                    num,
+                    "--repo",
+                    repo,
+                    "--add-label",
+                    _IN_PROGRESS_LABEL,
+                ],
+                errors,
+            )
+            pushed.append(
+                {"action": "label", "issue": num, "label": _IN_PROGRESS_LABEL}
+            )
         assignee = tk.get("assigned_agent")
         if assignee:
-            _run_checked(exec, ["issue", "edit", num, "--repo", repo,
-                                "--add-assignee", assignee], errors)
-            pushed.append({"action": "assignee", "issue": num,
-                           "assignee": assignee})
-    return {"ok": not errors, "repo": repo, "pushed": pushed,
-            "errors": errors,
-            "message": f"pushed {len(pushed)} issue state(s)"}
+            _run_checked(
+                exec,
+                ["issue", "edit", num, "--repo", repo, "--add-assignee", assignee],
+                errors,
+            )
+            pushed.append({"action": "assignee", "issue": num, "assignee": assignee})
+    return {
+        "ok": not errors,
+        "repo": repo,
+        "pushed": pushed,
+        "errors": errors,
+        "message": f"pushed {len(pushed)} issue state(s)",
+    }
 
 
 def sync(conn, repo: str, *, exec=_gh_exec) -> dict:
@@ -99,17 +136,18 @@ def sync(conn, repo: str, *, exec=_gh_exec) -> dict:
     if not inbound.get("ok"):
         return {"ok": False, "repo": repo, "pull": inbound}
     outbound = push(conn, repo, exec=exec)
-    return {"ok": outbound.get("ok", False), "repo": repo,
-            "pull": inbound, "push": outbound}
+    return {
+        "ok": outbound.get("ok", False),
+        "repo": repo,
+        "pull": inbound,
+        "push": outbound,
+    }
 
 
-def comment_board(conn, repo: str, pr: int, board_text: str,
-                  *, exec=_gh_exec) -> dict:
+def comment_board(conn, repo: str, pr: int, board_text: str, *, exec=_gh_exec) -> dict:
     body = "```\n" + board_text + "\n```"
-    rc, out, err = exec(["pr", "comment", str(pr), "--repo", repo,
-                         "--body", body])
-    return {"ok": rc == 0, "pr": pr,
-            "error": None if rc == 0 else err.strip()}
+    rc, out, err = exec(["pr", "comment", str(pr), "--repo", repo, "--body", body])
+    return {"ok": rc == 0, "pr": pr, "error": None if rc == 0 else err.strip()}
 
 
 def action_yaml() -> str:

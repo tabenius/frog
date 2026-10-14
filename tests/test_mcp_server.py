@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -26,6 +27,8 @@ EXPECTED_TOOLS = [
     "frog_task_dependency", "frog_task_next", "frog_lock_list", "frog_lock_acquire",
     "frog_lock_release", "frog_lock_audit", "frog_log_tail", "frog_repo_affected",
     "frog_workspace_list", "__health",
+    "frog_task_verify", "frog_provider_import", "frog_provider_outbox",
+    "frog_lock_renew",
 ]
 
 
@@ -103,7 +106,8 @@ class TestGatewaySmoke(unittest.TestCase):
         init = _by_id(lines, 1)
         self.assertEqual(init["result"]["serverInfo"]["name"], "ragbaz-frog")
         tool_names = [t["name"] for t in _by_id(lines, 2)["result"]["tools"]]
-        self.assertEqual(len(tool_names), 22)
+        self.assertEqual(set(tool_names), set(EXPECTED_TOOLS))
+        self.assertEqual(len(tool_names), len(EXPECTED_TOOLS))
         for name in EXPECTED_TOOLS:
             self.assertIn(name, tool_names, f"Missing tool: {name}")
 
@@ -204,8 +208,8 @@ class TestFrogTaskList(unittest.TestCase):
         self.assertIsInstance(payload.get("tasks", []), list)
 
     def test_task_list_with_created_task(self):
-        # Test via _call_local directly: mcp serve ignores --db (no env override),
-        # so we exercise the handler logic directly against a fresh db.
+        # Exercise the legacy handler explicitly against a fresh database;
+        # the default handler now reads the model HTTP API instead.
         db = fresh_db()
         conn = store.connect(db)
         store.create_task(
@@ -217,7 +221,8 @@ class TestFrogTaskList(unittest.TestCase):
         )
         conn.close()
         ws = {"db": db, "host": {"transport": "local"}, "name": "test"}
-        result = mcp_server._call_local("frog_task_list", {"workflow_status": "idea"}, ws)
+        with patch.object(mcp_server, "_MODEL_OPTIONS", {"enabled": False}):
+            result = mcp_server._call_local("frog_task_list", {"workflow_status": "idea"}, ws)
         self.assertTrue(result.get("ok"), result)
         slugs = [t["slug"] for t in result.get("tasks", [])]
         self.assertIn("test-task-1", slugs)

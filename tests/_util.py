@@ -1,4 +1,5 @@
 """Shared test helpers: a throwaway migrated DB, zero external deps."""
+
 from __future__ import annotations
 
 import contextlib
@@ -17,8 +18,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ragbaz_frog import store  # noqa: E402
-from ragbaz_frog.vfs_store import workspace_vfs_context  # noqa: E402
+from ragbaz_frog import store
 
 
 def fresh_db() -> str:

@@ -7,24 +7,33 @@ joining peers, and cross-box repo resolution. New code should import
 from here for clarity; a future physical relocation follows exactly
 these boundaries.
 """
+
 from __future__ import annotations
 
-from ragbaz_frog.store import (  # noqa: F401
+from ragbaz_frog.store import (
     _box_id,
     _box_id_path,
-    ensure_box_identity,
-    box_whoami,
     _parse_ssh_target,
     _remote_exec,
+    box_whoami,
+    compute_repo_key,
+    ensure_box_identity,
+    ensure_repo_key,
     federation_join,
     peers_list,
     whereis,
-    compute_repo_key,
-    ensure_repo_key,
 )
 
 __all__ = [
-    "_box_id", "_box_id_path", "ensure_box_identity", "box_whoami",
-    "_parse_ssh_target", "_remote_exec", "federation_join",
-    "peers_list", "whereis", "compute_repo_key", "ensure_repo_key",
+    "_box_id",
+    "_box_id_path",
+    "_parse_ssh_target",
+    "_remote_exec",
+    "box_whoami",
+    "compute_repo_key",
+    "ensure_box_identity",
+    "ensure_repo_key",
+    "federation_join",
+    "peers_list",
+    "whereis",
 ]

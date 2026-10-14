@@ -8,18 +8,15 @@ from __future__ import annotations
 
 import abc
 import contextlib
-import fnmatch
 import os
 import stat
-import shutil
-import tempfile
 import threading
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import BinaryIO, Iterator, Optional, TextIO, Union
+from typing import BinaryIO, TextIO
 
 try:
     import boto3
@@ -56,7 +53,7 @@ def is_local_only_mode() -> bool:
 def _assert_local_only(vfs: VFS, operation: str, path: str) -> None:
     """Abort with actionable error if --local-only but path is non-local."""
     if _local_only_mode and not isinstance(vfs, LocalVFS):
-        scheme = getattr(vfs, 'scheme', 'unknown')
+        scheme = getattr(vfs, "scheme", "unknown")
         raise RuntimeError(
             f"--local-only mode: {operation} requires local filesystem, "
             f"but path '{path}' uses {scheme}:// VFS.\n"
@@ -69,6 +66,7 @@ def _assert_local_only(vfs: VFS, operation: str, path: str) -> None:
 @dataclass
 class VFSStat:
     """Filesystem stat result, analogous to os.stat_result."""
+
     size: int
     mtime: float
     mode: int
@@ -114,7 +112,9 @@ class VFS(abc.ABC):
         """Get file/directory metadata."""
 
     @abc.abstractmethod
-    def read_text(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
+    def read_text(
+        self, path: str, encoding: str = "utf-8", errors: str = "strict"
+    ) -> str:
         """Read file as text."""
 
     @abc.abstractmethod
@@ -154,7 +154,9 @@ class VFS(abc.ABC):
         """Return matching paths under path."""
 
     @abc.abstractmethod
-    def open(self, path: str, mode: str = "r", encoding: Optional[str] = None) -> Union[TextIO, BinaryIO]:
+    def open(
+        self, path: str, mode: str = "r", encoding: str | None = None
+    ) -> TextIO | BinaryIO:
         """Open file for reading/writing."""
 
     @abc.abstractmethod
@@ -201,7 +203,7 @@ class VFS(abc.ABC):
         base = self.resolve(base).rstrip("/")
         if not path.startswith(base):
             raise ValueError(f"{path} not under {base}")
-        rel = path[len(base):].lstrip("/")
+        rel = path[len(base) :].lstrip("/")
         return rel
 
 
@@ -210,7 +212,7 @@ class LocalVFS(VFS):
 
     scheme = "file"
 
-    def __init__(self, uri_or_root: Optional[str] = None, **kwargs):
+    def __init__(self, uri_or_root: str | None = None, **kwargs):
         # Accept either a URI (file:///path) or a plain path
         if uri_or_root and uri_or_root.startswith("file://"):
             parsed = urllib.parse.urlparse(uri_or_root)
@@ -262,7 +264,9 @@ class LocalVFS(VFS):
     def stat(self, path: str) -> VFSStat:
         return VFSStat.from_os_stat(self._to_path(path).stat())
 
-    def read_text(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
+    def read_text(
+        self, path: str, encoding: str = "utf-8", errors: str = "strict"
+    ) -> str:
         return self._to_path(path).read_text(encoding=encoding, errors=errors)
 
     def read_bytes(self, path: str) -> bytes:
@@ -311,7 +315,7 @@ class LocalVFS(VFS):
         return matches
 
     @contextlib.contextmanager
-    def open(self, path: str, mode: str = "r", encoding: Optional[str] = None):
+    def open(self, path: str, mode: str = "r", encoding: str | None = None):
         p = self._to_path(path)
         if "b" in mode:
             f = p.open(mode)
@@ -371,7 +375,7 @@ class VFSRegistry:
         self._instances[uri] = instance
         return instance
 
-    def get(self, uri: str) -> Optional[VFS]:
+    def get(self, uri: str) -> VFS | None:
         return self._instances.get(uri)
 
     def default(self) -> VFS:
@@ -390,7 +394,7 @@ def create_vfs(uri: str, **kwargs) -> VFS:
     return _registry.create(uri, **kwargs)
 
 
-def get_vfs(uri: str) -> Optional[VFS]:
+def get_vfs(uri: str) -> VFS | None:
     return _registry.get(uri)
 
 
@@ -414,11 +418,13 @@ def set_vfs(vfs: VFS) -> None:
 
 
 @contextlib.contextmanager
-def workspace_vfs_context(workspace_name: Optional[str] = None, config_path: Optional[str] = None) -> Iterator[VFS]:
+def workspace_vfs_context(
+    workspace_name: str | None = None, config_path: str | None = None
+) -> Iterator[VFS]:
     """Context manager that sets up VFS for a workspace."""
     from .config import resolve_workspace
     from .vfs import create_vfs
-    
+
     workspace = resolve_workspace(workspace_name, config_path)
     if not workspace:
         vfs = default_vfs()
@@ -432,7 +438,7 @@ def workspace_vfs_context(workspace_name: Optional[str] = None, config_path: Opt
                 vfs = create_vfs(f"file://{root}")
             else:
                 vfs = default_vfs()
-    
+
     old_vfs = getattr(_vfs_local, "vfs", None)
     _vfs_local.vfs = vfs
     try:

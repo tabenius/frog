@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 

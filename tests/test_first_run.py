@@ -26,7 +26,9 @@ from ragbaz_frog.main_cli import main
 def run(*argv):
     out = io.StringIO()
     with redirect_stdout(out):
-        code = main(list(argv))
+        # These regressions exercise local AGENTS.db setup, not the default
+        # HTTP backend. Select legacy storage explicitly under model-first CLI.
+        code = main(["--legacy-storage", *argv])
     return code, out.getvalue()
 
 

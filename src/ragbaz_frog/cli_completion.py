@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 TOP_LEVEL = (
     "db new agent box doctor board tui whereis setup provider gh import export hook "
     "agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
@@ -15,7 +14,10 @@ def completion_script(
     workspace_names: list[str],
     registered_files: str,
 ) -> str:
-    repo_subs = "list register discover sync info task key keys dep affected " + " ".join(sorted(repo_actions))
+    repo_subs = (
+        "list register discover sync info task key keys dep affected "
+        + " ".join(sorted(repo_actions))
+    )
     workspace_words = " ".join(workspace_names)
     if shell == "bash":
         return f"""_frog_complete() {{

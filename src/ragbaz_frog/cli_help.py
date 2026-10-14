@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-
 SECTION_HEADERS = {
     "positional arguments:",
     "options:",
@@ -27,7 +26,7 @@ def colorize_help(
     for line in text.splitlines():
         stripped = line.strip()
         if line.startswith("usage:"):
-            lines.append(color("usage:", "muted") + line[len("usage:"):])
+            lines.append(color("usage:", "muted") + line[len("usage:") :])
         elif stripped in SECTION_HEADERS:
             lines.append(line.replace(stripped, color(stripped, "meta"), 1))
         elif stripped.startswith("frog "):

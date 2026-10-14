@@ -13,7 +13,6 @@ DEFAULT_DB_PATH = os.environ.get("FROG_DB_PATH") or _COMPILED_DEFAULT_DB_PATH
 from ragbaz_frog import config as frog_config
 from ragbaz_frog import store
 
-
 DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 SUPPORTED_PROTOCOL_VERSIONS = (
     "2025-03-26",
@@ -34,6 +33,26 @@ def _log(level: str, message: str, **fields) -> None:
 
 def _tool_specs() -> list[dict]:
     return [
+        {
+            'name':'frog_task_verify',
+            'description':'Run an allowlisted model-server build target for the current task revision.',
+            'inputSchema':{'type':'object','properties':{'workspace':{'type':'string'},'slug':{'type':'string'},'target':{'type':'string'}},'required':['slug']},
+        },
+        {
+            'name':'frog_provider_import',
+            'description':'Import normalized provider items through the model API; each new item needs repo_ref.',
+            'inputSchema':{'type':'object','properties':{'workspace':{'type':'string'},'source':{'type':'string'},'items':{'type':'array','items':{'type':'object'}}},'required':['source','items']},
+        },
+        {
+            'name':'frog_provider_outbox',
+            'description':'List model tasks owned by an external provider, with original external IDs.',
+            'inputSchema':{'type':'object','properties':{'workspace':{'type':'string'},'source':{'type':'string'}},'required':['source']},
+        },
+        {
+            'name':'frog_lock_renew',
+            'description':'Renew an active model lease with its fencing ID.',
+            'inputSchema':{'type':'object','properties':{'workspace':{'type':'string'},'lock_id':{'type':'string'},'lease_seconds':{'type':'integer'}},'required':['lock_id']},
+        },
         {
             "name": "frog_status",
             "description": "Show workspace or repo-scoped task and lock summary.",
@@ -155,69 +174,118 @@ def _tool_specs() -> list[dict]:
         {
             "name": "frog_task_claim",
             "description": "Atomically take ownership + the scoped lock + mark a task in_progress.",
-            "inputSchema": {"type": "object", "properties": {
-                "workspace": {"type": "string"}, "slug": {"type": "string"},
-                "agent": {"type": "string"}, "lock_kind": {"type": "string"},
-                "files": {"type": "array", "items": {"type": "string"}},
-                "allow_parallel": {"type": "boolean"},
-                "force": {"type": "boolean"}}, "required": ["slug", "agent"]},
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "slug": {"type": "string"},
+                    "agent": {"type": "string"},
+                    "lock_kind": {"type": "string"},
+                    "files": {"type": "array", "items": {"type": "string"}},
+                    "allow_parallel": {"type": "boolean"},
+                    "force": {"type": "boolean"},
+                },
+                "required": ["slug", "agent"],
+            },
         },
         {
             "name": "frog_task_finish",
             "description": "Verify (affected build/test) then mark done, release locks, report unblocked dependents.",
-            "inputSchema": {"type": "object", "properties": {
-                "workspace": {"type": "string"}, "slug": {"type": "string"},
-                "agent": {"type": "string"}, "verify": {"type": "boolean"}},
-                "required": ["slug", "agent"]},
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "slug": {"type": "string"},
+                    "agent": {"type": "string"},
+                    "verify": {"type": "boolean"},
+                },
+                "required": ["slug", "agent"],
+            },
         },
         {
             "name": "frog_task_create",
             "description": "Create a task slice.",
-            "inputSchema": {"type": "object", "properties": {
-                "workspace": {"type": "string"}, "slug": {"type": "string"},
-                "title": {"type": "string"}, "repo_ref": {"type": "string"},
-                "why": {"type": "string"}, "what": {"type": "string"},
-                "files": {"type": "array", "items": {"type": "string"}},
-                "priority": {"type": "string"}},
-                "required": ["slug", "title"]},
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "slug": {"type": "string"},
+                    "title": {"type": "string"},
+                    "repo_ref": {"type": "string"},
+                    "why": {"type": "string"},
+                    "what": {"type": "string"},
+                    "files": {"type": "array", "items": {"type": "string"}},
+                    "priority": {"type": "string"},
+                },
+                "required": ["slug", "title"],
+            },
         },
         {
             "name": "frog_task_edit",
-            "description": "Edit mutable task fields and record an audited before/after diff.",
-            "inputSchema": {"type": "object", "properties": {
-                "workspace": {"type": "string"}, "slug": {"type": "string"},
-                "title": {"type": "string"}, "repo_ref": {"type": "string"},
-                "why": {"type": "string"}, "what": {"type": "string"},
-                "roi_note": {"type": "string"}, "priority": {"type": "string"},
-                "actor": {"type": "string"}},
-                "required": ["slug"]},
+            "description": "Edit mutable task fields with an audit event; model edits use revision checks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "slug": {"type": "string"},
+                    "title": {"type": "string"},
+                    "repo_ref": {"type": "string"},
+                    "why": {"type": "string"},
+                    "what": {"type": "string"},
+                    "roi_note": {"type": "string"},
+                    "priority": {"type": "string"},
+                    "actor": {"type": "string"},
+                },
+                "required": ["slug"],
+            },
         },
         {
             "name": "frog_task_dependency",
             "description": "Declare task A depends_on task B.",
-            "inputSchema": {"type": "object", "properties": {
-                "workspace": {"type": "string"}, "slug": {"type": "string"},
-                "depends_on": {"type": "string"}, "relation": {"type": "string"}},
-                "required": ["slug", "depends_on"]},
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "slug": {"type": "string"},
+                    "depends_on": {"type": "string"},
+                    "relation": {"type": "string"},
+                },
+                "required": ["slug", "depends_on"],
+            },
         },
         {
             "name": "frog_lock_acquire",
             "description": "Acquire a coordination lock (atomic; conflicts return ok=false).",
-            "inputSchema": {"type": "object", "properties": {
-                "workspace": {"type": "string"}, "scope_key": {"type": "string"},
-                "repo_ref": {"type": "string"}, "lock_kind": {"type": "string"},
-                "files": {"type": "array", "items": {"type": "string"}},
-                "agent": {"type": "string"}, "reason": {"type": "string"},
-                "force": {"type": "boolean"}},
-                "required": ["scope_key", "lock_kind", "agent"]},
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "scope_key": {"type": "string"},
+                    "repo_ref": {"type": "string"},
+                    "lock_kind": {"type": "string"},
+                    "lease_seconds": {"type": "integer"},
+                    "files": {"type": "array", "items": {"type": "string"}},
+                    "agent": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "force": {"type": "boolean"},
+                },
+                "required": ["scope_key", "lock_kind", "agent"],
+            },
         },
         {
             "name": "frog_lock_release",
             "description": "Release a coordination lock by id.",
-            "inputSchema": {"type": "object", "properties": {
-                "workspace": {"type": "string"}, "lock_id": {"type": "integer"},
-                "force": {"type": "boolean"}, "agent": {"type": "string"},
-                "reason": {"type": "string"}}, "required": ["lock_id"]},
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "lock_id": {"type": ["integer", "string"]},
+                    "force": {"type": "boolean"},
+                    "agent": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["lock_id"],
+            },
         },
         {
             "name": "frog_task_next",
@@ -304,6 +372,7 @@ def _remote_dispatch(workspace: dict, argv: list[str]) -> dict:
 # default (/data/src/AGENTS.db, which need not exist on this host).
 _DB_OVERRIDE: str | None = None
 _CONFIG_PATH: str | None = None
+_MODEL_OPTIONS = None
 
 
 def _default_db() -> str:
@@ -336,6 +405,36 @@ def _with_conn(db_path: str, fn):
 
 
 def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
+    from .model_backend import Backend, settings
+    options = _MODEL_OPTIONS or settings(config_path=_CONFIG_PATH, legacy_db=_DB_OVERRIDE is not None)
+    if options['enabled']:
+        backend = Backend(options)
+        if arguments.get('workspace'):
+            backend.workspace = arguments['workspace']
+        if tool_name == 'frog_task_list':
+            return backend.task_list(repo_ref=arguments.get('repo_ref'), workflow_status=arguments.get('workflow_status'),
+                assigned_agent=arguments.get('assigned_agent'), include_done=True)
+        if tool_name == 'frog_repo_list':
+            return {'ok':True,'repos':backend.repo_tree_snapshot()['repos']}
+        if tool_name == 'frog_task_edit':
+            return backend.task_edit(slug=arguments['slug'], **{k:v for k,v in arguments.items() if k not in ('slug','workspace')})
+        if tool_name == 'frog_task_verify':
+            return backend.verify(arguments['slug'],arguments.get('target','verify'))
+        if tool_name == 'frog_provider_import':
+            return backend.provider_sync_in(None,arguments['source'],arguments['items'])
+        if tool_name == 'frog_provider_outbox':
+            return backend.provider_outbox(None,arguments['source'])
+        if tool_name in ('frog_lock_list','frog_lock_acquire','frog_lock_release','frog_lock_renew'):
+            from types import SimpleNamespace
+            defaults = dict(command='lock',lock_command=tool_name.removeprefix('frog_lock_'),
+                repo_ref=None,file=[],force=False,pid=None,reason=None,eta_minutes=None,
+                agent=None,lease_seconds=1800,status=None,include_inactive=False)
+            defaults.update({k:v for k,v in arguments.items() if k != 'workspace'})
+            if 'files' in defaults:
+                defaults['file'] = defaults.pop('files')
+            return backend.dispatch(SimpleNamespace(**defaults))
+        from .model_client import ModelError
+        raise ModelError('unsupported_operation', f'{tool_name} is not supported by the model contract; select legacy storage explicitly')
     db_path = _DB_OVERRIDE or (workspace["db"] if workspace else _default_db())
 
     def run(conn):
@@ -349,8 +448,12 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
         if tool_name == "frog_repo_info":
             return store.repo_info(conn, arguments["repo_ref"])
         if tool_name == "frog_repo_discover":
-            root = arguments.get("root") or (workspace["root"] if workspace else str(store.workspace_root()))
-            return store.discover_repos(conn, root=root, scan=bool(arguments.get("scan", True)))
+            root = arguments.get("root") or (
+                workspace["root"] if workspace else str(store.workspace_root())
+            )
+            return store.discover_repos(
+                conn, root=root, scan=bool(arguments.get("scan", True))
+            )
         if tool_name == "frog_repo_targets":
             return store.repo_targets(conn, arguments["repo_ref"])
         if tool_name == "frog_unit_discover":
@@ -382,31 +485,39 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
             )
         if tool_name == "frog_task_claim":
             return store.task_claim(
-                conn, slug=arguments["slug"],
+                conn,
+                slug=arguments["slug"],
                 agent=arguments.get("agent", "unknown"),
                 lock_kind=arguments.get("lock_kind", "edit"),
                 files=arguments.get("files", []),
                 force=bool(arguments.get("force", False)),
-                allow_parallel=bool(arguments.get("allow_parallel", False)))
+                allow_parallel=bool(arguments.get("allow_parallel", False)),
+            )
         if tool_name == "frog_task_finish":
             return store.task_finish(
-                conn, slug=arguments["slug"],
+                conn,
+                slug=arguments["slug"],
                 agent=arguments.get("agent", "unknown"),
-                verify=bool(arguments.get("verify", True)))
+                verify=bool(arguments.get("verify", True)),
+            )
         if tool_name == "frog_task_create":
             return store.create_task(
-                conn, slug=arguments["slug"],
+                conn,
+                slug=arguments["slug"],
                 repo_ref=arguments.get("repo_ref"),
-                title=arguments["title"], why=arguments.get("why"),
+                title=arguments["title"],
+                why=arguments.get("why"),
                 what_text=arguments.get("what"),
                 roi_note=arguments.get("roi_note"),
                 priority=arguments.get("priority", "p3"),
                 workflow_status=arguments.get("workflow_status", "idea"),
                 git_status=arguments.get("git_status", "not_started"),
                 assigned_agent=arguments.get("assigned_agent"),
-                delegation_current=None, delegation_other=None,
+                delegation_current=None,
+                delegation_other=None,
                 parent_task_slug=arguments.get("parent_task_slug"),
-                files=arguments.get("files", []))
+                files=arguments.get("files", []),
+            )
         if tool_name == "frog_task_edit":
             return store.task_edit(
                 conn,
@@ -421,25 +532,33 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
             )
         if tool_name == "frog_task_dependency":
             return store.task_add_dependency(
-                conn, arguments["slug"], arguments["depends_on"],
-                arguments.get("relation", "depends_on"))
+                conn,
+                arguments["slug"],
+                arguments["depends_on"],
+                arguments.get("relation", "depends_on"),
+            )
         if tool_name == "frog_lock_acquire":
             return store.lock_acquire(
-                conn, scope_key=arguments["scope_key"],
+                conn,
+                scope_key=arguments["scope_key"],
                 repo_ref=arguments.get("repo_ref"),
                 lock_kind=arguments["lock_kind"],
                 files=arguments.get("files", []),
                 agent=arguments.get("agent", "unknown"),
-                pid=None, reason=arguments.get("reason"),
+                pid=None,
+                reason=arguments.get("reason"),
                 lease_seconds=int(arguments.get("lease_seconds", 1800)),
                 eta_minutes=arguments.get("eta_minutes"),
-                force=bool(arguments.get("force", False)))
+                force=bool(arguments.get("force", False)),
+            )
         if tool_name == "frog_lock_release":
             return store.lock_release(
-                conn, int(arguments["lock_id"]),
+                conn,
+                int(arguments["lock_id"]),
                 force=bool(arguments.get("force", False)),
                 agent=arguments.get("agent"),
-                reason=arguments.get("reason"))
+                reason=arguments.get("reason"),
+            )
         if tool_name == "frog_task_next":
             return store.task_next(
                 conn,
@@ -462,8 +581,12 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
         if tool_name == "frog_workspace_list":
             return frog_config.list_workspaces()
         if tool_name == "__health":
-            import datetime, sqlite3 as _sqlite3
-            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            import datetime
+            import sqlite3 as _sqlite3
+
+            ts = datetime.datetime.now(datetime.UTC).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
             db_ok = False
             db_error = None
             try:
@@ -489,7 +612,9 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
     return _with_conn(db_path, run)
 
 
-def call_tool(tool_name: str, arguments: dict | None, *, config_path: str | None) -> dict:
+def call_tool(
+    tool_name: str, arguments: dict | None, *, config_path: str | None
+) -> dict:
     args = arguments or {}
     workspace = _workspace(args.get("workspace"), config_path)
     if tool_name == "frog_workspace_list":
@@ -554,10 +679,16 @@ def call_tool(tool_name: str, arguments: dict | None, *, config_path: str | None
     try:
         return _call_local(tool_name, args, workspace)
     except Exception as _exc:
-        import datetime as _dt, logging as _logging
-        _ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _rec = {"ts": _ts, "level": "error", "logger": "mcp_server",
-                "msg": str(_exc), "tool": tool_name}
+        import datetime as _dt
+
+        _ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _rec = {
+            "ts": _ts,
+            "level": "error",
+            "logger": "mcp_server",
+            "msg": str(_exc),
+            "tool": tool_name,
+        }
         sys.stderr.write(__import__("json").dumps(_rec) + "\n")
         sys.stderr.flush()
         raise
@@ -572,46 +703,67 @@ _SRC_ROOT = "/data/src"
 
 def _resource_specs() -> list[dict]:
     return [
-        {"uri": "frog://board", "name": "frog board snapshot",
-         "description": "Live task lifecycle columns + ready set + recent events.",
-         "mimeType": "application/json"},
-        {"uri": "frog://events", "name": "frog event tail",
-         "description": "Recent task/lock coordination events.",
-         "mimeType": "application/json"},
-        {"uri": "frog://agents-md", "name": "AGENTS.md",
-         "description": "Workspace agent instructions.",
-         "mimeType": "text/markdown"},
-        {"uri": "frog://agents-coop", "name": "agents-coop.md",
-         "description": "Shared agent worklog.",
-         "mimeType": "text/markdown"},
+        {
+            "uri": "frog://board",
+            "name": "frog board snapshot",
+            "description": "Live task lifecycle columns + ready set + recent events.",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": "frog://events",
+            "name": "frog event tail",
+            "description": "Recent task/lock coordination events.",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": "frog://agents-md",
+            "name": "AGENTS.md",
+            "description": "Workspace agent instructions.",
+            "mimeType": "text/markdown",
+        },
+        {
+            "uri": "frog://agents-coop",
+            "name": "agents-coop.md",
+            "description": "Shared agent worklog.",
+            "mimeType": "text/markdown",
+        },
     ]
 
 
 def _read_resource(uri: str, *, db_path: str | None = None) -> dict:
+    from .model_backend import Backend, settings
+    options = _MODEL_OPTIONS or settings(config_path=_CONFIG_PATH, legacy_db=_DB_OVERRIDE is not None or db_path is not None)
+    if options['enabled'] and uri in ('frog://board','frog://events'):
+        backend = Backend(options)
+        value = backend.board_snapshot() if uri == 'frog://board' else backend.event_rows()[-30:]
+        return {'mimeType':'application/json','text':json.dumps(value,indent=2)}
     db_path = db_path or _default_db()
     if uri == "frog://board":
         snap = _with_conn(db_path, lambda c: store.board_snapshot(c))
-        return {"mimeType": "application/json",
-                "text": json.dumps(snap, indent=2)}
+        return {"mimeType": "application/json", "text": json.dumps(snap, indent=2)}
     if uri == "frog://events":
         ev = _with_conn(db_path, lambda c: store.log_tail(c, limit=30, repo_ref=None))
-        return {"mimeType": "application/json",
-                "text": json.dumps(ev, indent=2)}
+        return {"mimeType": "application/json", "text": json.dumps(ev, indent=2)}
     if uri in ("frog://agents-md", "frog://agents-coop"):
         fn = "AGENTS.md" if uri.endswith("agents-md") else "agents-coop.md"
         fp = Path(_src_root()) / fn
-        return {"mimeType": "text/markdown",
-                "text": fp.read_text() if fp.is_file() else f"({fn} not present)"}
+        return {
+            "mimeType": "text/markdown",
+            "text": fp.read_text() if fp.is_file() else f"({fn} not present)",
+        }
     raise KeyError(uri)
 
 
 def _prompt_specs() -> list[dict]:
-    return [{
-        "name": "coordinate-before-edit",
-        "description": "Frog coordination discipline before touching a repo.",
-        "arguments": [{"name": "agent", "description": "Acting agent",
-                       "required": False}],
-    }]
+    return [
+        {
+            "name": "coordinate-before-edit",
+            "description": "Frog coordination discipline before touching a repo.",
+            "arguments": [
+                {"name": "agent", "description": "Acting agent", "required": False}
+            ],
+        }
+    ]
 
 
 def _get_prompt(name: str, arguments: dict) -> dict:
@@ -626,8 +778,7 @@ def _get_prompt(name: str, arguments: dict) -> dict:
         f"4. When done: `frog task finish <slug> --agent {agent}`.\n"
         "Read the frog://board and frog://agents-md resources for context."
     )
-    return {"messages": [{"role": "user",
-            "content": {"type": "text", "text": text}}]}
+    return {"messages": [{"role": "user", "content": {"type": "text", "text": text}}]}
 
 
 def _tool_result(payload: dict) -> dict:
@@ -642,6 +793,7 @@ def _tool_result(payload: dict) -> dict:
 # ---------------------------------------------------------------------------
 # FastMCP serve (primary)
 # ---------------------------------------------------------------------------
+
 
 def _serve_fastmcp(*, config_path: str | None = None) -> int:
     from mcp.server.fastmcp import FastMCP
@@ -658,11 +810,16 @@ def _serve_fastmcp(*, config_path: str | None = None) -> int:
         # Solution: build a handler with explicit named Optional[Any] parameters
         # via exec() so FastMCP sees a real inspectable signature.
         def _make_handler(name, props: dict):
-            from typing import Optional, Any
+            from typing import Any, Optional
+
             param_names = list(props.keys())
             if param_names:
-                params_sig = ", ".join(f"{p}: Optional[Any] = None" for p in param_names)
-                params_collect = "{" + ", ".join(f'"{p}": {p}' for p in param_names) + "}"
+                params_sig = ", ".join(
+                    f"{p}: Optional[Any] = None" for p in param_names
+                )
+                params_collect = (
+                    "{" + ", ".join(f'"{p}": {p}' for p in param_names) + "}"
+                )
                 src_code = (
                     f"async def handler({params_sig}) -> str:\n"
                     f"    args = {{k: v for k, v in {params_collect}.items() if v is not None}}\n"
@@ -675,8 +832,14 @@ def _serve_fastmcp(*, config_path: str | None = None) -> int:
                     "    result = _call_tool(name, {}, config_path=_cfg)\n"
                     "    return _json.dumps(result, indent=2, sort_keys=True)\n"
                 )
-            ns = {"name": name, "_cfg": config_path, "_call_tool": call_tool,
-                  "_json": json, "Optional": Optional, "Any": Any}
+            ns = {
+                "name": name,
+                "_cfg": config_path,
+                "_call_tool": call_tool,
+                "_json": json,
+                "Optional": Optional,
+                "Any": Any,
+            }
             exec(src_code, ns)
             fn = ns["handler"]
             fn.__name__ = name
@@ -697,7 +860,9 @@ def _serve_fastmcp(*, config_path: str | None = None) -> int:
 
     @fmcp.resource("frog://events")
     def events_resource() -> str:
-        ev = _with_conn(_default_db(), lambda c: store.log_tail(c, limit=30, repo_ref=None))
+        ev = _with_conn(
+            _default_db(), lambda c: store.log_tail(c, limit=30, repo_ref=None)
+        )
         return json.dumps(ev, indent=2)
 
     @fmcp.resource("frog://agents-md")
@@ -729,6 +894,7 @@ def _serve_fastmcp(*, config_path: str | None = None) -> int:
 # ---------------------------------------------------------------------------
 # Legacy hand-rolled JSON-RPC serve (fallback if FastMCP unavailable)
 # ---------------------------------------------------------------------------
+
 
 def _read_message() -> dict | list | None:
     while True:
@@ -772,7 +938,9 @@ def _negotiate_protocol_version(message: dict) -> str:
     return DEFAULT_PROTOCOL_VERSION
 
 
-def _handle_message(message: dict, *, config_path: str | None = None) -> dict | str | None:
+def _handle_message(
+    message: dict, *, config_path: str | None = None
+) -> dict | str | None:
     if not isinstance(message, dict):
         return _error(None, -32600, "invalid request")
     message_id = message.get("id")
@@ -870,6 +1038,7 @@ def _serve_legacy(*, config_path: str | None = None) -> int:
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
 
 def serve(*, config_path: str | None = None, db_path: str | None = None) -> int:
     global _DB_OVERRIDE, _CONFIG_PATH

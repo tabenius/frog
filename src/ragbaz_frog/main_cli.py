@@ -1707,6 +1707,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Emit structured JSON output")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color in human output")
     parser.add_argument("--no-pager", action="store_true", help="Do not page long human output")
+    backend = parser.add_mutually_exclusive_group()
+    backend.add_argument('--model-client', dest='use_model', action='store_true', default=None, help='Use the model HTTP API (default)')
+    backend.add_argument('--legacy-storage', '--no-model-client', dest='use_model', action='store_false', help='Use deprecated direct legacy storage explicitly')
+    parser.add_argument('--model-url', help='Override model HTTP URL')
+    parser.add_argument('--model-workspace', help='Override model workspace identity')
+    parser.add_argument('--model-token-file', help='Owner-only model bearer token file')
     sub = parser.add_subparsers(
         dest="command",
         required=True,
@@ -2082,6 +2088,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create and manage task slices in AGENTS.db",
     )
     task_sub = task.add_subparsers(dest="task_command", required=True)
+    task_verify = task_sub.add_parser('verify', help='Run an allowlisted server build target for this task revision')
+    task_verify.add_argument('slug')
+    task_verify.add_argument('--target', default='verify')
     task_create = task_sub.add_parser("create", help="Create a task slice")
     task_create.add_argument("--slug", required=True)
     task_create.add_argument("--repo", dest="repo_ref", metavar="REPO")
@@ -2200,10 +2209,11 @@ def build_parser() -> argparse.ArgumentParser:
     lock_acquire.add_argument("--eta-minutes", type=int)
     lock_acquire.add_argument("--force", action="store_true")
     lock_renew = lock_sub.add_parser("renew", help="Renew a lock lease or ETA")
-    lock_renew.add_argument("lock_id", type=int)
+    lock_renew.add_argument("lock_id", help='Legacy numeric lock ID or model lease ID')
+    lock_renew.add_argument('--lease-seconds', type=int, default=1800, help='Model lease renewal TTL')
     lock_renew.add_argument("--eta-minutes", type=int)
     lock_release = lock_sub.add_parser("release", help="Release a coordination lock")
-    lock_release.add_argument("lock_id", type=int)
+    lock_release.add_argument("lock_id", help='Legacy numeric lock ID or model lease ID')
     lock_release.add_argument("--agent", help="Acting agent recording the release")
     lock_release.add_argument("--reason", help="Audit note explaining why the lock is released")
     lock_release.add_argument(
@@ -2316,8 +2326,8 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
     return store.repo_run(conn, repo_ref, run_action, use_cache=use_cache, only_targets=only)
 
 
-_GLOBAL_FLAGS_PASSTHROUGH = ("--json", "--no-color", "--no-pager")
-_GLOBAL_FLAGS_WITH_VALUE = ("--config", "--db", "--workspace")
+_GLOBAL_FLAGS_PASSTHROUGH = ("--json", "--no-color", "--no-pager", "--model-client", "--legacy-storage", "--no-model-client")
+_GLOBAL_FLAGS_WITH_VALUE = ("--config", "--db", "--workspace", "--model-url", "--model-workspace", "--model-token-file")
 
 # Workflow statuses that are NOT terminal -- the `--not-done` preset on
 # `frog task list` expands to this set. Keep in sync with _WF_DONE in
@@ -2380,6 +2390,29 @@ def main(argv: list[str] | None = None) -> int:
     _PAGER_ENABLED = "--no-pager" not in argv
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command not in ('config', 'docs', 'completion'):
+        from .model_backend import Backend, settings
+        from .model_client import ModelError
+        try:
+            options = settings(config_path=args.config, enabled=args.use_model,
+                url=args.model_url, workspace=args.model_workspace or args.workspace, token_file=args.model_token_file, legacy_db=args.db is not None)
+            if options['enabled']:
+                if args.command == 'mcp':
+                    mcp_server._MODEL_OPTIONS = options
+                    if args.mcp_command == 'serve':
+                        return mcp_server.serve(config_path=args.config)
+                    return _emit({'ok':True,'tools':mcp_server._tool_specs()},args.json)
+                backend = Backend(options)
+                if args.command == 'tui':
+                    from . import tui
+                    return tui.run(backend, agent=getattr(args,'agent',None) or 'local-client')
+                if args.command == 'board':
+                    if not args.once:
+                        raise ModelError('unsupported_operation','use frog tui for a live model board, or frog board --once')
+                    return _emit(backend.board_snapshot(), args.json)
+                return _emit(backend.dispatch(args),args.json)
+        except (ModelError, ValueError, OSError, RuntimeError) as error:
+            return _emit({'ok':False,'error':str(error)},args.json)
     _COLOR_ENABLED = not getattr(args, "no_color", False)
     _PAGER_ENABLED = not getattr(args, "no_pager", False)
     _PAGE_HUMAN_OUTPUT = _should_page_for_args(args)
@@ -2811,23 +2844,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "task":
             if args.task_command == "create":
                 return _emit(
-                    store.create_task(
-                        conn,
-                        slug=args.slug,
-                        repo_ref=args.repo_ref,
-                        title=args.title,
-                        why=args.why,
-                        what_text=args.what,
-                        roi_note=args.roi_note,
-                        priority=args.priority,
-                        workflow_status=args.workflow_status,
-                        git_status=args.git_status,
-                        assigned_agent=args.assigned_agent,
-                        delegation_current=args.delegation_current,
-                        delegation_other=args.delegation_other,
-                        parent_task_slug=args.parent_task_slug,
-                        files=args.file,
-                    ),
+                    store.create_task(conn,slug=args.slug,repo_ref=args.repo_ref,title=args.title,
+                        why=args.why,what_text=args.what,roi_note=args.roi_note,priority=args.priority,
+                        workflow_status=args.workflow_status,git_status=args.git_status,
+                        assigned_agent=args.assigned_agent,delegation_current=args.delegation_current,
+                        delegation_other=args.delegation_other,parent_task_slug=args.parent_task_slug,files=args.file),
                     args.json,
                 )
             if args.task_command == "list":
