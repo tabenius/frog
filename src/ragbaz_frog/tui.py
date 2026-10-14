@@ -9,6 +9,7 @@ pane, keyboard claim/finish/next, a help overlay, resize-safety.
 Pure navigation/scroll/detail logic lives in `TuiState` (unit-tested);
 the curses shell is the thin untested renderer.
 """
+
 from __future__ import annotations
 
 import os
@@ -18,32 +19,54 @@ from ragbaz_frog.runtime_status import runtime_lines
 
 _RUNTIME_BINDING = ("x", "runtime / URLs / signing")
 
-_COLS = [("idea", "IDEA"), ("blocked", "BLOCKED"),
-         ("in_progress", "IN PROGRESS"), ("done", "DONE")]
+_COLS = [
+    ("idea", "IDEA"),
+    ("blocked", "BLOCKED"),
+    ("in_progress", "IN PROGRESS"),
+    ("done", "DONE"),
+]
 
 # xterm-256 codes shared with `frog board` for a consistent palette.
 _COL_C = {"idea": 39, "blocked": 203, "in_progress": 208, "done": 78}
 _PRIO_C = {
-    "p0": 196, "critical": 196, "urgent": 196,
-    "p1": 208, "high": 208,
-    "p2": 214, "medium": 214, "normal": 214,
-    "p3": 245, "low": 245,
+    "p0": 196,
+    "critical": 196,
+    "urgent": 196,
+    "p1": 208,
+    "high": 208,
+    "p2": 214,
+    "medium": 214,
+    "normal": 214,
+    "p3": 245,
+    "low": 245,
 }
 _ACCENT, _FROG_C, _DIM = 208, 78, 245
 _READY_C, _AGENT_C, _BLOCK_C = 220, 39, 203  # match frog board
 
 _THEMES = {"ragbaz": True, "mono": False}  # mono => no color
 _TIME_STATUSES = {
-    "done", "finished", "in_progress", "in-progress", "doing", "wip", "active",
+    "done",
+    "finished",
+    "in_progress",
+    "in-progress",
+    "doing",
+    "wip",
+    "active",
 }
 _DONE_STATUSES = {"done", "finished"}
 _STARTED_STATUSES = {"in_progress", "in-progress", "doing", "wip", "active"}
 _SORT_KEYS = ("priority", "created", "started", "completed", "alpha")
 _PRIO_RANK = {
-    "p0": 0, "critical": 0, "urgent": 0,
-    "p1": 1, "high": 1,
-    "p2": 2, "medium": 2, "normal": 2,
-    "p3": 3, "low": 3,
+    "p0": 0,
+    "critical": 0,
+    "urgent": 0,
+    "p1": 1,
+    "high": 1,
+    "p2": 2,
+    "medium": 2,
+    "normal": 2,
+    "p3": 3,
+    "low": 3,
 }
 
 
@@ -66,8 +89,7 @@ class TuiState:
             selected = self.selected()
             selected_slug = selected["slug"] if selected else None
         self.snapshot = snapshot
-        self.grid = [self._sorted(snapshot["columns"].get(key, []))
-                     for key, _ in _COLS]
+        self.grid = [self._sorted(snapshot["columns"].get(key, [])) for key, _ in _COLS]
         self.col = max(0, min(self.col, len(_COLS) - 1))
         self._restore_selection(selected_slug)
 
@@ -80,11 +102,15 @@ class TuiState:
             return tk.get("created_at") or ""
         status = (tk.get("workflow_status") or "").lower()
         if self.sort_key == "started":
-            return (tk.get("status_confidence_at") or ""
-                    if status in _STARTED_STATUSES else "")
+            return (
+                tk.get("status_confidence_at") or ""
+                if status in _STARTED_STATUSES
+                else ""
+            )
         if self.sort_key == "completed":
-            return (tk.get("status_confidence_at") or ""
-                    if status in _DONE_STATUSES else "")
+            return (
+                tk.get("status_confidence_at") or "" if status in _DONE_STATUSES else ""
+            )
         return ""
 
     def _sorted(self, items: list[dict]) -> list[dict]:
@@ -238,44 +264,76 @@ class RepoView:
         self.sel = 0
 
     def load(self, snapshot: dict) -> None:
-        self.snapshot = snapshot or {"repos": [], "tree":
-                                     {"dirs": [], "repos": [], "path": "/"}}
+        self.snapshot = snapshot or {
+            "repos": [],
+            "tree": {"dirs": [], "repos": [], "path": "/"},
+        }
 
     # ---- row model -------------------------------------------------
-    def _repo_rows(self, repo: dict, depth: int,
-                   key_prefix: str = "") -> list[dict]:
+    def _repo_rows(self, repo: dict, depth: int, key_prefix: str = "") -> list[dict]:
         rp = repo["repo_path"]
         k = key_prefix + rp
         exp = k in self.expanded
         label = repo["name"]
         if repo.get("remote"):
             label += "  (remote)"
-        out = [{"kind": "repo", "key": k, "depth": depth,
-                "text": label, "repo": repo, "expanded": exp,
-                "foldable": True}]
+        out = [
+            {
+                "kind": "repo",
+                "key": k,
+                "depth": depth,
+                "text": label,
+                "repo": repo,
+                "expanded": exp,
+                "foldable": True,
+            }
+        ]
         if exp:
             if repo.get("remote"):
-                out.append({"kind": "unit", "key": k + "::@at",
-                            "depth": depth + 1, "foldable": False,
-                            "text": "@ " + rp + " (units known on "
-                                    "that box only)"})
+                out.append(
+                    {
+                        "kind": "unit",
+                        "key": k + "::@at",
+                        "depth": depth + 1,
+                        "foldable": False,
+                        "text": "@ " + rp + " (units known on that box only)",
+                    }
+                )
             for u in repo["units"]:
-                out.append({"kind": "unit", "key": k + "::" + u,
-                            "depth": depth + 1, "text": u,
-                            "foldable": False})
-            out.append({"kind": "actions",
-                        "key": k + "::@actions", "depth": depth + 1,
-                        "text": "actions: " + " ".join(repo["actions"]),
-                        "foldable": False})
+                out.append(
+                    {
+                        "kind": "unit",
+                        "key": k + "::" + u,
+                        "depth": depth + 1,
+                        "text": u,
+                        "foldable": False,
+                    }
+                )
+            out.append(
+                {
+                    "kind": "actions",
+                    "key": k + "::@actions",
+                    "depth": depth + 1,
+                    "text": "actions: " + " ".join(repo["actions"]),
+                    "foldable": False,
+                }
+            )
         return out
 
     def _walk_tree(self, node: dict, depth: int) -> list[dict]:
         out = []
         for d in node["dirs"]:
             exp = d["path"] in self.expanded
-            out.append({"kind": "dir", "key": d["path"], "depth": depth,
-                        "text": d["name"] + "/", "expanded": exp,
-                        "foldable": True})
+            out.append(
+                {
+                    "kind": "dir",
+                    "key": d["path"],
+                    "depth": depth,
+                    "text": d["name"] + "/",
+                    "expanded": exp,
+                    "foldable": True,
+                }
+            )
             if exp:
                 out.extend(self._walk_tree(d, depth + 1))
         for r in node["repos"]:
@@ -288,15 +346,24 @@ class RepoView:
             key = "box::" + b["box_id"]
             exp = key in self.expanded
             tag = "local" if b.get("is_local") else "peer"
-            label = (f"{b['box_id']} ({b.get('hostname') or '?'}) "
-                     f"[{tag}]  {len(b['repos'])} repo(s)")
-            out.append({"kind": "box", "key": key, "depth": 0,
-                        "text": label, "expanded": exp,
-                        "foldable": True, "box": b})
+            label = (
+                f"{b['box_id']} ({b.get('hostname') or '?'}) "
+                f"[{tag}]  {len(b['repos'])} repo(s)"
+            )
+            out.append(
+                {
+                    "kind": "box",
+                    "key": key,
+                    "depth": 0,
+                    "text": label,
+                    "expanded": exp,
+                    "foldable": True,
+                    "box": b,
+                }
+            )
             if exp:
                 for r in b["repos"]:
-                    out.extend(self._repo_rows(
-                        r, 1, key_prefix=b["box_id"] + "::"))
+                    out.extend(self._repo_rows(r, 1, key_prefix=b["box_id"] + "::"))
         return out
 
     def visible_rows(self) -> list[dict]:
@@ -347,8 +414,9 @@ class RepoView:
 
 
 def _use_color() -> bool:
-    return (not os.environ.get("NO_COLOR")
-            and _THEMES.get(os.environ.get("FROG_THEME", "ragbaz"), True))
+    return not os.environ.get("NO_COLOR") and _THEMES.get(
+        os.environ.get("FROG_THEME", "ragbaz"), True
+    )
 
 
 def priority_color(priority: object) -> int:
@@ -358,7 +426,7 @@ def priority_color(priority: object) -> int:
 def task_segments(tk: dict, ready: set | list) -> list[tuple[str, int]]:
     """[(text, xterm256_code)] for one task row, colour-coded exactly like
     `frog board`: base=priority, ★=220, ◆agent=39."""
-    prio = (tk.get("priority") or "p?")
+    prio = tk.get("priority") or "p?"
     timestamp = task_time(tk)
     prefix = f"{timestamp} " if timestamp else ""
     segs = [(f"{prefix}{prio} {tk['slug']}", priority_color(prio))]
@@ -417,9 +485,15 @@ def help_overlay_lines(sort_label: str) -> list[str]:
 
 def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
     import curses
-    from ragbaz_frog.main_cli import _conn_db_path, _db_fingerprint, _FROG_ART
+    import time
+    from .model_backend import Backend
+    from . import store as legacy_store
+    store = conn if isinstance(conn, Backend) else legacy_store
+    model_mode = isinstance(conn, Backend)
 
-    db_path = _conn_db_path(conn)
+    from ragbaz_frog.main_cli import _FROG_ART, _conn_db_path, _db_fingerprint
+
+    db_path = None if model_mode else _conn_db_path(conn)
     want_color = _use_color()
 
     def _loop(scr):
@@ -466,10 +540,17 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
         runtime_offset = 0
 
         while True:
-            fp = _db_fingerprint(db_path)
+            fp = (int(time.monotonic() / 2),) if model_mode else _db_fingerprint(db_path)
             if fp != last_fp:
-                st.load(store.board_snapshot(conn))
-                rv.load(store.repo_tree_snapshot(conn))
+                try:
+                    snapshot = store.board_snapshot(conn)
+                    repositories = store.repo_tree_snapshot(conn)
+                    st.load(snapshot)
+                    rv.load(repositories)
+                except Exception as error:
+                    if not model_mode:
+                        raise
+                    status = f'model refresh failed (display is stale): {error}'
                 last_fp = fp
             scr.erase()
             h, w = scr.getmaxyx()
@@ -477,20 +558,35 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
             # ---- header: RAGBAZ/frog + ASCII frog + TASK BOARD ----
             put(0, 2, "RAGBAZ", C(_ACCENT, bold=True))
             put(0, 8, "/frog", C(39, bold=True))
-            _rlabel = ("  REPOS (boxes)" if rv.box_mode
-                       else "  REPOS (tree)" if rv.tree
-                       else "  REPOS")
-            put(0, 14, f"  TASK BOARD  sort={st.sort_label()}" if view == "board"
-                else _rlabel, C(_DIM))
+            _rlabel = (
+                "  REPOS (boxes)"
+                if rv.box_mode
+                else "  REPOS (tree)"
+                if rv.tree
+                else "  REPOS"
+            )
+            put(
+                0,
+                14,
+                f"  TASK BOARD  sort={st.sort_label()}" if view == "board" else _rlabel,
+                C(_DIM),
+            )
             for i, ln in enumerate(_FROG_ART):
                 put(1 + i, 2, ln, C(_FROG_C))
             top = 1 + len(_FROG_ART) + 1
 
             if view == "runtime":
                 put(top, 1, "RUNTIME / URLS / HUMAN WORKFLOWS", maxw=max(1, w - 2))
-                for i, line in enumerate(runtime[runtime_offset:runtime_offset + max(0, h - top - 3)]):
+                for i, line in enumerate(
+                    runtime[runtime_offset : runtime_offset + max(0, h - top - 3)]
+                ):
                     put(top + 1 + i, 1, line, maxw=max(1, w - 2))
-                put(h - 1, 1, f"{_RUNTIME_BINDING[0]} back  up/down scroll  r refresh  q quit", maxw=max(1, w - 2))
+                put(
+                    h - 1,
+                    1,
+                    f"{_RUNTIME_BINDING[0]} back  up/down scroll  r refresh  q quit",
+                    maxw=max(1, w - 2),
+                )
             elif view == "board":
                 # ---- columns ----
                 ncol = len(_COLS)
@@ -500,17 +596,23 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                 for ci, (key, label) in enumerate(_COLS):
                     x = ci * colw
                     items = st.grid[ci]
-                    put(top, x, f"{label} ({len(items)})".ljust(colw - 1),
-                        C(_COL_C[key], bold=True), colw - 1)
+                    put(
+                        top,
+                        x,
+                        f"{label} ({len(items)})".ljust(colw - 1),
+                        C(_COL_C[key], bold=True),
+                        colw - 1,
+                    )
                     start, vis = st.window(ci, body_h)
                     if start > 0:
                         put(top + 1, x + colw - 3, "▲", C(_DIM))
                     gy = top + 2
                     for r, tk in enumerate(vis):
                         idx = start + r
-                        sel = (ci == st.col and idx == st.row)
-                        for line_index, segments in enumerate(task_lines(
-                                tk, st.snapshot.get("ready", []))):
+                        sel = ci == st.col and idx == st.row
+                        for line_index, segments in enumerate(
+                            task_lines(tk, st.snapshot.get("ready", []))
+                        ):
                             if gy >= top + 2 + body_h:
                                 break
                             avail = colw - 2
@@ -520,13 +622,22 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                                 if cx >= avail:
                                     break
                                 chunk = stext[: avail - cx]
-                                put(gy, x + cx, chunk,
-                                    C(scode, bold=line_sel, rev=line_sel), len(chunk))
+                                put(
+                                    gy,
+                                    x + cx,
+                                    chunk,
+                                    C(scode, bold=line_sel, rev=line_sel),
+                                    len(chunk),
+                                )
                                 cx += len(chunk)
                             if cx < avail and line_sel:
-                                put(gy, x + cx, " " * (avail - cx),
+                                put(
+                                    gy,
+                                    x + cx,
+                                    " " * (avail - cx),
                                     C(priority_color(tk.get("priority")), rev=True),
-                                    avail - cx)
+                                    avail - cx,
+                                )
                             gy += 1
                         if gy >= top + 2 + body_h:
                             break
@@ -538,52 +649,75 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                 iy = h - detail_h - 1
                 put(iy, 0, "─" * (w - 1), C(_DIM))
                 if d:
-                    put(iy + 1, 1,
+                    put(
+                        iy + 1,
+                        1,
                         f"{d['priority']} {d['slug']}  {d['title']}"[: w - 2],
-                        C(priority_color(d["priority"]), bold=True))
+                        C(priority_color(d["priority"]), bold=True),
+                    )
                     meta = f"status={d['status']}  agent={d['agent'] or '-'}"
                     if d["ready"]:
                         meta += "  ★ ready"
                     put(iy + 2, 1, meta[: w - 2], C(_DIM))
-                    bl = ("blocked on: " + ", ".join(d["blockers"])
-                          if d["blockers"] else "no unmet dependencies")
-                    put(iy + 3, 1, bl[: w - 2],
-                        C(203 if d["blockers"] else _FROG_C))
+                    bl = (
+                        "blocked on: " + ", ".join(d["blockers"])
+                        if d["blockers"]
+                        else "no unmet dependencies"
+                    )
+                    put(iy + 3, 1, bl[: w - 2], C(203 if d["blockers"] else _FROG_C))
                 # ---- recent strip + help/status ----
                 rec = st.snapshot.get("recent", [])
                 if rec:
                     e = rec[-1]
-                    put(h - 2, 1,
-                        f"recent: {e['created_at'][11:19]} {e['kind']} {e['summary']}"[: w - 2],
-                        C(_DIM))
-                hint = ("?: help  " if not show_help else "")
-                put(h - 1, 1,
-                    f"{hint}{_RUNTIME_BINDING[0]} runtime  q quit  ←/→ col  ↑/↓ task  s sort  S dir  c claim  e edit  f finish  n next  r refresh   | {status}"[: w - 2],
-                    C(_DIM))
+                    put(
+                        h - 2,
+                        1,
+                        f"recent: {e['created_at'][11:19]} {e['kind']} {e['summary']}"[
+                            : w - 2
+                        ],
+                        C(_DIM),
+                    )
+                hint = "?: help  " if not show_help else ""
+                put(
+                    h - 1,
+                    1,
+                    f"{hint}{_RUNTIME_BINDING[0]} runtime  q quit  ←/→ col  ↑/↓ task  s sort  S dir  c claim  e edit  f finish  n next  r refresh   | {status}"[
+                        : w - 2
+                    ],
+                    C(_DIM),
+                )
                 if show_help:
                     lines = help_overlay_lines(st.sort_label())
                     hx = max(1, min(w - len(lines[0]) - 1, w // 2 - len(lines[0]) // 2))
                     hy = top + 2
                     for i, ln in enumerate(lines):
-                        put(hy + i, hx, ln, C(_ACCENT, bold=(i == 1), rev=True),
-                            len(ln))
+                        put(
+                            hy + i, hx, ln, C(_ACCENT, bold=(i == 1), rev=True), len(ln)
+                        )
             else:
                 rows = rv.visible_rows()
                 vis_h = max(1, h - top - 3)
-                off = max(0, min(getattr(rv, "_off", 0),
-                                 max(0, len(rows) - vis_h)))
+                off = max(0, min(getattr(rv, "_off", 0), max(0, len(rows) - vis_h)))
                 if rv.sel < off:
                     off = rv.sel
                 elif rv.sel >= off + vis_h:
                     off = rv.sel - vis_h + 1
                 rv._off = off
-                _kc = {"repo": _REPO_C, "unit": _UNIT_C,
-                       "dir": _DIR_C, "actions": _ACTION_C,
-                       "box": _BOX_C}
+                _kc = {
+                    "repo": _REPO_C,
+                    "unit": _UNIT_C,
+                    "dir": _DIR_C,
+                    "actions": _ACTION_C,
+                    "box": _BOX_C,
+                }
                 if not rows:
-                    put(top, 2, "no registered repos "
-                        "(frog repo register <path>)", C(_DIM))
-                for i, row in enumerate(rows[off:off + vis_h]):
+                    put(
+                        top,
+                        2,
+                        "no registered repos (frog repo register <path>)",
+                        C(_DIM),
+                    )
+                for i, row in enumerate(rows[off : off + vis_h]):
                     gy = top + i
                     idx = off + i
                     sel = idx == rv.sel
@@ -591,24 +725,45 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                     if row.get("foldable"):
                         marker = "v " if row.get("expanded") else "> "
                     line = ("  " * row["depth"]) + marker + row["text"]
-                    put(gy, 2, line[: w - 4],
-                        C(_kc.get(row["kind"], _DIM),
-                          bold=sel, rev=sel), w - 4)
+                    put(
+                        gy,
+                        2,
+                        line[: w - 4],
+                        C(_kc.get(row["kind"], _DIM), bold=sel, rev=sel),
+                        w - 4,
+                    )
                 d = rv.selected()
                 iy = h - 2
                 put(iy, 0, "-" * (w - 1), C(_DIM))
                 if d and d["kind"] == "repo":
                     r = d["repo"]
-                    put(iy + 1, 1, (r["name"] + "  " + r["repo_path"]
-                                    + "  [" + str(r.get("status") or "-")
-                                    + "]  " + str(len(r["units"]))
-                                    + " unit(s)")[: w - 2], C(_REPO_C))
+                    put(
+                        iy + 1,
+                        1,
+                        (
+                            r["name"]
+                            + "  "
+                            + r["repo_path"]
+                            + "  ["
+                            + str(r.get("status") or "-")
+                            + "]  "
+                            + str(len(r["units"]))
+                            + " unit(s)"
+                        )[: w - 2],
+                        C(_REPO_C),
+                    )
                 elif d:
                     put(iy + 1, 1, d["text"][: w - 2], C(_DIM))
-                put(h - 1, 1,
-                    ("q quit  v board  t tree  b boxes  up/dn move  "
-                     "enter/space fold  g/G ends  r refresh"
-                     "   | " + status)[: w - 2], C(_DIM))
+                put(
+                    h - 1,
+                    1,
+                    (
+                        "q quit  v board  t tree  b boxes  up/dn move  "
+                        "enter/space fold  g/G ends  r refresh"
+                        "   | " + status
+                    )[: w - 2],
+                    C(_DIM),
+                )
             scr.refresh()
 
             try:
@@ -685,12 +840,13 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                     verb, slug = act
                     try:
                         if verb == "claim":
-                            store.task_claim(conn, slug=slug, agent=agent)
-                            status = f"claimed {slug}"
+                            result = store.task_claim(conn, slug=slug, agent=agent)
+                            status = f"claimed {slug}" if result.get('ok') else result.get('error', 'claim failed')
                         elif verb == "finish":
-                            store.task_finish(conn, slug=slug, agent=agent,
-                                              verify=False)
-                            status = f"finished {slug}"
+                            result = store.task_finish(
+                                conn, slug=slug, agent=agent, verify=False
+                            )
+                            status = f"finished {slug}" if result.get('ok') else result.get('error', 'finish failed')
                         else:
                             tk = st.selected() or {}
                             old_title = tk.get("title") or ""
@@ -702,11 +858,31 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                             except curses.error:
                                 pass
                             y = max(2, h - 7)
-                            put(y, 1, "Edit title (blank keeps current):".ljust(w - 2), C(_ACCENT, bold=True))
+                            put(
+                                y,
+                                1,
+                                "Edit title (blank keeps current):".ljust(w - 2),
+                                C(_ACCENT, bold=True),
+                            )
                             put(y + 1, 1, old_title[: w - 2], C(_DIM))
-                            title_raw = scr.getstr(y + 2, 1, max(1, w - 3)).decode("utf-8", "replace").strip()
-                            put(y + 3, 1, f"Edit priority p0/p1/p2/p3 (blank keeps {old_priority}):".ljust(w - 2), C(_ACCENT, bold=True))
-                            prio_raw = scr.getstr(y + 4, 1, 8).decode("utf-8", "replace").strip()
+                            title_raw = (
+                                scr.getstr(y + 2, 1, max(1, w - 3))
+                                .decode("utf-8", "replace")
+                                .strip()
+                            )
+                            put(
+                                y + 3,
+                                1,
+                                f"Edit priority p0/p1/p2/p3 (blank keeps {old_priority}):".ljust(
+                                    w - 2
+                                ),
+                                C(_ACCENT, bold=True),
+                            )
+                            prio_raw = (
+                                scr.getstr(y + 4, 1, 8)
+                                .decode("utf-8", "replace")
+                                .strip()
+                            )
                             curses.noecho()
                             try:
                                 curses.curs_set(0)
@@ -720,7 +896,11 @@ def run(conn, *, agent: str) -> int:  # pragma: no cover - curses shell
                                 priority=prio_raw or None,
                                 actor=agent,
                             )
-                            status = f"edited {slug}" if r.get("ok") else r.get("error", f"edit {slug} failed")
+                            status = (
+                                f"edited {slug}"
+                                if r.get("ok")
+                                else r.get("error", f"edit {slug} failed")
+                            )
                     except Exception as e:
                         status = f"{verb} {slug} failed: {e}"
                         try:

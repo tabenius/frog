@@ -1,9 +1,15 @@
-import os, time, subprocess, threading, hashlib, json, logging, sys
-from pathlib import Path
+import json
+import logging
+import os
+import subprocess
+import sys
+import threading
+import time
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
 
 logger = logging.getLogger("frog.sync")
+
 
 def _local_root() -> str:
     """This host's workspace root (see store.workspace_root)."""
@@ -15,12 +21,26 @@ def _local_root() -> str:
 # The config lives in the local workspace; remote_path is the remote host's.
 def sync_config_path() -> Path:
     return Path(_local_root()) / ".frog-sync.json"
+
+
 DEFAULT_EXCLUDES = [
-    ".git/", "__pycache__/", ".ruff_cache/", ".pytest_cache/",
-    "node_modules/", ".next/", "target/", "build/", "dist/",
-    ".venv/", "venv/", ".tox/", "*.pyc", ".DS_Store",
+    ".git/",
+    "__pycache__/",
+    ".ruff_cache/",
+    ".pytest_cache/",
+    "node_modules/",
+    ".next/",
+    "target/",
+    "build/",
+    "dist/",
+    ".venv/",
+    "venv/",
+    ".tox/",
+    "*.pyc",
+    ".DS_Store",
     ".frog-sync-state.json",
 ]
+
 
 @dataclass
 class SyncConfig:
@@ -34,23 +54,30 @@ class SyncConfig:
     poll_interval: float = 5.0
     watch_subdirs: list[str] = field(default_factory=lambda: ["."])
 
+
 def load_config() -> SyncConfig:
     path = sync_config_path()
     if path.exists():
         data = json.loads(path.read_text())
-        return SyncConfig(**{k: data[k] for k in SyncConfig.__dataclass_fields__ if k in data})
+        return SyncConfig(
+            **{k: data[k] for k in SyncConfig.__dataclass_fields__ if k in data}
+        )
     return SyncConfig()
+
 
 def save_config(cfg: SyncConfig):
     path = sync_config_path()
-    path.write_text(json.dumps({
-        k: getattr(cfg, k) for k in SyncConfig.__dataclass_fields__
-    }, indent=2))
+    path.write_text(
+        json.dumps(
+            {k: getattr(cfg, k) for k in SyncConfig.__dataclass_fields__}, indent=2
+        )
+    )
     logger.info("Config saved to %s", path)
 
 
 class SyncEvent:
-    __slots__ = ("path", "kind", "mtime")
+    __slots__ = ("kind", "mtime", "path")
+
     def __init__(self, path: str, kind: str):
         self.path = path
         self.kind = kind
@@ -62,7 +89,7 @@ class Debouncer:
         self.delay = delay
         self.callback = callback
         self._events: dict[str, SyncEvent] = {}
-        self._timer: Optional[threading.Timer] = None
+        self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._seq = 0
 
@@ -100,8 +127,13 @@ def _rsync_command(cfg: SyncConfig) -> list[str]:
     if cfg.ssh_port != 22:
         ssh_cmd += ["-p", str(cfg.ssh_port)]
     cmd = [
-        "rsync", "-a", "--delete", "--partial", "--progress",
-        "-e", subprocess.list2cmdline(ssh_cmd),
+        "rsync",
+        "-a",
+        "--delete",
+        "--partial",
+        "--progress",
+        "-e",
+        subprocess.list2cmdline(ssh_cmd),
     ]
     for ex in cfg.excludes:
         cmd += ["--exclude", ex]
@@ -113,13 +145,19 @@ def _run_rsync(cfg: SyncConfig, source: str, dest: str):
     logger.debug("Running: %s", " ".join(cmd))
     proc = subprocess.run(
         cmd,
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     if proc.returncode != 0:
         logger.warning("rsync exit %d:\n%s", proc.returncode, proc.stderr[:1000])
     else:
-        logger.info("rsync OK: %s -> %s (%d files)", source, dest,
-                     len([l for l in proc.stdout.split("\n") if l and not l.startswith(".")]))
+        logger.info(
+            "rsync OK: %s -> %s (%d files)",
+            source,
+            dest,
+            len([l for l in proc.stdout.split("\n") if l and not l.startswith(".")]),
+        )
 
 
 def _changed_paths(events: list[SyncEvent], cfg: SyncConfig) -> list[str]:
@@ -152,11 +190,15 @@ class InotifyWatcher:
 
     def start(self):
         import pyinotify
+
         self._wm = pyinotify.WatchManager()
         mask = (
-            pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CREATE |
-            pyinotify.IN_DELETE | pyinotify.IN_MODIFY |
-            pyinotify.IN_MOVED_FROM | pyinotify.IN_MOVED_TO
+            pyinotify.IN_CLOSE_WRITE
+            | pyinotify.IN_CREATE
+            | pyinotify.IN_DELETE
+            | pyinotify.IN_MODIFY
+            | pyinotify.IN_MOVED_FROM
+            | pyinotify.IN_MOVED_TO
         )
         for sub in self.cfg.watch_subdirs:
             path = str(Path(self.cfg.local_path) / sub)
@@ -170,8 +212,13 @@ class InotifyWatcher:
         class Handler(pyinotify.ProcessEvent):
             def __init__(self, owner):
                 self.owner = owner
+
             def process_default(self, event):
-                if event.pathname and "__pycache__" not in event.pathname and ".git" not in event.pathname:
+                if (
+                    event.pathname
+                    and "__pycache__" not in event.pathname
+                    and ".git" not in event.pathname
+                ):
                     kind = event.maskname if event.maskname else "UNKNOWN"
                     self.owner.debouncer.add(event.pathname, kind)
 
@@ -198,8 +245,11 @@ class PollWatcher:
             if not os.path.isdir(root):
                 continue
             for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = [d for d in dirnames
-                               if d not in (".git", "__pycache__", "node_modules")]
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if d not in (".git", "__pycache__", "node_modules")
+                ]
                 for fn in filenames:
                     if fn.endswith((".pyc", ".swp", ".swo")):
                         continue
@@ -252,12 +302,12 @@ def watch(cfg: SyncConfig = None):
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    debouncer = Debouncer(cfg.debounce_seconds,
-                          lambda evs: sync_changes(evs, cfg))
+    debouncer = Debouncer(cfg.debounce_seconds, lambda evs: sync_changes(evs, cfg))
 
     use_inotify = False
     try:
         import pyinotify
+
         use_inotify = True
         watcher = InotifyWatcher(cfg, debouncer)
     except ImportError:

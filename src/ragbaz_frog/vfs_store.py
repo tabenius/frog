@@ -10,169 +10,196 @@ import contextlib
 import os
 import sqlite3
 import tempfile
-from typing import Optional
-
-from pathlib import Path
-from .vfs import VFS, VFSStat, LocalVFS, default_vfs, create_vfs, parse_vfs_uri, current_vfs, set_vfs, workspace_vfs_context
-from . import DEFAULT_DB_PATH
-
 
 # Thread-local storage for current VFS
 import threading
+from pathlib import Path
+
+from . import DEFAULT_DB_PATH
+from .vfs import (
+    VFS,
+    LocalVFS,
+    VFSStat,
+    create_vfs,
+    current_vfs,
+    default_vfs,
+    parse_vfs_uri,
+    set_vfs,
+)
+
 _vfs_local = threading.local()
 
 
-def get_workspace_vfs(workspace_name: Optional[str] = None, config_path: Optional[str] = None) -> VFS:
+def get_workspace_vfs(
+    workspace_name: str | None = None, config_path: str | None = None
+) -> VFS:
     """Get VFS for a workspace."""
     from .config import resolve_workspace
+
     workspace = resolve_workspace(workspace_name, config_path)
     if not workspace:
         return default_vfs()
-    
+
     db_uri = workspace.get("db_uri")
     if db_uri:
         return create_vfs(db_uri)
-    
+
     # Fallback: local filesystem with workspace root
     root = workspace.get("root")
     if root:
         scheme, params = parse_vfs_uri(f"file://{root}")
         return create_vfs(f"file://{root}", **params)
-    
+
     return default_vfs()
 
 
-def vfs_db_path(vfs: Optional[VFS] = None) -> str:
+def vfs_db_path(vfs: VFS | None = None) -> str:
     """Get database path from current workspace."""
     from .config import resolve_workspace
+
     workspace = resolve_workspace(None, None)
     if workspace:
         return workspace.get("db", DEFAULT_DB_PATH)
     return DEFAULT_DB_PATH
 
 
-def vfs_frog_home(vfs: Optional[VFS] = None) -> str:
+def vfs_frog_home(vfs: VFS | None = None) -> str:
     """Get frog home directory (where this package is installed)."""
     vfs = vfs or current_vfs()
     # This is always local - the frog installation itself
     from pathlib import Path
+
     return str(Path(__file__).resolve().parents[2])
 
 
-def vfs_migration_dir(vfs: Optional[VFS] = None) -> str:
+def vfs_migration_dir(vfs: VFS | None = None) -> str:
     """Get migrations directory."""
     return vfs_frog_home(vfs) + "/src/ragbaz_frog/migrations"
 
 
 # VFS-aware file operations that mirror pathlib/os API
-def vfs_exists(path: str, vfs: Optional[VFS] = None) -> bool:
+def vfs_exists(path: str, vfs: VFS | None = None) -> bool:
     vfs = vfs or current_vfs()
     return vfs.exists(path)
 
 
-def vfs_is_file(path: str, vfs: Optional[VFS] = None) -> bool:
+def vfs_is_file(path: str, vfs: VFS | None = None) -> bool:
     vfs = vfs or current_vfs()
     return vfs.is_file(path)
 
 
-def vfs_is_dir(path: str, vfs: Optional[VFS] = None) -> bool:
+def vfs_is_dir(path: str, vfs: VFS | None = None) -> bool:
     vfs = vfs or current_vfs()
     return vfs.is_dir(path)
 
 
-def vfs_stat(path: str, vfs: Optional[VFS] = None) -> VFSStat:
+def vfs_stat(path: str, vfs: VFS | None = None) -> VFSStat:
     vfs = vfs or current_vfs()
     return vfs.stat(path)
 
 
-def vfs_read_text(path: str, encoding: str = "utf-8", errors: str = "strict", vfs: Optional[VFS] = None) -> str:
+def vfs_read_text(
+    path: str,
+    encoding: str = "utf-8",
+    errors: str = "strict",
+    vfs: VFS | None = None,
+) -> str:
     vfs = vfs or current_vfs()
     return vfs.read_text(path, encoding=encoding, errors=errors)
 
 
-def vfs_read_bytes(path: str, vfs: Optional[VFS] = None) -> bytes:
+def vfs_read_bytes(path: str, vfs: VFS | None = None) -> bytes:
     vfs = vfs or current_vfs()
     return vfs.read_bytes(path)
 
 
-def vfs_write_text(path: str, content: str, encoding: str = "utf-8", vfs: Optional[VFS] = None) -> None:
+def vfs_write_text(
+    path: str, content: str, encoding: str = "utf-8", vfs: VFS | None = None
+) -> None:
     vfs = vfs or current_vfs()
     vfs.write_text(path, content, encoding=encoding)
 
 
-def vfs_write_bytes(path: str, content: bytes, vfs: Optional[VFS] = None) -> None:
+def vfs_write_bytes(path: str, content: bytes, vfs: VFS | None = None) -> None:
     vfs = vfs or current_vfs()
     vfs.write_bytes(path, content)
 
 
-def vfs_mkdir(path: str, parents: bool = True, exist_ok: bool = True, vfs: Optional[VFS] = None) -> None:
+def vfs_mkdir(
+    path: str, parents: bool = True, exist_ok: bool = True, vfs: VFS | None = None
+) -> None:
     vfs = vfs or current_vfs()
     vfs.mkdir(path, parents=parents, exist_ok=exist_ok)
 
 
-def vfs_unlink(path: str, missing_ok: bool = True, vfs: Optional[VFS] = None) -> None:
+def vfs_unlink(path: str, missing_ok: bool = True, vfs: VFS | None = None) -> None:
     vfs = vfs or current_vfs()
     vfs.unlink(path, missing_ok=missing_ok)
 
 
-def vfs_rename(src: str, dst: str, vfs: Optional[VFS] = None) -> None:
+def vfs_rename(src: str, dst: str, vfs: VFS | None = None) -> None:
     vfs = vfs or current_vfs()
     vfs.rename(src, dst)
 
 
-def vfs_listdir(path: str, vfs: Optional[VFS] = None) -> list[str]:
+def vfs_listdir(path: str, vfs: VFS | None = None) -> list[str]:
     vfs = vfs or current_vfs()
     return vfs.listdir(path)
 
 
-def vfs_walk(path: str, vfs: Optional[VFS] = None):
+def vfs_walk(path: str, vfs: VFS | None = None):
     vfs = vfs or current_vfs()
     return vfs.walk(path)
 
 
-def vfs_glob(path: str, pattern: str, vfs: Optional[VFS] = None) -> list[str]:
+def vfs_glob(path: str, pattern: str, vfs: VFS | None = None) -> list[str]:
     vfs = vfs or current_vfs()
     return vfs.glob(path, pattern)
 
 
 @contextlib.contextmanager
-def vfs_open(path: str, mode: str = "r", encoding: Optional[str] = None, vfs: Optional[VFS] = None):
+def vfs_open(
+    path: str,
+    mode: str = "r",
+    encoding: str | None = None,
+    vfs: VFS | None = None,
+):
     vfs = vfs or current_vfs()
     with vfs.open(path, mode, encoding) as f:
         yield f
 
 
-def vfs_resolve(path: str, vfs: Optional[VFS] = None) -> str:
+def vfs_resolve(path: str, vfs: VFS | None = None) -> str:
     vfs = vfs or current_vfs()
     return vfs.resolve(path)
 
 
-def vfs_expanduser(path: str, vfs: Optional[VFS] = None) -> str:
+def vfs_expanduser(path: str, vfs: VFS | None = None) -> str:
     vfs = vfs or current_vfs()
     return vfs.expanduser(path)
 
 
-def vfs_parent(path: str, vfs: Optional[VFS] = None) -> str:
+def vfs_parent(path: str, vfs: VFS | None = None) -> str:
     vfs = vfs or current_vfs()
     return vfs.parent(path)
 
 
-def vfs_name(path: str, vfs: Optional[VFS] = None) -> str:
+def vfs_name(path: str, vfs: VFS | None = None) -> str:
     vfs = vfs or current_vfs()
     return vfs.name(path)
 
 
-def vfs_join(*parts: str, vfs: Optional[VFS] = None) -> str:
+def vfs_join(*parts: str, vfs: VFS | None = None) -> str:
     vfs = vfs or current_vfs()
     return vfs.join(*parts)
 
 
-def vfs_relative_to(path: str, base: str, vfs: Optional[VFS] = None) -> str:
+def vfs_relative_to(path: str, base: str, vfs: VFS | None = None) -> str:
     vfs = vfs or current_vfs()
     return vfs.relative_to(path, base)
 
 
-def vfs_from_local_path(local_path: str, vfs: Optional[VFS] = None) -> str:
+def vfs_from_local_path(local_path: str, vfs: VFS | None = None) -> str:
     """Convert a local absolute path to a VFS path relative to VFS root."""
     vfs = vfs or current_vfs()
     if isinstance(vfs, LocalVFS):
@@ -200,24 +227,25 @@ def _is_path_under_vfs_root(local_path: str, vfs: VFS) -> bool:
 
 
 # VFS-aware path operations
-def vfs_workspace_root(vfs: Optional[VFS] = None) -> str:
+def vfs_workspace_root(vfs: VFS | None = None) -> str:
     """Get workspace root from current VFS context."""
     vfs = vfs or current_vfs()
-    
+
     # If using default VFS (cwd), try to infer from workspace config
     if isinstance(vfs, LocalVFS) and vfs._root == Path.cwd():
         from .config import resolve_workspace
+
         workspace = resolve_workspace(None, None)
         if workspace and workspace.get("root"):
             # Create a new VFS with the workspace root
             vfs = LocalVFS(workspace["root"])
             set_vfs(vfs)
-    
+
     return vfs.resolve("/")
 
 
 # SQLite connection with VFS-aware path handling
-def vfs_connect(db_path: str, vfs: Optional[VFS] = None) -> sqlite3.Connection:
+def vfs_connect(db_path: str, vfs: VFS | None = None) -> sqlite3.Connection:
     """Connect to SQLite database, handling VFS paths.
 
     For non-local VFS, this copies the database to a temporary local file,
@@ -261,8 +289,8 @@ class _RemoteSQLiteConnection:
         self._vfs = vfs
         self._temp_dir = tempfile.mkdtemp(prefix="frog-db-")
         self._local_path = os.path.join(self._temp_dir, "AGENTS.db")
-        self._conn: Optional[sqlite3.Connection] = None
-        self._original_hash: Optional[str] = None
+        self._conn: sqlite3.Connection | None = None
+        self._original_hash: str | None = None
         self._fetch_remote_db()
 
     def _fetch_remote_db(self) -> None:
@@ -272,6 +300,7 @@ class _RemoteSQLiteConnection:
             with open(self._local_path, "wb") as f:
                 f.write(data)
             import hashlib
+
             self._original_hash = hashlib.sha256(data).hexdigest()
         else:
             # New database - create empty
@@ -299,6 +328,7 @@ class _RemoteSQLiteConnection:
             data = f.read()
 
         import hashlib
+
         new_hash = hashlib.sha256(data).hexdigest()
         if new_hash != self._original_hash:
             self._vfs.write_bytes(self._remote_path, data)
@@ -327,6 +357,7 @@ class _RemoteSQLiteConnection:
         # Clean up temp dir
         try:
             import shutil
+
             shutil.rmtree(self._temp_dir, ignore_errors=True)
         except Exception:
             pass
@@ -339,5 +370,55 @@ class _RemoteSQLiteConnection:
         return False
 
 
-from .vfs import LocalVFS
-import tempfile
+
+def workspace_vfs_context(
+    workspace_name: str | None = None, config_path: str | None = None
+) -> "Iterator[VFS]":
+    """Context manager that sets up VFS for a workspace."""
+    from .config import resolve_workspace
+    from .vfs import create_vfs, default_vfs
+
+    workspace = resolve_workspace(workspace_name, config_path)
+    if not workspace:
+        vfs = default_vfs()
+    else:
+        db_uri = workspace.get("db_uri")
+        if db_uri:
+            vfs = create_vfs(db_uri)
+        else:
+            root = workspace.get("root")
+            if root:
+                scheme, params = parse_vfs_uri(f"file://{root}")
+                vfs = LocalVFS()
+                vfs.set_root(Path(root))
+            else:
+                vfs = default_vfs()
+    yield vfs
+@contextlib.contextmanager
+def workspace_vfs_context(
+    workspace_name: str | None = None, config_path: str | None = None
+) -> "Iterator[VFS]":
+    """Context manager that sets up VFS for a workspace."""
+    from .config import resolve_workspace
+    from .vfs import create_vfs
+
+    workspace = resolve_workspace(workspace_name, config_path)
+    if not workspace:
+        vfs = default_vfs()
+    else:
+        db_uri = workspace.get("db_uri")
+        if db_uri:
+            vfs = create_vfs(db_uri)
+        else:
+            root = workspace.get("root")
+            if root:
+                vfs = create_vfs(f"file://{root}")
+            else:
+                vfs = default_vfs()
+
+    old_vfs = getattr(_vfs_local, "vfs", None)
+    _vfs_local.vfs = vfs
+    try:
+        yield vfs
+    finally:
+        _vfs_local.vfs = old_vfs

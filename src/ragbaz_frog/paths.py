@@ -1,4 +1,5 @@
 """Repository-relative paths, including recovery of pre-relocation rows."""
+
 from pathlib import Path
 
 
@@ -18,7 +19,7 @@ def resolve_repo_path(repo_root: str, value: str) -> Path:
     # repo-name boundary; unrelated absolute paths retain their meaning.
     matches = [i for i, part in enumerate(path.parts) if part == root.name]
     if len(matches) == 1:
-        return root.joinpath(*path.parts[matches[0] + 1:])
+        return root.joinpath(*path.parts[matches[0] + 1 :])
     return path
 
 

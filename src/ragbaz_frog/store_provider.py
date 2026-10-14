@@ -3,20 +3,25 @@
 Curated re-export view (source of truth remains ``store``). Names the
 provider / markdown import-export seam.
 """
+
 from __future__ import annotations
 
-from ragbaz_frog.store import (  # noqa: F401
-    provider_sync_in,
-    provider_outbox,
+from ragbaz_frog.store import (
+    export_tasks_markdown,
     import_todo,
     parse_todo_markdown,
-    export_tasks_markdown,
-    splice_marked_section,
+    provider_outbox,
+    provider_sync_in,
     splice_heading_section,
+    splice_marked_section,
 )
 
 __all__ = [
-    "provider_sync_in", "provider_outbox", "import_todo",
-    "parse_todo_markdown", "export_tasks_markdown",
-    "splice_marked_section", "splice_heading_section",
+    "export_tasks_markdown",
+    "import_todo",
+    "parse_todo_markdown",
+    "provider_outbox",
+    "provider_sync_in",
+    "splice_heading_section",
+    "splice_marked_section",
 ]

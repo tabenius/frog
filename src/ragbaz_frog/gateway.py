@@ -1,4 +1,11 @@
-import os, sys, json, time, signal, threading, logging, subprocess, socket
+import json
+import logging
+import os
+import signal
+import socket
+import subprocess
+import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger("frog.gateway")
@@ -9,6 +16,7 @@ LOG_PATH = CONFIG_DIR / "gateway.log"
 STATE_PATH = CONFIG_DIR / "gateway.state"
 
 PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 
 def _local_root() -> str:
     from ragbaz_frog import store
@@ -31,9 +39,20 @@ DEFAULT_CONFIG = {
     "watch_debounce": 1.0,
     "watch_poll_interval": 5.0,
     "watch_excludes": [
-        ".git/", "__pycache__/", ".ruff_cache/", ".pytest_cache/",
-        "node_modules/", ".next/", "target/", "build/", "dist/",
-        ".venv/", "venv/", ".tox/", "*.pyc", ".DS_Store",
+        ".git/",
+        "__pycache__/",
+        ".ruff_cache/",
+        ".pytest_cache/",
+        "node_modules/",
+        ".next/",
+        "target/",
+        "build/",
+        "dist/",
+        ".venv/",
+        "venv/",
+        ".tox/",
+        "*.pyc",
+        ".DS_Store",
     ],
 }
 
@@ -108,15 +127,21 @@ class PortForwarder:
             return
         s.listen(10)
         s.settimeout(1.0)
-        logger.info("Proxy: %s:%d -> %s:%d", bind_addr, bind_port, target_host, target_port)
+        logger.info(
+            "Proxy: %s:%d -> %s:%d", bind_addr, bind_port, target_host, target_port
+        )
 
         while not self.stop_event.is_set():
             try:
                 conn, addr = s.accept()
                 logger.debug("Proxy connection from %s", addr)
-                t = threading.Thread(target=self._handle, args=(conn, target_host, target_port), daemon=True)
+                t = threading.Thread(
+                    target=self._handle,
+                    args=(conn, target_host, target_port),
+                    daemon=True,
+                )
                 t.start()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
@@ -126,12 +151,16 @@ class PortForwarder:
     def _handle(self, conn, target_host, target_port):
         try:
             remote = socket.create_connection((target_host, target_port), timeout=10)
-        except (socket.timeout, ConnectionRefusedError, OSError) as e:
+        except (TimeoutError, ConnectionRefusedError, OSError) as e:
             logger.warning("Cannot connect to %s:%d: %s", target_host, target_port, e)
             conn.close()
             return
-        t1 = threading.Thread(target=self._forward, args=(conn, remote, "c2r"), daemon=True)
-        t2 = threading.Thread(target=self._forward, args=(remote, conn, "r2c"), daemon=True)
+        t1 = threading.Thread(
+            target=self._forward, args=(conn, remote, "c2r"), daemon=True
+        )
+        t2 = threading.Thread(
+            target=self._forward, args=(remote, conn, "r2c"), daemon=True
+        )
         t1.start()
         t2.start()
         t1.join()
@@ -153,7 +182,9 @@ class FileWatcher:
             self._debounce_events[path] = time.time()
             if self._debounce_timer:
                 self._debounce_timer.cancel()
-            self._debounce_timer = threading.Timer(self.cfg["watch_debounce"], self._debounce_flush)
+            self._debounce_timer = threading.Timer(
+                self.cfg["watch_debounce"], self._debounce_flush
+            )
             self._debounce_timer.daemon = True
             self._debounce_timer.start()
 
@@ -170,8 +201,15 @@ class FileWatcher:
         ssh_cmd = ["ssh"]
         if ssh_port != 22:
             ssh_cmd += ["-p", str(ssh_port)]
-        cmd = ["rsync", "-a", "--delete", "--partial", "-q",
-               "-e", subprocess.list2cmdline(ssh_cmd)]
+        cmd = [
+            "rsync",
+            "-a",
+            "--delete",
+            "--partial",
+            "-q",
+            "-e",
+            subprocess.list2cmdline(ssh_cmd),
+        ]
         for ex in self.cfg.get("watch_excludes", []):
             cmd += ["--exclude", ex]
         return cmd
@@ -196,11 +234,15 @@ class FileWatcher:
 
     def start_inotify(self):
         import pyinotify
+
         wm = pyinotify.WatchManager()
         mask = (
-            pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CREATE |
-            pyinotify.IN_DELETE | pyinotify.IN_MODIFY |
-            pyinotify.IN_MOVED_FROM | pyinotify.IN_MOVED_TO
+            pyinotify.IN_CLOSE_WRITE
+            | pyinotify.IN_CREATE
+            | pyinotify.IN_DELETE
+            | pyinotify.IN_MODIFY
+            | pyinotify.IN_MOVED_FROM
+            | pyinotify.IN_MOVED_TO
         )
         try:
             wm.add_watch(self.cfg["watch_path"], mask, rec=True, auto_add=True)
@@ -217,8 +259,10 @@ class FileWatcher:
                 if not event.pathname:
                     return
                 p = event.pathname
-                if any(ex.rstrip("/") in p or p.endswith(ex.lstrip("*"))
-                       for ex in self.owner.cfg.get("watch_excludes", [])):
+                if any(
+                    ex.rstrip("/") in p or p.endswith(ex.lstrip("*"))
+                    for ex in self.owner.cfg.get("watch_excludes", [])
+                ):
                     return
                 if ".git" in p or "__pycache__" in p:
                     return
@@ -240,9 +284,7 @@ class FileWatcher:
                 new_snap = self._build_snapshot()
                 for path, (mtime, size) in new_snap.items():
                     prev = snap.get(path)
-                    if prev is None:
-                        self._debounce_add(path)
-                    elif prev[0] != mtime or prev[1] != size:
+                    if prev is None or prev[0] != mtime or prev[1] != size:
                         self._debounce_add(path)
                 for path in snap:
                     if path not in new_snap:
@@ -258,8 +300,9 @@ class FileWatcher:
         if not os.path.isdir(root):
             return snap
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames
-                           if d not in (".git", "__pycache__", "node_modules")]
+            dirnames[:] = [
+                d for d in dirnames if d not in (".git", "__pycache__", "node_modules")
+            ]
             for fn in filenames:
                 if fn.endswith((".pyc", ".swp", ".swo")):
                     continue
@@ -275,6 +318,7 @@ class FileWatcher:
         has_inotify = False
         try:
             import pyinotify
+
             has_inotify = True
         except ImportError:
             pass
@@ -288,8 +332,11 @@ class FileWatcher:
 def run_gateway(cfg: dict = None):
     cfg = cfg or load_config()
     _setup_logging()
-    logger.info("Gateway starting with config: proxy=%s, watch=%s",
-                cfg.get("proxy_enabled"), cfg.get("watch_enabled"))
+    logger.info(
+        "Gateway starting with config: proxy=%s, watch=%s",
+        cfg.get("proxy_enabled"),
+        cfg.get("watch_enabled"),
+    )
 
     stop = threading.Event()
     threads = []
@@ -306,12 +353,14 @@ def run_gateway(cfg: dict = None):
         t.start()
         threads.append(t)
 
-    _write_state({
-        "pid": os.getpid(),
-        "status": "running",
-        "proxy": cfg.get("proxy_enabled", False),
-        "watch": cfg.get("watch_enabled", False),
-    })
+    _write_state(
+        {
+            "pid": os.getpid(),
+            "status": "running",
+            "proxy": cfg.get("proxy_enabled", False),
+            "watch": cfg.get("watch_enabled", False),
+        }
+    )
 
     def _shutdown(signum, frame):
         logger.info("Shutdown signal %d received", signum)
@@ -394,7 +443,9 @@ def cmd_config(args):
     if args.show:
         print(json.dumps(cfg, indent=2))
     elif args.key and args.value:
-        cfg[args.key] = json.loads(args.value) if args.value.startswith(("[", "{")) else args.value
+        cfg[args.key] = (
+            json.loads(args.value) if args.value.startswith(("[", "{")) else args.value
+        )
         save_config(cfg)
         print(f"Set {args.key} = {cfg[args.key]}")
     else:
@@ -402,7 +453,9 @@ def cmd_config(args):
 
 
 def add_subcommands(subparsers):
-    gw = subparsers.add_parser("gateway", help="Manage the inter-box gateway daemon (proxy + file watcher)")
+    gw = subparsers.add_parser(
+        "gateway", help="Manage the inter-box gateway daemon (proxy + file watcher)"
+    )
     gw_sub = gw.add_subparsers(dest="gateway_command", required=True)
 
     start_p = gw_sub.add_parser("start", help="Start the gateway daemon")
@@ -410,18 +463,26 @@ def add_subcommands(subparsers):
     start_p.add_argument("--port", type=int, help="Proxy bind port")
     start_p.add_argument("--target", help="Proxy target host")
     start_p.add_argument("--target-port", type=int, help="Proxy target port")
-    start_p.add_argument("--proxy-only", action="store_true", help="Run only the proxy (no file watcher)")
-    start_p.add_argument("--watch-only", action="store_true", help="Run only the file watcher (no proxy)")
+    start_p.add_argument(
+        "--proxy-only", action="store_true", help="Run only the proxy (no file watcher)"
+    )
+    start_p.add_argument(
+        "--watch-only", action="store_true", help="Run only the file watcher (no proxy)"
+    )
     start_p.add_argument("--no-watch", action="store_true", help="Disable file watcher")
 
     gw_sub.add_parser("stop", help="Stop the gateway daemon")
 
     status_p = gw_sub.add_parser("status", help="Show gateway daemon status")
-    status_p.add_argument("-v", "--verbose", action="store_true", help="Show full config")
+    status_p.add_argument(
+        "-v", "--verbose", action="store_true", help="Show full config"
+    )
 
     config_p = gw_sub.add_parser("config", help="View or set gateway configuration")
     config_p.add_argument("key", nargs="?", help="Config key to set")
-    config_p.add_argument("value", nargs="?", help="Config value (JSON for objects/arrays)")
+    config_p.add_argument(
+        "value", nargs="?", help="Config value (JSON for objects/arrays)"
+    )
     config_p.add_argument("--show", action="store_true", help="Show full config")
 
 

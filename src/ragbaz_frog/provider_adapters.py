@@ -4,6 +4,7 @@ The durable frog contract lives in store.provider_sync_in/provider_outbox.
 This module only translates provider payloads to that normalized shape and
 pushes frog status back through provider-specific update APIs.
 """
+
 from __future__ import annotations
 
 import base64
@@ -12,8 +13,8 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from ragbaz_frog import store
 
@@ -67,7 +68,7 @@ def _bearer(token: str | None) -> dict[str, str]:
 def _basic(email: str | None, token: str | None) -> dict[str, str]:
     if not email or not token:
         return {}
-    raw = f"{email}:{token}".encode("utf-8")
+    raw = f"{email}:{token}".encode()
     return {"authorization": "Basic " + base64.b64encode(raw).decode("ascii")}
 
 
@@ -126,9 +127,13 @@ def _asana_item(task: dict, config: dict) -> dict:
     section_status = None
     memberships = task.get("memberships") or []
     if memberships:
-        section_status = ((memberships[0].get("section") or {}).get("name"))
-    status = "done" if task.get("completed") else _status_from_text(
-        custom_status or section_status, config.get("status_map")
+        section_status = (memberships[0].get("section") or {}).get("name")
+    status = (
+        "done"
+        if task.get("completed")
+        else _status_from_text(
+            custom_status or section_status, config.get("status_map")
+        )
     )
     return {
         "external_id": str(task["gid"]),
@@ -144,16 +149,18 @@ def asana_pull(config: dict, *, request: RequestFn = _http_json) -> dict:
     if not project:
         return {"ok": False, "source": "asana", "error": "project_gid is required"}
     base = config.get("base_url", "https://app.asana.com/api/1.0").rstrip("/")
-    fields = ",".join([
-        "gid",
-        "name",
-        "notes",
-        "completed",
-        "memberships.section.name",
-        "custom_fields.gid",
-        "custom_fields.text_value",
-        "custom_fields.enum_value.name",
-    ])
+    fields = ",".join(
+        [
+            "gid",
+            "name",
+            "notes",
+            "completed",
+            "memberships.section.name",
+            "custom_fields.gid",
+            "custom_fields.text_value",
+            "custom_fields.enum_value.name",
+        ]
+    )
     query = urllib.parse.urlencode({"limit": "100", "opt_fields": fields})
     url = f"{base}/projects/{urllib.parse.quote(project)}/tasks?{query}"
     items: list[dict] = []
@@ -167,7 +174,9 @@ def asana_pull(config: dict, *, request: RequestFn = _http_json) -> dict:
     return {"ok": True, "source": "asana", "items": items}
 
 
-def asana_push(config: dict, outbox: list[dict], *, request: RequestFn = _http_json) -> dict:
+def asana_push(
+    config: dict, outbox: list[dict], *, request: RequestFn = _http_json
+) -> dict:
     base = config.get("base_url", "https://app.asana.com/api/1.0").rstrip("/")
     pushed, errors, skipped = [], [], []
     for task in outbox:
@@ -178,17 +187,34 @@ def asana_push(config: dict, outbox: list[dict], *, request: RequestFn = _http_j
         if field and option:
             data["custom_fields"] = {field: option}
         elif field and task["workflow_status"] != "done":
-            skipped.append({"external_id": task["external_id"], "reason": "missing status_values mapping"})
+            skipped.append(
+                {
+                    "external_id": task["external_id"],
+                    "reason": "missing status_values mapping",
+                }
+            )
         url = f"{base}/tasks/{urllib.parse.quote(str(task['external_id']))}"
-        status, payload, err = request("PUT", url, _asana_headers(config), {"data": data})
+        status, payload, err = request(
+            "PUT", url, _asana_headers(config), {"data": data}
+        )
         if status < 200 or status >= 300:
             errors.append(_fail("asana", "push", status, err, payload))
         else:
-            pushed.append({"external_id": task["external_id"], "fields": sorted(data.keys())})
-    return {"ok": not errors, "source": "asana", "pushed": pushed, "skipped": skipped, "errors": errors}
+            pushed.append(
+                {"external_id": task["external_id"], "fields": sorted(data.keys())}
+            )
+    return {
+        "ok": not errors,
+        "source": "asana",
+        "pushed": pushed,
+        "skipped": skipped,
+        "errors": errors,
+    }
 
 
-def _linear_graphql(config: dict, query: str, variables: dict, *, request: RequestFn) -> tuple[int, dict, str]:
+def _linear_graphql(
+    config: dict, query: str, variables: dict, *, request: RequestFn
+) -> tuple[int, dict, str]:
     url = config.get("url", "https://api.linear.app/graphql")
     token = _secret(config)
     headers = {"accept": "application/json"}
@@ -219,26 +245,43 @@ query FrogIssues($first: Int!, $filter: IssueFilter) {
 }
 """
     status, payload, err = _linear_graphql(
-        config, query, {"first": int(config.get("limit", 100)), "filter": filter_arg}, request=request
+        config,
+        query,
+        {"first": int(config.get("limit", 100)), "filter": filter_arg},
+        request=request,
     )
     if status < 200 or status >= 300 or payload.get("errors"):
-        return _fail("linear", "pull", status, err or json.dumps(payload.get("errors", [])), payload)
+        return _fail(
+            "linear",
+            "pull",
+            status,
+            err or json.dumps(payload.get("errors", [])),
+            payload,
+        )
     items = []
     for issue in payload.get("data", {}).get("issues", {}).get("nodes", []):
         state = issue.get("state") or {}
-        items.append({
-            "external_id": str(issue["id"]),
-            "title": issue.get("title") or issue.get("identifier") or issue["id"],
-            "status": _status_from_text(state.get("type") or state.get("name"), config.get("status_map")),
-            "priority": _linear_priority(issue.get("priority")),
-            "why": issue.get("description") or None,
-        })
+        items.append(
+            {
+                "external_id": str(issue["id"]),
+                "title": issue.get("title") or issue.get("identifier") or issue["id"],
+                "status": _status_from_text(
+                    state.get("type") or state.get("name"), config.get("status_map")
+                ),
+                "priority": _linear_priority(issue.get("priority")),
+                "why": issue.get("description") or None,
+            }
+        )
     return {"ok": True, "source": "linear", "items": items}
 
 
-def linear_push(config: dict, outbox: list[dict], *, request: RequestFn = _http_json) -> dict:
+def linear_push(
+    config: dict, outbox: list[dict], *, request: RequestFn = _http_json
+) -> dict:
     state_ids = config.get("state_ids", {})
-    priority_values = config.get("priority_values", {"p0": 1, "p1": 2, "p2": 3, "p3": 4})
+    priority_values = config.get(
+        "priority_values", {"p0": 1, "p1": 2, "p2": 3, "p3": 4}
+    )
     mutation = """
 mutation FrogIssueUpdate($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success issue { id } }
@@ -250,20 +293,48 @@ mutation FrogIssueUpdate($id: String!, $input: IssueUpdateInput!) {
         if state_ids.get(task["workflow_status"]):
             fields["stateId"] = state_ids[task["workflow_status"]]
         else:
-            skipped.append({"external_id": task["external_id"], "reason": "missing state_ids mapping"})
+            skipped.append(
+                {
+                    "external_id": task["external_id"],
+                    "reason": "missing state_ids mapping",
+                }
+            )
         if task.get("priority") in priority_values:
             fields["priority"] = priority_values[task["priority"]]
         if not fields:
             continue
         status, payload, err = _linear_graphql(
-            config, mutation, {"id": task["external_id"], "input": fields}, request=request
+            config,
+            mutation,
+            {"id": task["external_id"], "input": fields},
+            request=request,
         )
-        ok = 200 <= status < 300 and not payload.get("errors") and payload.get("data", {}).get("issueUpdate", {}).get("success", True)
+        ok = (
+            200 <= status < 300
+            and not payload.get("errors")
+            and payload.get("data", {}).get("issueUpdate", {}).get("success", True)
+        )
         if not ok:
-            errors.append(_fail("linear", "push", status, err or json.dumps(payload.get("errors", [])), payload))
+            errors.append(
+                _fail(
+                    "linear",
+                    "push",
+                    status,
+                    err or json.dumps(payload.get("errors", [])),
+                    payload,
+                )
+            )
         else:
-            pushed.append({"external_id": task["external_id"], "fields": sorted(fields.keys())})
-    return {"ok": not errors, "source": "linear", "pushed": pushed, "skipped": skipped, "errors": errors}
+            pushed.append(
+                {"external_id": task["external_id"], "fields": sorted(fields.keys())}
+            )
+    return {
+        "ok": not errors,
+        "source": "linear",
+        "pushed": pushed,
+        "skipped": skipped,
+        "errors": errors,
+    }
 
 
 def _jira_headers(config: dict) -> dict[str, str]:
@@ -285,25 +356,33 @@ def jira_pull(config: dict, *, request: RequestFn = _http_json) -> dict:
         "maxResults": int(config.get("limit", 100)),
         "fields": ["summary", "status", "priority", "assignee", "description"],
     }
-    status, payload, err = request("POST", f"{base}/rest/api/3/search/jql", _jira_headers(config), body)
+    status, payload, err = request(
+        "POST", f"{base}/rest/api/3/search/jql", _jira_headers(config), body
+    )
     if status < 200 or status >= 300:
         return _fail("jira", "pull", status, err, payload)
     items = []
     for issue in payload.get("issues", []):
         fields = issue.get("fields") or {}
         status_info = fields.get("status") or {}
-        status_name = ((status_info.get("statusCategory") or {}).get("key") or status_info.get("name"))
+        status_name = (status_info.get("statusCategory") or {}).get(
+            "key"
+        ) or status_info.get("name")
         priority = (fields.get("priority") or {}).get("name")
-        items.append({
-            "external_id": issue.get("key") or issue["id"],
-            "title": fields.get("summary") or issue.get("key") or issue["id"],
-            "status": _status_from_text(status_name, config.get("status_map")),
-            "priority": _priority_from_text(priority, config.get("priority_map")),
-        })
+        items.append(
+            {
+                "external_id": issue.get("key") or issue["id"],
+                "title": fields.get("summary") or issue.get("key") or issue["id"],
+                "status": _status_from_text(status_name, config.get("status_map")),
+                "priority": _priority_from_text(priority, config.get("priority_map")),
+            }
+        )
     return {"ok": True, "source": "jira", "items": items}
 
 
-def jira_push(config: dict, outbox: list[dict], *, request: RequestFn = _http_json) -> dict:
+def jira_push(
+    config: dict, outbox: list[dict], *, request: RequestFn = _http_json
+) -> dict:
     base = (config.get("base_url") or "").rstrip("/")
     if not base:
         return {"ok": False, "source": "jira", "error": "base_url is required"}
@@ -312,7 +391,12 @@ def jira_push(config: dict, outbox: list[dict], *, request: RequestFn = _http_js
     for task in outbox:
         transition = transitions.get(task["workflow_status"])
         if not transition:
-            skipped.append({"external_id": task["external_id"], "reason": "missing transition_ids mapping"})
+            skipped.append(
+                {
+                    "external_id": task["external_id"],
+                    "reason": "missing transition_ids mapping",
+                }
+            )
             continue
         url = f"{base}/rest/api/3/issue/{urllib.parse.quote(str(task['external_id']))}/transitions"
         status, payload, err = request(
@@ -321,8 +405,16 @@ def jira_push(config: dict, outbox: list[dict], *, request: RequestFn = _http_js
         if status < 200 or status >= 300:
             errors.append(_fail("jira", "push", status, err, payload))
         else:
-            pushed.append({"external_id": task["external_id"], "transition": str(transition)})
-    return {"ok": not errors, "source": "jira", "pushed": pushed, "skipped": skipped, "errors": errors}
+            pushed.append(
+                {"external_id": task["external_id"], "transition": str(transition)}
+            )
+    return {
+        "ok": not errors,
+        "source": "jira",
+        "pushed": pushed,
+        "skipped": skipped,
+        "errors": errors,
+    }
 
 
 def pull(source: str, config: dict, *, request: RequestFn = _http_json) -> dict:
@@ -335,10 +427,14 @@ def pull(source: str, config: dict, *, request: RequestFn = _http_json) -> dict:
     return {"ok": False, "source": source, "error": f"unsupported provider: {source}"}
 
 
-def push(conn, source: str, config: dict, *, request: RequestFn = _http_json) -> dict:
+def push(conn, source: str, config: dict, *, request: RequestFn = _http_json, storage=None) -> dict:
     if source not in _SUPPORTED:
-        return {"ok": False, "source": source, "error": f"unsupported provider: {source}"}
-    outbox = store.provider_outbox(conn, source)["outbox"]
+        return {
+            "ok": False,
+            "source": source,
+            "error": f"unsupported provider: {source}",
+        }
+    outbox = (storage or store).provider_outbox(conn, source)["outbox"]
     if source == "asana":
         return asana_push(config, outbox, request=request)
     if source == "linear":
@@ -353,18 +449,28 @@ def sync(
     *,
     direction: str = "both",
     request: RequestFn = _http_json,
+    storage=None,
 ) -> dict:
     if direction not in {"pull", "push", "both"}:
-        return {"ok": False, "source": source, "error": f"unsupported direction: {direction}"}
+        return {
+            "ok": False,
+            "source": source,
+            "error": f"unsupported direction: {direction}",
+        }
     inbound = None
     if direction in {"pull", "both"}:
         inbound = pull(source, config, request=request)
         if not inbound.get("ok"):
             return {"ok": False, "source": source, "pull": inbound}
-        store.provider_sync_in(conn, source, inbound["items"])
+        items = inbound["items"]
+        if storage is not None:
+            items = [dict(item, repo_ref=config.get('repo_ref')) for item in items]
+        imported = (storage or store).provider_sync_in(conn, source, items)
+        if not imported.get('ok'):
+            return {'ok':False,'source':source,'pull':inbound,'import':imported}
     outbound = None
     if direction in {"push", "both"}:
-        outbound = push(conn, source, config, request=request)
+        outbound = push(conn, source, config, request=request, storage=storage)
     return {
         "ok": bool((outbound or inbound or {}).get("ok", True)),
         "source": source,

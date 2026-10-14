@@ -1,60 +1,54 @@
 from __future__ import annotations
 
+import glob
 import hashlib
 import importlib.util
-import glob
 import json
-import time
 import os
 import re
-import shutil
 import shlex
+import shutil
 import socket
 import sqlite3
 import subprocess
+import time
 import tomllib
-import uuid
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import uuid
 from contextvars import ContextVar
-from typing import Optional
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from .paths import relative_repo_path, resolve_repo_path, resolve_target
+from .vfs import LocalVFS, current_vfs, set_vfs
 
 # VFS integration
 from .vfs_store import (
-    get_workspace_vfs,
-    vfs_workspace_root,
-    vfs_db_path,
-    vfs_frog_home,
-    vfs_migration_dir,
-    vfs_exists,
-    vfs_is_file,
-    vfs_is_dir,
-    vfs_stat,
-    vfs_read_text,
-    vfs_read_bytes,
-    vfs_write_text,
-    vfs_write_bytes,
-    vfs_mkdir,
-    vfs_unlink,
-    vfs_rename,
-    vfs_listdir,
-    vfs_walk,
-    vfs_glob,
-    vfs_open,
-    vfs_resolve,
-    vfs_expanduser,
-    vfs_parent,
-    vfs_name,
-    vfs_join,
-    vfs_relative_to,
-    vfs_from_local_path,
-    vfs_connect,
     _is_path_under_vfs_root,
+    vfs_connect,
+    vfs_db_path,
+    vfs_exists,
+    vfs_expanduser,
+    vfs_frog_home,
+    vfs_from_local_path,
+    vfs_glob,
+    vfs_is_dir,
+    vfs_is_file,
+    vfs_join,
+    vfs_migration_dir,
+    vfs_mkdir,
+    vfs_name,
+    vfs_parent,
+    vfs_read_bytes,
+    vfs_read_text,
+    vfs_resolve,
+    vfs_stat,
+    vfs_unlink,
+    vfs_workspace_root,
+    vfs_write_bytes,
+    vfs_write_text,
 )
-from .vfs import LocalVFS, current_vfs, set_vfs
-from .paths import resolve_repo_path, relative_repo_path, resolve_target
 
 # The historical layout (the konsonans host). Use workspace_root(): the
 # configured workspace wins, and RAGBAZ_SRC_ROOT over both.
@@ -70,7 +64,9 @@ def workspace_root() -> Path:
     try:
         from ragbaz_frog import config as frog_config  # config imports store
 
-        workspace = _workspace_context.get() or frog_config.resolve_workspace(None, None)
+        workspace = _workspace_context.get() or frog_config.resolve_workspace(
+            None, None
+        )
     except Exception:  # noqa: BLE001 -- an unreadable config must not break paths
         workspace = None
     if workspace and workspace["host"].get("transport", "local") == "local":
@@ -88,7 +84,9 @@ def workspace_db() -> str:
     try:
         from ragbaz_frog import config as frog_config
 
-        workspace = _workspace_context.get() or frog_config.resolve_workspace(None, None)
+        workspace = _workspace_context.get() or frog_config.resolve_workspace(
+            None, None
+        )
     except Exception:  # noqa: BLE001
         workspace = None
     if workspace and workspace["host"].get("transport", "local") == "local":
@@ -117,6 +115,8 @@ def _frog_bin() -> str:
 
 def _frog_mcp() -> str:
     return shutil.which("frog-mcp") or str(_frog_home() / "bin" / "frog-mcp")
+
+
 DISCOVERY_MANIFESTS = (
     "Makefile",
     "package.json",
@@ -160,7 +160,7 @@ DISCOVERY_CATEGORY_ROOTS = (
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def utc_now_iso() -> str:
@@ -281,9 +281,9 @@ def current_agent() -> str:
     """Resolved acting-agent identity. FROG_AGENT lets a Claude/Codex
     session declare itself distinctly even when many run as the same OS
     user; falls back to $USER."""
-    return (os.environ.get("FROG_AGENT")
-            or os.environ.get("USER")
-            or "unknown").strip() or "unknown"
+    return (
+        os.environ.get("FROG_AGENT") or os.environ.get("USER") or "unknown"
+    ).strip() or "unknown"
 
 
 def current_session() -> str:
@@ -304,8 +304,9 @@ def agent_whoami(conn) -> dict:
     }
 
 
-def agent_register(conn, name: str | None = None, *, kind: str | None = None,
-                   notes: str | None = None) -> dict:
+def agent_register(
+    conn, name: str | None = None, *, kind: str | None = None, notes: str | None = None
+) -> dict:
     name = (name or current_agent()).strip()
     if not name:
         return {"ok": False, "error": "empty agent name"}
@@ -319,12 +320,20 @@ def agent_register(conn, name: str | None = None, *, kind: str | None = None,
              updated_at=excluded.updated_at""",
         (name, kind, notes, now, now),
     )
-    record_event(conn, kind="agent.registered",
-                 summary=f"registered agent {name}", actor=name,
-                 payload={"kind": kind, "session": current_session()})
+    record_event(
+        conn,
+        kind="agent.registered",
+        summary=f"registered agent {name}",
+        actor=name,
+        payload={"kind": kind, "session": current_session()},
+    )
     conn.commit()
-    return {"ok": True, "message": f"registered agent {name}",
-            "agent": name, "kind": kind}
+    return {
+        "ok": True,
+        "message": f"registered agent {name}",
+        "agent": name,
+        "kind": kind,
+    }
 
 
 def ensure_agent(conn, name: str) -> None:
@@ -405,10 +414,16 @@ def _load_nostoi_reference():
         return _nostoi_reference
     configured = os.environ.get("FROG_NOSTOI_PYTHON")
     candidates = [Path(configured).expanduser()] if configured else []
-    candidates.extend([
-        Path(__file__).resolve().parents[3] / "nostoi" / "contrib" / "python" / "nostoi.py",
-        workspace_root() / "nostoi" / "contrib" / "python" / "nostoi.py",
-    ])
+    candidates.extend(
+        [
+            Path(__file__).resolve().parents[3]
+            / "nostoi"
+            / "contrib"
+            / "python"
+            / "nostoi.py",
+            workspace_root() / "nostoi" / "contrib" / "python" / "nostoi.py",
+        ]
+    )
     source = next((p.resolve() for p in candidates if p.is_file()), None)
     if source is None:
         raise RuntimeError(
@@ -424,8 +439,9 @@ def _load_nostoi_reference():
     return module
 
 
-def _append_nostoi_intent(db_path: str, *, kind: str, actor: str,
-                          subject: str, summary: str, payload: dict) -> None:
+def _append_nostoi_intent(
+    db_path: str, *, kind: str, actor: str, subject: str, summary: str, payload: dict
+) -> None:
     reference = _load_nostoi_reference()
     ledger_path = os.environ.get("FROG_NOSTOI_LEDGER", db_path + ".frog-intents.jsonl")
     reference.append(
@@ -453,9 +469,13 @@ def record_intent(conn, *, kind: str, summary: str, payload: dict) -> str:
     actor = current_agent() or "unknown"
     if len(actor.encode("utf-8")) > 128:
         actor = "sha256:" + hashlib.sha256(actor.encode()).hexdigest()
-    db_path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    db_path = next(
+        (row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), ""
+    )
     if not db_path:
-        raise sqlite3.OperationalError("cannot durably record action intent for an in-memory database")
+        raise sqlite3.OperationalError(
+            "cannot durably record action intent for an in-memory database"
+        )
     minute = int(time.time() // 60)
     intent_id = uuid.uuid4().hex
     audit = sqlite3.connect(db_path, timeout=5.0)
@@ -475,17 +495,25 @@ def record_intent(conn, *, kind: str, summary: str, payload: dict) -> str:
                 "SELECT 1 FROM audit_intent_windows WHERE window_minute=? AND actor='@limited:global'",
                 (minute,),
             ).fetchone():
-                raise IntentRateLimited("workspace audit intent rate limit reached; action refused")
+                raise IntentRateLimited(
+                    "workspace audit intent rate limit reached; action refused"
+                )
         fast_actor = audit.execute(
             "SELECT accepted FROM audit_intent_windows WHERE window_minute=? AND actor=?",
             (minute, actor),
         ).fetchone()
         limited_actor = "@limited:" + hashlib.sha256(actor.encode()).hexdigest()[:32]
-        if fast_actor and int(fast_actor[0]) >= MAX_INTENTS_PER_ACTOR and audit.execute(
-            "SELECT 1 FROM audit_intent_windows WHERE window_minute=? AND actor=?",
-            (minute, limited_actor),
-        ).fetchone():
-            raise IntentRateLimited("actor audit intent rate limit reached; action refused")
+        if (
+            fast_actor
+            and int(fast_actor[0]) >= MAX_INTENTS_PER_ACTOR
+            and audit.execute(
+                "SELECT 1 FROM audit_intent_windows WHERE window_minute=? AND actor=?",
+                (minute, limited_actor),
+            ).fetchone()
+        ):
+            raise IntentRateLimited(
+                "actor audit intent rate limit reached; action refused"
+            )
 
         audit.execute("BEGIN IMMEDIATE")
 
@@ -494,7 +522,9 @@ def record_intent(conn, *, kind: str, summary: str, payload: dict) -> str:
             (minute,),
         ).fetchone()
         if global_row is None:
-            audit.execute("DELETE FROM audit_intent_windows WHERE window_minute < ?", (minute,))
+            audit.execute(
+                "DELETE FROM audit_intent_windows WHERE window_minute < ?", (minute,)
+            )
             global_count = 0
         else:
             global_count = int(global_row[0])
@@ -506,20 +536,31 @@ def record_intent(conn, *, kind: str, summary: str, payload: dict) -> str:
                 (minute, summary_actor),
             ).fetchone()
             if not seen:
-                record_event(audit, kind="audit.intent_rate_limited",
-                             summary="global per-minute audit intent limit reached",
-                             actor="frog", payload={"window_minute": minute, "scope": "global"})
-                _append_nostoi_intent(
-                    db_path, kind="audit.intent_rate_limited", actor="frog",
-                    subject=uuid.uuid4().hex, summary="global per-minute audit intent limit reached",
+                record_event(
+                    audit,
+                    kind="audit.intent_rate_limited",
+                    summary="global per-minute audit intent limit reached",
+                    actor="frog",
                     payload={"window_minute": minute, "scope": "global"},
                 )
-                audit.execute("INSERT INTO audit_intent_windows VALUES(?,?,?)",
-                              (minute, summary_actor, 1))
+                _append_nostoi_intent(
+                    db_path,
+                    kind="audit.intent_rate_limited",
+                    actor="frog",
+                    subject=uuid.uuid4().hex,
+                    summary="global per-minute audit intent limit reached",
+                    payload={"window_minute": minute, "scope": "global"},
+                )
+                audit.execute(
+                    "INSERT INTO audit_intent_windows VALUES(?,?,?)",
+                    (minute, summary_actor, 1),
+                )
                 audit.commit()
             else:
                 audit.rollback()
-            raise IntentRateLimited("workspace audit intent rate limit reached; action refused")
+            raise IntentRateLimited(
+                "workspace audit intent rate limit reached; action refused"
+            )
 
         actor_row = audit.execute(
             "SELECT accepted FROM audit_intent_windows WHERE window_minute=? AND actor=?",
@@ -527,47 +568,82 @@ def record_intent(conn, *, kind: str, summary: str, payload: dict) -> str:
         ).fetchone()
         actor_count = int(actor_row[0]) if actor_row else 0
         if actor_count >= MAX_INTENTS_PER_ACTOR:
-            summary_actor = "@limited:" + hashlib.sha256(actor.encode()).hexdigest()[:32]
+            summary_actor = (
+                "@limited:" + hashlib.sha256(actor.encode()).hexdigest()[:32]
+            )
             seen = audit.execute(
                 "SELECT 1 FROM audit_intent_windows WHERE window_minute=? AND actor=?",
                 (minute, summary_actor),
             ).fetchone()
             if not seen:
-                record_event(audit, kind="audit.intent_rate_limited",
-                             summary="per-actor audit intent limit reached",
-                             actor="frog", payload={"window_minute": minute,
-                                                     "actor_sha256": hashlib.sha256(actor.encode()).hexdigest()})
-                _append_nostoi_intent(
-                    db_path, kind="audit.intent_rate_limited", actor="frog",
-                    subject=uuid.uuid4().hex, summary="per-actor audit intent limit reached",
-                    payload={"window_minute": minute,
-                             "actor_sha256": hashlib.sha256(actor.encode()).hexdigest()},
+                record_event(
+                    audit,
+                    kind="audit.intent_rate_limited",
+                    summary="per-actor audit intent limit reached",
+                    actor="frog",
+                    payload={
+                        "window_minute": minute,
+                        "actor_sha256": hashlib.sha256(actor.encode()).hexdigest(),
+                    },
                 )
-                audit.execute("INSERT INTO audit_intent_windows VALUES(?,?,?)",
-                              (minute, summary_actor, 1))
+                _append_nostoi_intent(
+                    db_path,
+                    kind="audit.intent_rate_limited",
+                    actor="frog",
+                    subject=uuid.uuid4().hex,
+                    summary="per-actor audit intent limit reached",
+                    payload={
+                        "window_minute": minute,
+                        "actor_sha256": hashlib.sha256(actor.encode()).hexdigest(),
+                    },
+                )
+                audit.execute(
+                    "INSERT INTO audit_intent_windows VALUES(?,?,?)",
+                    (minute, summary_actor, 1),
+                )
                 audit.commit()
             else:
                 audit.rollback()
-            raise IntentRateLimited("actor audit intent rate limit reached; action refused")
+            raise IntentRateLimited(
+                "actor audit intent rate limit reached; action refused"
+            )
 
         chained_payload = dict(payload or {})
         chained_payload["intent_id"] = intent_id
-        record_event(audit, kind=kind, summary=summary[:256], actor=actor, payload=chained_payload)
+        record_event(
+            audit,
+            kind=kind,
+            summary=summary[:256],
+            actor=actor,
+            payload=chained_payload,
+        )
         if actor_row:
-            audit.execute("UPDATE audit_intent_windows SET accepted=accepted+1 WHERE window_minute=? AND actor=?",
-                          (minute, actor))
+            audit.execute(
+                "UPDATE audit_intent_windows SET accepted=accepted+1 WHERE window_minute=? AND actor=?",
+                (minute, actor),
+            )
         else:
-            audit.execute("INSERT INTO audit_intent_windows VALUES(?,?,1)", (minute, actor))
+            audit.execute(
+                "INSERT INTO audit_intent_windows VALUES(?,?,1)", (minute, actor)
+            )
         if global_row:
-            audit.execute("UPDATE audit_intent_windows SET accepted=accepted+1 WHERE window_minute=? AND actor='@global'",
-                          (minute,))
+            audit.execute(
+                "UPDATE audit_intent_windows SET accepted=accepted+1 WHERE window_minute=? AND actor='@global'",
+                (minute,),
+            )
         else:
-            audit.execute("INSERT INTO audit_intent_windows VALUES(?,'@global',1)", (minute,))
+            audit.execute(
+                "INSERT INTO audit_intent_windows VALUES(?,'@global',1)", (minute,)
+            )
         # Append to Nostoi before committing/passing control to the action.
         # If SQLite later fails, the chain still proves the attempted action.
         _append_nostoi_intent(
-            db_path, kind=kind, actor=actor, subject=intent_id,
-            summary=summary[:256], payload=payload or {},
+            db_path,
+            kind=kind,
+            actor=actor,
+            subject=intent_id,
+            summary=summary[:256],
+            payload=payload or {},
         )
         audit.commit()
         return intent_id
@@ -641,10 +717,13 @@ def _migrate_once(db_path: str) -> dict:
             try:
                 has_tbl = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
-                    "AND name='schema_migrations'").fetchone()
-                applied = ({r[0] for r in conn.execute(
-                    "SELECT name FROM schema_migrations")}
-                    if has_tbl else set())
+                    "AND name='schema_migrations'"
+                ).fetchone()
+                applied = (
+                    {r[0] for r in conn.execute("SELECT name FROM schema_migrations")}
+                    if has_tbl
+                    else set()
+                )
                 if sql_file.name in applied:
                     conn.execute("ROLLBACK")
                     continue
@@ -654,22 +733,27 @@ def _migrate_once(db_path: str) -> dict:
                 conn.execute(
                     "INSERT OR REPLACE INTO schema_migrations"
                     "(name, applied_at) VALUES(?, ?)",
-                    (sql_file.name, utc_now_iso()))
+                    (sql_file.name, utc_now_iso()),
+                )
                 record_event(
-                    conn, kind="migration.applied",
+                    conn,
+                    kind="migration.applied",
                     summary=f"applied {sql_file.name}",
-                    payload={"migration": sql_file.name})
+                    payload={"migration": sql_file.name},
+                )
                 conn.execute("COMMIT")
                 newly_applied.append(sql_file.name)
             except Exception as e:
                 conn.execute("ROLLBACK")
-                if (isinstance(e, sqlite3.OperationalError)
-                        and "locked" in str(e).lower()):
+                if (
+                    isinstance(e, sqlite3.OperationalError)
+                    and "locked" in str(e).lower()
+                ):
                     raise  # transient contention -> retried by migrate()
                 return {
                     "ok": False,
                     "error": f"migration {sql_file.name} failed "
-                             f"(rolled back, schema unchanged): {e}",
+                    f"(rolled back, schema unchanged): {e}",
                     "db_path": db_path,
                     "applied": newly_applied,
                 }
@@ -705,17 +789,25 @@ def migrate(db_path: str, *, attempts: int = 12) -> dict:
         try:
             return _migrate_once(db_path)
         except sqlite3.OperationalError as e:
-            if ("locked" not in str(e).lower()
-                    or attempt == attempts - 1):
-                return {"ok": False,
-                        "error": f"migrate failed: {e}",
-                        "db_path": db_path, "applied": []}
+            if "locked" not in str(e).lower() or attempt == attempts - 1:
+                return {
+                    "ok": False,
+                    "error": f"migrate failed: {e}",
+                    "db_path": db_path,
+                    "applied": [],
+                }
             time.sleep(min(0.05 * (attempt + 1), 0.5))
-    return {"ok": False, "error": "migrate exhausted retries",
-            "db_path": db_path, "applied": []}
+    return {
+        "ok": False,
+        "error": "migrate exhausted retries",
+        "db_path": db_path,
+        "applied": [],
+    }
 
 
-def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | None = None) -> dict:
+def init_repo(
+    conn, path_or_name: str, *, kind: str | None = None, notes: str | None = None
+) -> dict:
     vfs = current_vfs()
     raw_path = vfs_expanduser(path_or_name, vfs)
 
@@ -731,18 +823,28 @@ def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | 
         # Absolute path outside VFS root - use directly without VFS conversion
         repo_path_vfs = raw_path  # Keep as absolute path for display
         repo_path_local = raw_path
-    elif any(sep in path_or_name for sep in ("/",)) or path_or_name.startswith(("~", ".")):
+    elif any(sep in path_or_name for sep in ("/",)) or path_or_name.startswith(
+        ("~", ".")
+    ):
         repo_path_vfs = vfs_resolve(raw_path, vfs)
         repo_path_local = _vfs_to_local_path(repo_path_vfs, vfs)
     else:
-        repo_path_vfs = vfs_join(vfs_workspace_root(vfs), "experiments", path_or_name, vfs=vfs)
+        repo_path_vfs = vfs_join(
+            vfs_workspace_root(vfs), "experiments", path_or_name, vfs=vfs
+        )
         repo_path_local = _vfs_to_local_path(repo_path_vfs, vfs)
 
     intent_id = record_intent(
-        conn, kind="repo.initialization.requested",
+        conn,
+        kind="repo.initialization.requested",
         summary=f"requested repository initialization at {repo_path_local}",
-        payload={"repo_path": repo_path_local, "name": vfs_name(repo_path_vfs, vfs) if not is_absolute_outside_root else Path(repo_path_local).name,
-                 "kind": kind or "embryo"},
+        payload={
+            "repo_path": repo_path_local,
+            "name": vfs_name(repo_path_vfs, vfs)
+            if not is_absolute_outside_root
+            else Path(repo_path_local).name,
+            "kind": kind or "embryo",
+        },
     )
     # For paths outside VFS root, use local mkdir directly
     if is_absolute_outside_root:
@@ -752,7 +854,9 @@ def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | 
     repo = register_repo(
         conn,
         repo_path=repo_path_local,
-        name=vfs_name(repo_path_vfs, vfs) if not is_absolute_outside_root else Path(repo_path_local).name,
+        name=vfs_name(repo_path_vfs, vfs)
+        if not is_absolute_outside_root
+        else Path(repo_path_local).name,
         kind=kind or "embryo",
         status="active",
         third_party=False,
@@ -771,7 +875,12 @@ def init_repo(conn, path_or_name: str, *, kind: str | None = None, notes: str | 
         payload={"agents_path": agents_path, "intent_id": intent_id},
     )
     conn.commit()
-    return {"ok": True, "message": f"initialized {repo_path_local}", "repo": repo["repo"], "agents_path": agents_path}
+    return {
+        "ok": True,
+        "message": f"initialized {repo_path_local}",
+        "repo": repo["repo"],
+        "agents_path": agents_path,
+    }
 
 
 def agent_instructions_text() -> str:
@@ -806,15 +915,29 @@ Set `FROG_AGENT` so your edits/locks are attributed distinctly.
 def _claude_settings_fragment() -> dict:
     return {
         "hooks": {
-            "PreToolUse": [{
-                "matcher": "Edit|Write",
-                "hooks": [{"type": "command",
-                           "command": shlex.quote(str(_frog_home() / "hooks" / "pretooluse-lock-guard.sh"))}],
-            }],
-            "SessionStart": [{
-                "hooks": [{"type": "command",
-                           "command": f'{shlex.quote(_frog_bin())} board --once; {shlex.quote(_frog_bin())} task next --agent "${{FROG_AGENT:-$USER}}"'}],
-            }],
+            "PreToolUse": [
+                {
+                    "matcher": "Edit|Write",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": shlex.quote(
+                                str(_frog_home() / "hooks" / "pretooluse-lock-guard.sh")
+                            ),
+                        }
+                    ],
+                }
+            ],
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f'{shlex.quote(_frog_bin())} board --once; {shlex.quote(_frog_bin())} task next --agent "${{FROG_AGENT:-$USER}}"',
+                        }
+                    ],
+                }
+            ],
         }
     }
 
@@ -836,8 +959,14 @@ def _merge_hooks(existing: dict, frag: dict) -> dict:
     return out
 
 
-def setup_agent(conn, agent: str, *, target_dir: str | None,
-                dry_run: bool = False, force: bool = False) -> dict:
+def setup_agent(
+    conn,
+    agent: str,
+    *,
+    target_dir: str | None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> dict:
     """Generate the config a Claude/Codex user otherwise hand-rolls.
     Idempotent; --dry-run plans without writing."""
     agent = agent.lower()
@@ -851,7 +980,9 @@ def setup_agent(conn, agent: str, *, target_dir: str | None,
     if not _is_path_under_vfs_root(target_dir_local, vfs):
         return _setup_agent_pathlib(conn, agent, target_dir_local, dry_run, force)
 
-    base = vfs_expanduser(target_dir_local, vfs) if target_dir else vfs_resolve(".", vfs)
+    base = (
+        vfs_expanduser(target_dir_local, vfs) if target_dir else vfs_resolve(".", vfs)
+    )
     if not vfs_is_dir(base, vfs):
         return {"ok": False, "error": f"not a directory: {base}"}
     actions = []
@@ -861,9 +992,13 @@ def setup_agent(conn, agent: str, *, target_dir: str | None,
         if vfs_exists(path, vfs) and not force and kind == "create":
             actions.append({"path": rel, "action": "skip (exists)"})
             return
-        actions.append({"path": rel,
-                        "action": ("would " if dry_run else "") +
-                        ("merge" if kind == "merge" else "write")})
+        actions.append(
+            {
+                "path": rel,
+                "action": ("would " if dry_run else "")
+                + ("merge" if kind == "merge" else "write"),
+            }
+        )
         if not dry_run:
             vfs_mkdir(vfs_parent(path, vfs), parents=True, exist_ok=True, vfs=vfs)
             write()
@@ -875,6 +1010,7 @@ def setup_agent(conn, agent: str, *, target_dir: str | None,
     snippet = {"FROG_AGENT": f"{agent}-$(hostname -s)"}
     if agent == "claude":
         sj = vfs_join(base, ".claude", "settings.json", vfs=vfs)
+
         def _w_sj():
             cur = {}
             if vfs_exists(sj, vfs):
@@ -882,10 +1018,16 @@ def setup_agent(conn, agent: str, *, target_dir: str | None,
                     cur = json.loads(vfs_read_text(sj, vfs=vfs))
                 except json.JSONDecodeError:
                     cur = {}
-            vfs_write_text(sj, json.dumps(_merge_hooks(cur, _claude_settings_fragment()),
-                                         indent=2) + "\n", vfs=vfs)
+            vfs_write_text(
+                sj,
+                json.dumps(_merge_hooks(cur, _claude_settings_fragment()), indent=2)
+                + "\n",
+                vfs=vfs,
+            )
+
         plan(sj, "merge", _w_sj)
         mj = vfs_join(base, ".mcp.json", vfs=vfs)
+
         def _w_mj():
             cur = {}
             if vfs_exists(mj, vfs):
@@ -893,29 +1035,43 @@ def setup_agent(conn, agent: str, *, target_dir: str | None,
                     cur = json.loads(vfs_read_text(mj, vfs=vfs))
                 except json.JSONDecodeError:
                     cur = {}
-            cur.setdefault("mcpServers", {})["frog"] = _mcp_json_fragment()["mcpServers"]["frog"]
+            cur.setdefault("mcpServers", {})["frog"] = _mcp_json_fragment()[
+                "mcpServers"
+            ]["frog"]
             vfs_write_text(mj, json.dumps(cur, indent=2) + "\n", vfs=vfs)
+
         plan(mj, "merge", _w_mj)
-        extra = {"mcp": _mcp_json_fragment(),
-                 "env_snippet": f'export FROG_AGENT="claude-$(hostname -s)"'}
+        extra = {
+            "mcp": _mcp_json_fragment(),
+            "env_snippet": 'export FROG_AGENT="claude-$(hostname -s)"',
+        }
     else:
         # Codex reads AGENTS.md (written above). Emit the config.toml block
         # to add by hand (we never edit a user's global ~/.codex/config.toml).
         toml_block = (
-            "[mcp_servers.frog]\n"
-            f'command = {json.dumps(_frog_mcp())}\n'
-            "args = []\n"
+            f"[mcp_servers.frog]\ncommand = {json.dumps(_frog_mcp())}\nargs = []\n"
         )
-        extra = {"codex_config_toml": toml_block,
-                 "env_snippet": f'export FROG_AGENT="codex-$(hostname -s)"'}
+        extra = {
+            "codex_config_toml": toml_block,
+            "env_snippet": 'export FROG_AGENT="codex-$(hostname -s)"',
+        }
 
-    return {"ok": True, "agent": agent, "dir": target_dir_local,
-            "dry_run": dry_run, "actions": actions, **extra}
+    return {
+        "ok": True,
+        "agent": agent,
+        "dir": target_dir_local,
+        "dry_run": dry_run,
+        "actions": actions,
+        **extra,
+    }
 
 
-def _setup_agent_pathlib(conn, agent: str, target_dir: str, dry_run: bool, force: bool) -> dict:
+def _setup_agent_pathlib(
+    conn, agent: str, target_dir: str, dry_run: bool, force: bool
+) -> dict:
     """Fallback implementation using pathlib for paths outside VFS root."""
     from pathlib import Path
+
     base = Path(target_dir).expanduser().resolve()
     if not base.is_dir():
         return {"ok": False, "error": f"not a directory: {base}"}
@@ -926,9 +1082,13 @@ def _setup_agent_pathlib(conn, agent: str, target_dir: str, dry_run: bool, force
         if path.exists() and not force and kind == "create":
             actions.append({"path": rel, "action": "skip (exists)"})
             return
-        actions.append({"path": rel,
-                        "action": ("would " if dry_run else "") +
-                        ("merge" if kind == "merge" else "write")})
+        actions.append(
+            {
+                "path": rel,
+                "action": ("would " if dry_run else "")
+                + ("merge" if kind == "merge" else "write"),
+            }
+        )
         if not dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
             write()
@@ -940,6 +1100,7 @@ def _setup_agent_pathlib(conn, agent: str, target_dir: str, dry_run: bool, force
     snippet = {"FROG_AGENT": f"{agent}-$(hostname -s)"}
     if agent == "claude":
         sj = base / ".claude" / "settings.json"
+
         def _w_sj():
             cur = {}
             if sj.exists():
@@ -947,10 +1108,14 @@ def _setup_agent_pathlib(conn, agent: str, target_dir: str, dry_run: bool, force
                     cur = json.loads(sj.read_text())
                 except json.JSONDecodeError:
                     cur = {}
-            sj.write_text(json.dumps(_merge_hooks(cur, _claude_settings_fragment()),
-                                     indent=2) + "\n")
+            sj.write_text(
+                json.dumps(_merge_hooks(cur, _claude_settings_fragment()), indent=2)
+                + "\n"
+            )
+
         plan(sj, "merge", _w_sj)
         mj = base / ".mcp.json"
+
         def _w_mj():
             cur = {}
             if mj.exists():
@@ -958,24 +1123,35 @@ def _setup_agent_pathlib(conn, agent: str, target_dir: str, dry_run: bool, force
                     cur = json.loads(mj.read_text())
                 except json.JSONDecodeError:
                     cur = {}
-            cur.setdefault("mcpServers", {})["frog"] = _mcp_json_fragment()["mcpServers"]["frog"]
+            cur.setdefault("mcpServers", {})["frog"] = _mcp_json_fragment()[
+                "mcpServers"
+            ]["frog"]
             mj.write_text(json.dumps(cur, indent=2) + "\n")
+
         plan(mj, "merge", _w_mj)
-        extra = {"mcp": _mcp_json_fragment(),
-                 "env_snippet": f'export FROG_AGENT="claude-$(hostname -s)"'}
+        extra = {
+            "mcp": _mcp_json_fragment(),
+            "env_snippet": 'export FROG_AGENT="claude-$(hostname -s)"',
+        }
     else:
         # Codex reads AGENTS.md (written above). Emit the config.toml block
         # to add by hand (we never edit a user's global ~/.codex/config.toml).
         toml_block = (
-            "[mcp_servers.frog]\n"
-            f'command = {json.dumps(_frog_mcp())}\n'
-            "args = []\n"
+            f"[mcp_servers.frog]\ncommand = {json.dumps(_frog_mcp())}\nargs = []\n"
         )
-        extra = {"codex_config_toml": toml_block,
-                 "env_snippet": f'export FROG_AGENT="codex-$(hostname -s)"'}
+        extra = {
+            "codex_config_toml": toml_block,
+            "env_snippet": 'export FROG_AGENT="codex-$(hostname -s)"',
+        }
 
-    return {"ok": True, "agent": agent, "dir": str(base),
-            "dry_run": dry_run, "actions": actions, **extra}
+    return {
+        "ok": True,
+        "agent": agent,
+        "dir": str(base),
+        "dry_run": dry_run,
+        "actions": actions,
+        **extra,
+    }
 
 
 def _vfs_to_local_path(path: str, vfs: VFS) -> str:
@@ -987,7 +1163,9 @@ def _vfs_to_local_path(path: str, vfs: VFS) -> str:
     return path
 
 
-def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = False) -> dict:
+def write_agent_instructions(
+    conn, path_or_dir: str | None, *, force: bool = False
+) -> dict:
     vfs = current_vfs()
 
     # Determine target directory (local path)
@@ -1011,9 +1189,13 @@ def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = Fal
     target_local = target_file_local
 
     if vfs_exists(target_vfs, vfs) and not force:
-        return {"ok": False, "error": f"refusing to overwrite existing file: {target_local}"}
+        return {
+            "ok": False,
+            "error": f"refusing to overwrite existing file: {target_local}",
+        }
     intent_id = record_intent(
-        conn, kind="agents.instructions.write.requested",
+        conn,
+        kind="agents.instructions.write.requested",
         summary=f"requested agent-instruction write to {target_local}",
         payload={"agents_path": target_local, "force": bool(force)},
     )
@@ -1022,7 +1204,9 @@ def write_agent_instructions(conn, path_or_dir: str | None, *, force: bool = Fal
     parent_local = target_dir_local
     repo = resolve_repo(conn, parent_local)
     # Only use repo_path if it exactly matches parent_local (FK constraint)
-    event_repo_path = repo["repo_path"] if repo and repo["repo_path"] == parent_local else None
+    event_repo_path = (
+        repo["repo_path"] if repo and repo["repo_path"] == parent_local else None
+    )
     try:
         record_event(
             conn,
@@ -1081,6 +1265,7 @@ def auto_snapshot(conn, *, label: str) -> dict:
 
     # For remote VFS, we need to use a local temp file for SQLite backup
     import tempfile
+
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
         tmp_path = tmp.name
 
@@ -1122,8 +1307,11 @@ def snapshot_workspace(conn, *, dest: str | None = None) -> dict:
     ).fetchone()
     db_file = row[0] if row else None
     if not db_file:
-        return {"ok": False, "error": "database is not file-backed "
-                "(in-memory connection); nothing to snapshot"}
+        return {
+            "ok": False,
+            "error": "database is not file-backed "
+            "(in-memory connection); nothing to snapshot",
+        }
 
     vfs = current_vfs()
     db_name = vfs_name(db_file, vfs)
@@ -1136,7 +1324,11 @@ def snapshot_workspace(conn, *, dest: str | None = None) -> dict:
         # LocalVFS.resolve(relative) uses a host cwd, but its I/O expects
         # VFS-rooted paths. Join against the VFS cwd before resolving.
         dest = vfs_join(vfs.cwd(), dest, vfs=vfs)
-    backup_root = vfs_join(vfs_workspace_root(vfs), "backups", vfs=vfs) if not dest else vfs_resolve(dest, vfs)
+    backup_root = (
+        vfs_join(vfs_workspace_root(vfs), "backups", vfs=vfs)
+        if not dest
+        else vfs_resolve(dest, vfs)
+    )
     vfs_mkdir(backup_root, parents=True, exist_ok=True, vfs=vfs)
     last_vfs = vfs_join(backup_root, f"{db_name}.last", vfs=vfs)
     prev_vfs = vfs_join(backup_root, f"{db_name}.prev", vfs=vfs)
@@ -1147,6 +1339,7 @@ def snapshot_workspace(conn, *, dest: str | None = None) -> dict:
 
     # Use temp file for SQLite backup
     import tempfile
+
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
         tmp_path = tmp.name
 
@@ -1208,20 +1401,24 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
     repairs = []
 
     def add(level, code, detail, *, repairable=False):
-        findings.append({
-            "level": level,
-            "code": code,
-            "detail": detail,
-            "repairable": bool(repairable),
-        })
+        findings.append(
+            {
+                "level": level,
+                "code": code,
+                "detail": detail,
+                "repairable": bool(repairable),
+            }
+        )
 
     def repair(code, detail, *, count=0, ids=None):
-        repairs.append({
-            "code": code,
-            "detail": detail,
-            "count": count,
-            "ids": ids or [],
-        })
+        repairs.append(
+            {
+                "code": code,
+                "detail": detail,
+                "count": count,
+                "ids": ids or [],
+            }
+        )
 
     # DB size
     if db_path:
@@ -1231,7 +1428,11 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
             sz = st.size
             mb = sz / (1024 * 1024)
             if mb >= 250:
-                add("warn", "db_large", f"AGENTS.db is {mb:.0f} MB -- consider `frog db gc`")
+                add(
+                    "warn",
+                    "db_large",
+                    f"AGENTS.db is {mb:.0f} MB -- consider `frog db gc`",
+                )
         except OSError:
             pass
 
@@ -1266,7 +1467,12 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
                 },
             )
             conn.commit()
-            repair("stale_locks", f"released {len(ids)} stale lock(s)", count=len(ids), ids=ids)
+            repair(
+                "stale_locks",
+                f"released {len(ids)} stale lock(s)",
+                count=len(ids),
+                ids=ids,
+            )
         else:
             add(
                 "warn",
@@ -1291,7 +1497,11 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
                     count=len(migrated.get("applied", [])),
                 )
             else:
-                add("warn", "schema_behind", f"{detail}; migrate failed: {migrated.get('error')}")
+                add(
+                    "warn",
+                    "schema_behind",
+                    f"{detail}; migrate failed: {migrated.get('error')}",
+                )
         else:
             add("warn", "schema_behind", detail, repairable=bool(db_path))
     if drift.get("ahead"):
@@ -1452,7 +1662,8 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
     ):
         deps = conn.execute(
             "SELECT depends_on_slug FROM task_dependencies "
-            "WHERE task_slug=? AND relation='depends_on'", (r["slug"],)
+            "WHERE task_slug=? AND relation='depends_on'",
+            (r["slug"],),
         ).fetchall()
         if not deps:
             continue
@@ -1460,7 +1671,7 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
         for d in deps:
             dd = conn.execute(
                 "SELECT workflow_status FROM tasks WHERE slug=?",
-                (d["depends_on_slug"],)
+                (d["depends_on_slug"],),
             ).fetchone()
             if not dd or (dd["workflow_status"] or "").lower() not in _WF_DONE:
                 all_done = False
@@ -1468,9 +1679,12 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
         if all_done:
             ready.append(r["slug"])
     if ready:
-        add("info", "ready_tasks",
+        add(
+            "info",
+            "ready_tasks",
             f"{len(ready)} task(s) have all deps done and are takeable: "
-            + ", ".join(ready[:10]))
+            + ", ".join(ready[:10]),
+        )
 
     # mirror lag
     for r in conn.execute(
@@ -1479,8 +1693,11 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
         try:
             age_h = (utc_now() - parse_iso(r["m"])).total_seconds() / 3600
             if age_h > 48:
-                add("info", "mirror_lag",
-                    f"workspace '{r['workspace']}' mirror is {age_h:.0f}h behind")
+                add(
+                    "info",
+                    "mirror_lag",
+                    f"workspace '{r['workspace']}' mirror is {age_h:.0f}h behind",
+                )
         except Exception:
             pass
 
@@ -1498,21 +1715,26 @@ def doctor(conn, db_path: str | None = None, *, fix: bool = True) -> dict:
 
 def db_gc(conn, *, older_than_days: int | None = None, keep: int = 200) -> dict:
     """Prune unbounded coordination tables, then checkpoint + VACUUM.
-      - event_log / event_mirror: drop rows older than `older_than_days`
-        (if given) but always retain the newest `keep`.
-      - target_runs: keep only the newest `keep` rows per
-        (repo_path,target_kind,target_name); older cache rows are noise.
+    - event_log / event_mirror: drop rows older than `older_than_days`
+      (if given) but always retain the newest `keep`.
+    - target_runs: keep only the newest `keep` rows per
+      (repo_path,target_kind,target_name); older cache rows are noise.
     """
     auto_snapshot(conn, label="db-gc")
     removed = {}
     cutoff = None
     if older_than_days is not None:
-        cutoff = (utc_now() - timedelta(days=older_than_days)).isoformat(timespec="seconds")
+        cutoff = (utc_now() - timedelta(days=older_than_days)).isoformat(
+            timespec="seconds"
+        )
 
     def _trim(table: str, order_col: str) -> int:
-        keep_ids = [r["id"] for r in conn.execute(
-            f"SELECT id FROM {table} ORDER BY {order_col} DESC LIMIT ?", (keep,)
-        ).fetchall()]
+        keep_ids = [
+            r["id"]
+            for r in conn.execute(
+                f"SELECT id FROM {table} ORDER BY {order_col} DESC LIMIT ?", (keep,)
+            ).fetchall()
+        ]
         if cutoff is None:
             return 0
         ph = ",".join("?" * len(keep_ids)) or "0"
@@ -1527,7 +1749,8 @@ def db_gc(conn, *, older_than_days: int | None = None, keep: int = 200) -> dict:
     if cutoff is not None:
         keep_rows = conn.execute(
             "SELECT workspace, remote_id FROM event_mirror "
-            "ORDER BY mirrored_at DESC LIMIT ?", (keep,)
+            "ORDER BY mirrored_at DESC LIMIT ?",
+            (keep,),
         ).fetchall()
         keep_set = {(r["workspace"], r["remote_id"]) for r in keep_rows}
         em = conn.execute(
@@ -1535,7 +1758,10 @@ def db_gc(conn, *, older_than_days: int | None = None, keep: int = 200) -> dict:
         ).fetchall()
         gone = 0
         for r in em:
-            if r["created_at"] < cutoff and (r["workspace"], r["remote_id"]) not in keep_set:
+            if (
+                r["created_at"] < cutoff
+                and (r["workspace"], r["remote_id"]) not in keep_set
+            ):
                 conn.execute("DELETE FROM event_mirror WHERE rowid = ?", (r["rowid"],))
                 gone += 1
         removed["event_mirror"] = gone
@@ -1547,11 +1773,14 @@ def db_gc(conn, *, older_than_days: int | None = None, keep: int = 200) -> dict:
         "SELECT DISTINCT repo_path, target_kind, target_name FROM target_runs"
     ).fetchall()
     for g in groups:
-        ids = [r["id"] for r in conn.execute(
-            "SELECT id FROM target_runs WHERE repo_path=? AND target_kind=? "
-            "AND target_name=? ORDER BY id DESC LIMIT -1 OFFSET ?",
-            (g["repo_path"], g["target_kind"], g["target_name"], keep),
-        ).fetchall()]
+        ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM target_runs WHERE repo_path=? AND target_kind=? "
+                "AND target_name=? ORDER BY id DESC LIMIT -1 OFFSET ?",
+                (g["repo_path"], g["target_kind"], g["target_name"], keep),
+            ).fetchall()
+        ]
         for i in ids:
             conn.execute("DELETE FROM target_runs WHERE id = ?", (i,))
             tr += 1
@@ -1563,13 +1792,18 @@ def db_gc(conn, *, older_than_days: int | None = None, keep: int = 200) -> dict:
         conn.execute("VACUUM")
     except sqlite3.Error:
         pass
-    record_event(conn, kind="db.gc",
-                 summary=f"gc removed {sum(removed.values())} row(s)",
-                 payload={"removed": removed, "older_than_days": older_than_days,
-                          "keep": keep})
+    record_event(
+        conn,
+        kind="db.gc",
+        summary=f"gc removed {sum(removed.values())} row(s)",
+        payload={"removed": removed, "older_than_days": older_than_days, "keep": keep},
+    )
     conn.commit()
-    return {"ok": True, "removed": removed,
-            "message": f"gc removed {sum(removed.values())} row(s)"}
+    return {
+        "ok": True,
+        "removed": removed,
+        "message": f"gc removed {sum(removed.values())} row(s)",
+    }
 
 
 def schema_drift(conn) -> dict:
@@ -1579,10 +1813,13 @@ def schema_drift(conn) -> dict:
     results (the whereis KeyError) until commands learned to refuse."""
     on_disk = [f.name for f in sorted(migration_dir().glob("*.sql"))]
     has_tbl = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' "
-        "AND name='schema_migrations'").fetchone()
-    applied = ([r[0] for r in conn.execute(
-        "SELECT name FROM schema_migrations")] if has_tbl else [])
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    ).fetchone()
+    applied = (
+        [r[0] for r in conn.execute("SELECT name FROM schema_migrations")]
+        if has_tbl
+        else []
+    )
     applied_set = set(applied)
     behind = [m for m in on_disk if m not in applied_set]
     ahead = [m for m in applied if m not in set(on_disk)]
@@ -1627,10 +1864,16 @@ def register_repo(
     preferred_name = name or Path(repo_path).name
     name = _unique_repo_name(conn, repo_path=repo_path, preferred_name=preferred_name)
     intent_id = record_intent(
-        conn, kind="repo.registration.requested",
+        conn,
+        kind="repo.registration.requested",
         summary=f"requested repo registration for {name}",
-        payload={"repo_path": repo_path, "name": name, "kind": kind,
-                 "status": status, "third_party": bool(third_party)},
+        payload={
+            "repo_path": repo_path,
+            "name": name,
+            "kind": kind,
+            "status": status,
+            "third_party": bool(third_party),
+        },
     )
     conn.execute(
         """
@@ -1651,8 +1894,7 @@ def register_repo(
         kind="repo.upserted",
         summary=f"registered repo {name}",
         repo_path=repo_path,
-        payload={"name": name, "kind": kind, "status": status,
-                 "intent_id": intent_id},
+        payload={"name": name, "kind": kind, "status": status, "intent_id": intent_id},
     )
     conn.commit()
     try:
@@ -1663,7 +1905,9 @@ def register_repo(
 
 
 def _unique_repo_name(conn, *, repo_path: str, preferred_name: str) -> str:
-    row = conn.execute("SELECT repo_path FROM repos WHERE name = ?", (preferred_name,)).fetchone()
+    row = conn.execute(
+        "SELECT repo_path FROM repos WHERE name = ?", (preferred_name,)
+    ).fetchone()
     if not row or row["repo_path"] == repo_path:
         return preferred_name
     repo = Path(repo_path)
@@ -1672,7 +1916,9 @@ def _unique_repo_name(conn, *, repo_path: str, preferred_name: str) -> str:
         candidate = relative.as_posix().replace("/", ":")
     except ValueError:
         candidate = repo.as_posix().replace("/", ":").lstrip(":")
-    existing = conn.execute("SELECT repo_path FROM repos WHERE name = ?", (candidate,)).fetchone()
+    existing = conn.execute(
+        "SELECT repo_path FROM repos WHERE name = ?", (candidate,)
+    ).fetchone()
     if not existing or existing["repo_path"] == repo_path:
         return candidate
     return f"{candidate}:{repo.name}"
@@ -1700,7 +1946,7 @@ def repo_list_with_activity(conn, *, include_third_party: bool) -> dict:
 def _ts_iso(timestamp: float | None) -> str | None:
     if not timestamp:
         return None
-    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+    return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
 
 
 def path_activity(path: str) -> dict:
@@ -1749,7 +1995,11 @@ def path_metadata(path: str) -> dict:
         relative = resolved
     category = parts[0] if parts else None
     suite = parts[1] if len(parts) > 1 else None
-    subgroup = "/".join(parts[2:-1]) if len(parts) > 3 else (parts[2] if len(parts) == 4 else None)
+    subgroup = (
+        "/".join(parts[2:-1])
+        if len(parts) > 3
+        else (parts[2] if len(parts) == 4 else None)
+    )
     return {
         "relative_path": relative.as_posix(),
         "category": category,
@@ -1814,17 +2064,25 @@ def ensure_box_identity(conn) -> dict:
 def box_whoami(conn) -> dict:
     """This box's identity plus every box this AGENTS.db has seen."""
     bid = _box_id()
-    rows = [dict(r) for r in conn.execute(
-        "SELECT box_id, hostname, first_seen, last_seen "
-        "FROM box_identity ORDER BY last_seen DESC")]
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT box_id, hostname, first_seen, last_seen "
+            "FROM box_identity ORDER BY last_seen DESC"
+        )
+    ]
     return {
         "ok": True,
         "box_id": bid,
         "hostname": socket.gethostname(),
         "pinned_at": str(_box_id_path()),
-        "source": ("env" if os.environ.get("FROG_BOX_ID")
-                   else "file" if _box_id_path().exists()
-                   else "hostname"),
+        "source": (
+            "env"
+            if os.environ.get("FROG_BOX_ID")
+            else "file"
+            if _box_id_path().exists()
+            else "hostname"
+        ),
         "known_boxes": rows,
     }
 
@@ -1834,7 +2092,7 @@ def _parse_ssh_target(ssh_target: str) -> tuple[str, str | None]:
     s = ssh_target.strip()
     # split only on the first ':' that follows the host (after any '@')
     at = s.rfind("@")
-    head = s[at + 1:] if at != -1 else s
+    head = s[at + 1 :] if at != -1 else s
     if ":" in head:
         hostpart, db = head.split(":", 1)
         host = (s[: at + 1] + hostpart) if at != -1 else hostpart
@@ -1842,8 +2100,9 @@ def _parse_ssh_target(ssh_target: str) -> tuple[str, str | None]:
     return s, None
 
 
-def _remote_exec(host: str, remote_db: str | None, remote_frog: str,
-                  argv: list[str]) -> dict:  # pragma: no cover - real SSH
+def _remote_exec(
+    host: str, remote_db: str | None, remote_frog: str, argv: list[str]
+) -> dict:  # pragma: no cover - real SSH
     cmd = ["ssh", host, remote_frog]
     if remote_db:
         cmd += ["--db", remote_db]
@@ -1852,17 +2111,23 @@ def _remote_exec(host: str, remote_db: str | None, remote_frog: str,
     if proc.returncode != 0:
         raise RuntimeError(
             f"remote frog on {host} failed ({proc.returncode}): "
-            f"{proc.stderr.strip() or proc.stdout.strip()}")
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"remote frog on {host} returned non-JSON: {e}") from e
+        raise RuntimeError(f"remote frog on {host} returned non-JSON: {e}") from e
 
 
-def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
-                     remote_frog: str = "frog", exec=_remote_exec,
-                     reciprocal_self: str | None = None) -> dict:
+def federation_join(
+    conn,
+    ssh_target: str,
+    *,
+    remote_db: str | None = None,
+    remote_frog: str = "frog",
+    exec=_remote_exec,
+    reciprocal_self: str | None = None,
+) -> dict:
     """Federate with a peer box over SSH (no daemon, no shared file).
 
     Learns the peer's box_id and its (repo_key -> path) map, records
@@ -1879,21 +2144,19 @@ def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
     except Exception as exc:
         return {"ok": False, "error": str(exc), "host": host}
     if not who.get("box_id"):
-        return {"ok": False, "error": "peer did not report a box_id",
-                "raw": who}
+        return {"ok": False, "error": "peer did not report a box_id", "raw": who}
     peer_box = who["box_id"]
     peer_host = who.get("hostname")
     if peer_box == _box_id():
-        return {"ok": False,
-                "error": f"refusing to join self (box_id {peer_box})"}
+        return {"ok": False, "error": f"refusing to join self (box_id {peer_box})"}
 
     try:
         rl = exec(host, rdb, remote_frog, ["repo", "list"])
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "host": host,
-                "peer_box": peer_box}
-    remote_repos = {r["repo_key"]: r["repo_path"]
-                    for r in rl.get("repos", []) if r.get("repo_key")}
+        return {"ok": False, "error": str(exc), "host": host, "peer_box": peer_box}
+    remote_repos = {
+        r["repo_key"]: r["repo_path"] for r in rl.get("repos", []) if r.get("repo_key")
+    }
     local = repo_list(conn, include_third_party=True)
     local_keys = {r["repo_key"] for r in local["repos"] if r.get("repo_key")}
 
@@ -1903,13 +2166,15 @@ def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
         if key in local_keys:
             matched.append(key)
             cur = conn.execute(
-                "SELECT 1 FROM repo_aliases WHERE repo_key=? AND box=? "
-                "AND repo_path=?", (key, peer_box, rpath)).fetchone()
+                "SELECT 1 FROM repo_aliases WHERE repo_key=? AND box=? AND repo_path=?",
+                (key, peer_box, rpath),
+            ).fetchone()
             if not cur:
                 conn.execute(
                     "INSERT OR IGNORE INTO repo_aliases"
                     "(repo_key, box, repo_path, created_at) VALUES(?,?,?,?)",
-                    (key, peer_box, rpath, now))
+                    (key, peer_box, rpath, now),
+                )
                 added += 1
 
     conn.execute(
@@ -1919,12 +2184,19 @@ def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
            ON CONFLICT(box_id) DO UPDATE SET
              hostname=excluded.hostname, ssh_target=excluded.ssh_target,
              remote_db=excluded.remote_db, last_join_at=excluded.last_join_at""",
-        (peer_box, peer_host, host, rdb, now, now))
+        (peer_box, peer_host, host, rdb, now, now),
+    )
     record_event(
-        conn, kind="federation.join",
+        conn,
+        kind="federation.join",
         summary=f"joined peer {peer_box} ({host}): {len(matched)} shared repo(s)",
-        payload={"peer_box": peer_box, "host": host,
-                 "matched": matched, "aliases_added": added})
+        payload={
+            "peer_box": peer_box,
+            "host": host,
+            "matched": matched,
+            "aliases_added": added,
+        },
+    )
     conn.commit()
     reciprocal = None
     if reciprocal_self:
@@ -1932,16 +2204,14 @@ def federation_join(conn, ssh_target: str, *, remote_db: str | None = None,
         # peer to join back to us. Best-effort: a failure here does not
         # undo the (successful) local half; it is reported instead.
         try:
-            reciprocal = exec(host, rdb, remote_frog,
-                              ["box", "join", reciprocal_self])
+            reciprocal = exec(host, rdb, remote_frog, ["box", "join", reciprocal_self])
         except Exception as e:  # noqa: BLE001 - surfaced, not fatal
             reciprocal = {"ok": False, "error": str(e)}
     return {
         "ok": True,
         "message": f"joined {peer_box} via {host}: "
-                   f"{len(matched)} shared repo(s), {added} alias(es) added"
-                   + (" (+reciprocal)" if reciprocal
-                      and reciprocal.get("ok") else ""),
+        f"{len(matched)} shared repo(s), {added} alias(es) added"
+        + (" (+reciprocal)" if reciprocal and reciprocal.get("ok") else ""),
         "peer_box": peer_box,
         "peer_hostname": peer_host,
         "matched": sorted(matched),
@@ -1959,18 +2229,22 @@ def peers_list(conn) -> dict:
             "error": "peers table is not initialized; run `frog db migrate`",
             "needs_migration": True,
         }
-    rows = [dict(r) for r in conn.execute(
-        "SELECT box_id, hostname, ssh_target, remote_db, added_at, "
-        "last_join_at FROM peers ORDER BY last_join_at DESC")]
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT box_id, hostname, ssh_target, remote_db, added_at, "
+            "last_join_at FROM peers ORDER BY last_join_at DESC"
+        )
+    ]
     return {"ok": True, "peers": rows, "count": len(rows)}
 
 
 def compute_repo_key(repo_path: str) -> str:
     """Stable identity that is identical on every box:
-      1. a committed `.frogid` file at the repo root (authoritative), else
-      2. the git `origin` remote URL, else
-      3. the absolute path (box-local fallback -- not portable, flagged
-         by the `path:` prefix)."""
+    1. a committed `.frogid` file at the repo root (authoritative), else
+    2. the git `origin` remote URL, else
+    3. the absolute path (box-local fallback -- not portable, flagged
+       by the `path:` prefix)."""
     root = Path(repo_path)
     fid = root / ".frogid"
     try:
@@ -1983,7 +2257,8 @@ def compute_repo_key(repo_path: str) -> str:
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "remote", "get-url", "origin"],
-            text=True, capture_output=True,
+            text=True,
+            capture_output=True,
         )
         if proc.returncode == 0 and proc.stdout.strip():
             url = proc.stdout.strip()
@@ -2022,8 +2297,12 @@ def ensure_repo_key(conn, repo_path: str) -> str:
 def repo_key_backfill(conn) -> dict:
     done = []
     for r in conn.execute("SELECT repo_path FROM repos").fetchall():
-        done.append({"repo_path": r["repo_path"],
-                     "repo_key": ensure_repo_key(conn, r["repo_path"])})
+        done.append(
+            {
+                "repo_path": r["repo_path"],
+                "repo_key": ensure_repo_key(conn, r["repo_path"]),
+            }
+        )
     return {"ok": True, "message": f"keyed {len(done)} repo(s)", "repos": done}
 
 
@@ -2032,7 +2311,8 @@ def resolve_local_path(conn, repo_key: str) -> str | None:
     box = _box_id()
     row = conn.execute(
         "SELECT repo_path FROM repo_aliases WHERE repo_key = ? AND box = ? "
-        "ORDER BY created_at LIMIT 1", (repo_key, box)
+        "ORDER BY created_at LIMIT 1",
+        (repo_key, box),
     ).fetchone()
     if row:
         return row["repo_path"]
@@ -2045,24 +2325,35 @@ def resolve_local_path(conn, repo_key: str) -> str | None:
 def whereis(conn, repo_key: str) -> dict:
     box = _box_id()
     here = resolve_local_path(conn, repo_key)
-    aliases = dicts(conn.execute(
-        "SELECT box, repo_path, created_at FROM repo_aliases "
-        "WHERE repo_key = ? ORDER BY box, repo_path", (repo_key,)
-    ).fetchall())
-    return {"ok": here is not None, "repo_key": repo_key, "box": box,
-            "local_path": here, "aliases": aliases,
-            "error": None if here else f"no local path for {repo_key} on {box}"}
+    aliases = dicts(
+        conn.execute(
+            "SELECT box, repo_path, created_at FROM repo_aliases "
+            "WHERE repo_key = ? ORDER BY box, repo_path",
+            (repo_key,),
+        ).fetchall()
+    )
+    return {
+        "ok": here is not None,
+        "repo_key": repo_key,
+        "box": box,
+        "local_path": here,
+        "aliases": aliases,
+        "error": None if here else f"no local path for {repo_key} on {box}",
+    }
 
 
-def repo_key_info(conn, repo_ref: str, *, set_key: str | None = None,
-                  write_frogid: bool = False) -> dict:
+def repo_key_info(
+    conn, repo_ref: str, *, set_key: str | None = None, write_frogid: bool = False
+) -> dict:
     repo = resolve_repo(conn, repo_ref)
     if not repo or not repo.get("repo_path"):
         return {"ok": False, "error": f"repo not found: {repo_ref}"}
     rp = repo["repo_path"]
     if set_key:
-        conn.execute("UPDATE repos SET repo_key=?, updated_at=? WHERE repo_path=?",
-                     (set_key, utc_now_iso(), rp))
+        conn.execute(
+            "UPDATE repos SET repo_key=?, updated_at=? WHERE repo_path=?",
+            (set_key, utc_now_iso(), rp),
+        )
         _record_repo_alias(conn, set_key, rp)
         conn.commit()
         key = set_key
@@ -2072,17 +2363,26 @@ def repo_key_info(conn, repo_ref: str, *, set_key: str | None = None,
         try:
             (Path(rp) / ".frogid").write_text(key + "\n")
         except OSError as e:
-            return {"ok": False, "error": f"could not write .frogid: {e}",
-                    "repo_key": key}
-    return {"ok": True, "repo": repo["name"], "repo_path": rp,
-            "repo_key": key,
-            "aliases": dicts(conn.execute(
-                "SELECT box, repo_path FROM repo_aliases WHERE repo_key=? "
-                "ORDER BY box", (key,)).fetchall())}
+            return {
+                "ok": False,
+                "error": f"could not write .frogid: {e}",
+                "repo_key": key,
+            }
+    return {
+        "ok": True,
+        "repo": repo["name"],
+        "repo_path": rp,
+        "repo_key": key,
+        "aliases": dicts(
+            conn.execute(
+                "SELECT box, repo_path FROM repo_aliases WHERE repo_key=? ORDER BY box",
+                (key,),
+            ).fetchall()
+        ),
+    }
 
 
-def repo_move(conn, old_path: str, new_path: str, *,
-              agent: str | None = None) -> dict:
+def repo_move(conn, old_path: str, new_path: str, *, agent: str | None = None) -> dict:
     """Re-point a registered repo to a new path, safely. repos.repo_path
     is a referenced PRIMARY KEY with no ON UPDATE CASCADE, so a naive
     UPDATE either fails or dangles children. This does the correct
@@ -2095,20 +2395,17 @@ def repo_move(conn, old_path: str, new_path: str, *,
     if old == new:
         return {"ok": False, "error": "old and new paths are identical"}
     row = conn.execute(
-        "SELECT repo_key FROM repos WHERE repo_path = ?", (old,)).fetchone()
+        "SELECT repo_key FROM repos WHERE repo_path = ?", (old,)
+    ).fetchone()
     if not row:
         return {"ok": False, "error": f"no registered repo at {old}"}
-    if conn.execute("SELECT 1 FROM repos WHERE repo_path = ?",
-                    (new,)).fetchone():
-        return {"ok": False,
-                "error": f"a repo is already registered at {new}"}
+    if conn.execute("SELECT 1 FROM repos WHERE repo_path = ?", (new,)).fetchone():
+        return {"ok": False, "error": f"a repo is already registered at {new}"}
     repo_key = row["repo_key"]
     auto_snapshot(conn, label="repo-move")
     tables = []
-    for (tname,) in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"):
-        cols = [c[1] for c in conn.execute(
-            f"PRAGMA table_info({tname})")]
+    for (tname,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+        cols = [c[1] for c in conn.execute(f"PRAGMA table_info({tname})")]
         if "repo_path" in cols:
             tables.append(tname)
     now = utc_now_iso()
@@ -2120,33 +2417,49 @@ def repo_move(conn, old_path: str, new_path: str, *,
         conn.execute("BEGIN")
         conn.execute(
             "UPDATE repos SET repo_path=?, updated_at=? WHERE repo_path=?",
-            (new, now, old))
+            (new, now, old),
+        )
         updated = {}
         for tname in tables:
             if tname == "repos":
                 continue
             cur = conn.execute(
-                f"UPDATE {tname} SET repo_path=? WHERE repo_path=?",
-                (new, old))
+                f"UPDATE {tname} SET repo_path=? WHERE repo_path=?", (new, old)
+            )
             if cur.rowcount:
                 updated[tname] = cur.rowcount
         conn.execute(
             "INSERT INTO event_log(created_at,kind,repo_path,task_slug,"
             "actor,summary,payload_json) VALUES(?,?,?,?,?,?,?)",
-            (now, "repo.moved", new, None, agent,
-             f"moved repo {old} -> {new}",
-             json.dumps({"old": old, "new": new, "repo_key": repo_key},
-                        sort_keys=True)))
+            (
+                now,
+                "repo.moved",
+                new,
+                None,
+                agent,
+                f"moved repo {old} -> {new}",
+                json.dumps(
+                    {"old": old, "new": new, "repo_key": repo_key}, sort_keys=True
+                ),
+            ),
+        )
         conn.execute("COMMIT")
         conn.execute("PRAGMA foreign_keys=ON")
         fk = conn.execute("PRAGMA foreign_key_check").fetchall()
         if fk:
-            return {"ok": False,
-                    "error": "foreign_key_check failed after move",
-                    "violations": [tuple(x) for x in fk]}
-        return {"ok": True, "message": f"moved {old} -> {new}",
-                "old": old, "new": new, "repo_key": repo_key,
-                "updated": updated}
+            return {
+                "ok": False,
+                "error": "foreign_key_check failed after move",
+                "violations": [tuple(x) for x in fk],
+            }
+        return {
+            "ok": True,
+            "message": f"moved {old} -> {new}",
+            "old": old,
+            "new": new,
+            "repo_key": repo_key,
+            "updated": updated,
+        }
     except Exception as e:
         try:
             conn.execute("ROLLBACK")
@@ -2182,8 +2495,7 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
     # path passes through a directory named "mailroute"; when multiple
     # match, prefer the shallowest (shortest) registered path
     component_matches = [
-        dict(row) for row in rows
-        if repo_ref in Path(dict(row)["repo_path"]).parts
+        dict(row) for row in rows if repo_ref in Path(dict(row)["repo_path"]).parts
     ]
     if component_matches:
         return min(component_matches, key=lambda r: len(r["repo_path"]))
@@ -2197,8 +2509,9 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
         (repo_ref, _box_id()),
     ).fetchone()
     if al:
-        r = conn.execute("SELECT * FROM repos WHERE repo_path = ?",
-                         (al["repo_path"],)).fetchone()
+        r = conn.execute(
+            "SELECT * FROM repos WHERE repo_path = ?", (al["repo_path"],)
+        ).fetchone()
         if r:
             return dict(r)
     as_path = Path(repo_ref).expanduser()
@@ -2225,7 +2538,8 @@ def resolve_repo(conn, repo_ref: str | None) -> dict | None:
             except ValueError:
                 continue
             if any(
-                part in {
+                part
+                in {
                     "vendor",
                     "archive",
                     ".git",
@@ -2274,7 +2588,8 @@ def _resolve_repo_alias_path(conn, repo_path: str) -> dict | None:
             continue
         basename = Path(repo_path).name
         basename_matches = [
-            candidate for candidate in candidates
+            candidate
+            for candidate in candidates
             if Path(candidate["repo_path"]).name == basename
         ]
         if basename_matches:
@@ -2285,7 +2600,9 @@ def _resolve_repo_alias_path(conn, repo_path: str) -> dict | None:
 
 def infer_repo_from_cwd(conn, cwd: str | None = None) -> dict | None:
     cwd_path = Path(cwd or os.getcwd()).expanduser().resolve()
-    rows = conn.execute("SELECT * FROM repos ORDER BY LENGTH(repo_path) DESC").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM repos ORDER BY LENGTH(repo_path) DESC"
+    ).fetchall()
     for row in rows:
         payload = dict(row)
         repo_path = Path(payload["repo_path"])
@@ -2301,7 +2618,14 @@ def infer_repo_from_cwd(conn, cwd: str | None = None) -> dict | None:
     except ValueError:
         return None
 
-    manifests = ("Makefile", "package.json", "Cargo.toml", "pyproject.toml", "compose.yml", "docker-compose.yml")
+    manifests = (
+        "Makefile",
+        "package.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "compose.yml",
+        "docker-compose.yml",
+    )
     current = cwd_path
     while True:
         if any((current / name).exists() for name in manifests):
@@ -2357,7 +2681,9 @@ def _candidate_category_root(root_path: Path, current: Path) -> tuple[str | None
     return None, root_path
 
 
-def _looks_like_repo_boundary(root_path: Path, current: Path, dirnames: list[str], filenames: list[str]) -> bool:
+def _looks_like_repo_boundary(
+    root_path: Path, current: Path, dirnames: list[str], filenames: list[str]
+) -> bool:
     # NOTE: this cannot check `".git" in dirnames`/`filenames` -- by the time
     # discover_repos() calls this, it has already stripped ".git" out of
     # dirnames (DISCOVERY_EXCLUDED_DIRS, so os.walk doesn't recurse into it),
@@ -2412,8 +2738,11 @@ def discover_repos(conn, *, root: str | None = None, scan: bool = True) -> dict:
     # Try to get cached result
     cached = _discover_repos_get_cache(conn, root_vfs, vfs)
     if cached:
-        cached["repos"] = [repo for repo in cached["repos"]
-                           if _discovery_path_allowed(repo["repo_path"])]
+        cached["repos"] = [
+            repo
+            for repo in cached["repos"]
+            if _discovery_path_allowed(repo["repo_path"])
+        ]
         # Re-register any new repos from cache
         for repo in cached["repos"]:
             register_repo(
@@ -2430,11 +2759,15 @@ def discover_repos(conn, *, root: str | None = None, scan: bool = True) -> dict:
             "ok": True,
             "root": root_vfs,
             "repos": cached["repos"],
-            "counts": {"discovered": len(cached["repos"]), "scanned": 0, "cached": True},
+            "counts": {
+                "discovered": len(cached["repos"]),
+                "scanned": 0,
+                "cached": True,
+            },
         }
 
     # Use SSH-optimized discovery if VFS supports it
-    if hasattr(vfs, 'find_manifests_in_repos'):
+    if hasattr(vfs, "find_manifests_in_repos"):
         return _discover_repos_ssh_optimized(conn, root_vfs, vfs, scan)
 
     # If using LocalVFS but root is outside VFS root, fall back to local discovery
@@ -2617,7 +2950,12 @@ def _discover_repos_ssh_optimized(conn, root_vfs: str, vfs, scan: bool) -> dict:
         "ok": True,
         "root": root_vfs,
         "repos": sorted(discovered, key=lambda item: (item["name"], item["repo_path"])),
-        "counts": {"discovered": len(discovered), "scanned": scanned, "cached": False, "ssh_optimized": True},
+        "counts": {
+            "discovered": len(discovered),
+            "scanned": scanned,
+            "cached": False,
+            "ssh_optimized": True,
+        },
     }
 
 
@@ -2669,7 +3007,9 @@ def _discover_repos_git_fallback(root_vfs: str, vfs: VFS, seen: set[str]) -> lis
     return sorted(git_roots)
 
 
-def _discover_repos_git_fallback_local(root_vfs: str, vfs: LocalVFS, seen: set[str]) -> list[str]:
+def _discover_repos_git_fallback_local(
+    root_vfs: str, vfs: LocalVFS, seen: set[str]
+) -> list[str]:
     """Find .git directories using local filesystem access."""
     git_roots: set[str] = set()
 
@@ -2709,10 +3049,11 @@ def _discover_repos_get_cache(conn, root_vfs: str, vfs: VFS) -> dict | None:
         cache_key = _discover_repos_cache_key(root_vfs, vfs)
         row = conn.execute(
             "SELECT payload_json FROM repo_discovery_cache WHERE cache_key = ?",
-            (cache_key,)
+            (cache_key,),
         ).fetchone()
         if row:
             import json
+
             cached = json.loads(row["payload_json"])
             # Verify cache is still valid (git HEAD unchanged)
             if _discover_repos_cache_valid(root_vfs, vfs, cached):
@@ -2737,7 +3078,12 @@ def _discover_repos_local_fallback(conn, root_local: str, scan: bool) -> dict:
             "ok": True,
             "root": root_local,
             "repos": [],
-            "counts": {"discovered": 0, "scanned": 0, "cached": False, "local_fallback": True},
+            "counts": {
+                "discovered": 0,
+                "scanned": 0,
+                "cached": False,
+                "local_fallback": True,
+            },
         }
 
     # Phase 1: Manifest-first discovery using os.walk
@@ -2819,13 +3165,15 @@ def _discover_repos_local_fallback(conn, root_local: str, scan: bool) -> dict:
                     discovered.append(repo_info_result["repo"])
                 else:
                     # Fallback
-                    discovered.append({
-                        "repo_path": repo_root_local,
-                        "name": Path(current_root).name,
-                        "kind": kind,
-                        "status": "active",
-                        "third_party": third_party,
-                    })
+                    discovered.append(
+                        {
+                            "repo_path": repo_root_local,
+                            "name": Path(current_root).name,
+                            "kind": kind,
+                            "status": "active",
+                            "third_party": third_party,
+                        }
+                    )
         # Don't recurse into .git
         dirnames[:] = [d for d in dirnames if d != ".git"]
 
@@ -2840,7 +3188,12 @@ def _discover_repos_local_fallback(conn, root_local: str, scan: bool) -> dict:
         "ok": True,
         "root": root_local,
         "repos": sorted(discovered, key=lambda item: (item["name"], item["repo_path"])),
-        "counts": {"discovered": len(discovered), "scanned": scanned, "cached": False, "local_fallback": True},
+        "counts": {
+            "discovered": len(discovered),
+            "scanned": scanned,
+            "cached": False,
+            "local_fallback": True,
+        },
     }
 
 
@@ -2849,6 +3202,7 @@ def _discover_repos_set_cache(conn, root_vfs: str, vfs: VFS, repos: list[dict]) 
     try:
         cache_key = _discover_repos_cache_key(root_vfs, vfs)
         import json
+
         payload = {
             "repos": repos,
             "git_head": _get_git_head(root_vfs, vfs),
@@ -2866,6 +3220,7 @@ def _discover_repos_set_cache(conn, root_vfs: str, vfs: VFS, repos: list[dict]) 
 def _discover_repos_cache_key(root_vfs: str, vfs: VFS) -> str:
     """Generate cache key: workspace + root + git HEAD."""
     import hashlib
+
     git_head = _get_git_head(root_vfs, vfs)
     key_data = f"{root_vfs}:{git_head}"
     return hashlib.sha256(key_data.encode()).hexdigest()[:32]
@@ -3022,7 +3377,9 @@ def file_info(conn, file_path: str) -> dict:
             "path": resolved,
             "kind": "directory",
         }
-    row = conn.execute("SELECT * FROM files WHERE file_path = ?", (resolved,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM files WHERE file_path = ?", (resolved,)
+    ).fetchone()
     if not row:
         if Path(resolved).exists():
             return {
@@ -3049,12 +3406,14 @@ def _expand_file_info_args(file_paths: list[str]) -> tuple[list[str], list[dict]
         if glob.has_magic(item):
             matches = sorted(glob.glob(item))
             if not matches:
-                errors.append({
-                    "input": item,
-                    "path": item,
-                    "kind": "glob_empty",
-                    "error": f"glob matched no files: {item}",
-                })
+                errors.append(
+                    {
+                        "input": item,
+                        "path": item,
+                        "kind": "glob_empty",
+                        "error": f"glob matched no files: {item}",
+                    }
+                )
                 continue
             expanded.extend(matches)
         else:
@@ -3077,31 +3436,44 @@ def file_info_many(conn, file_paths: list[str]) -> dict:
             continue
         seen.add(resolved)
         if Path(resolved).is_dir():
-            errors.append({
-                "input": original,
-                "path": resolved,
-                "kind": "directory",
-                "error": f"{original} is a directory; expected a file",
-            })
+            errors.append(
+                {
+                    "input": original,
+                    "path": resolved,
+                    "kind": "directory",
+                    "error": f"{original} is a directory; expected a file",
+                }
+            )
             continue
-        row = conn.execute("SELECT * FROM files WHERE file_path = ?", (resolved,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM files WHERE file_path = ?", (resolved,)
+        ).fetchone()
         if row:
             rows.append(dict(row))
         elif Path(resolved).exists():
-            errors.append({
-                "input": original,
-                "path": resolved,
-                "kind": "unregistered",
-                "error": f"{original} is a file, but is not registered in AGENTS.db",
-            })
+            errors.append(
+                {
+                    "input": original,
+                    "path": resolved,
+                    "kind": "unregistered",
+                    "error": f"{original} is a file, but is not registered in AGENTS.db",
+                }
+            )
         else:
-            errors.append({
-                "input": original,
-                "path": resolved,
-                "kind": "missing",
-                "error": f"file not found: {original}",
-            })
-    if len(file_paths) == 1 and len(rows) == 1 and not errors and not glob.has_magic(file_paths[0]):
+            errors.append(
+                {
+                    "input": original,
+                    "path": resolved,
+                    "kind": "missing",
+                    "error": f"file not found: {original}",
+                }
+            )
+    if (
+        len(file_paths) == 1
+        and len(rows) == 1
+        and not errors
+        and not glob.has_magic(file_paths[0])
+    ):
         return {"ok": True, "file": rows[0]}
     return {
         "ok": not errors,
@@ -3137,15 +3509,16 @@ def parse_todo_markdown(text: str) -> list[dict]:
         title = _re_todo.sub(r"\s*\(?[pP][0-3]\)?", "", title).strip(" .")
         if not title:
             continue
-        slug = _re_todo.sub(r"[^a-z0-9]+", "-",
-                            title.lower()).strip("-")[:48] or "item"
-        items.append({
-            "external_id": slug,
-            "title": title,
-            "status": "done" if done else "open",
-            "priority": prio,
-            "why": ("tags: " + ",".join(tags)) if tags else None,
-        })
+        slug = _re_todo.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48] or "item"
+        items.append(
+            {
+                "external_id": slug,
+                "title": title,
+                "status": "done" if done else "open",
+                "priority": prio,
+                "why": ("tags: " + ",".join(tags)) if tags else None,
+            }
+        )
     return items
 
 
@@ -3155,8 +3528,12 @@ def import_todo(conn, path: str) -> dict:
         return {"ok": False, "error": f"not a file: {fp}"}
     items = parse_todo_markdown(fp.read_text())
     if not items:
-        return {"ok": True, "message": "no checkbox lines found",
-                "created": [], "updated": []}
+        return {
+            "ok": True,
+            "message": "no checkbox lines found",
+            "created": [],
+            "updated": [],
+        }
     res = provider_sync_in(conn, "todo", items)
     res["source_file"] = str(fp)
     return res
@@ -3176,7 +3553,7 @@ def splice_marked_section(text: str, marker: str, body: str) -> str:
     block = f"{start}\n{body}\n{end}"
     pat = _re_splice.compile(
         _re_splice.escape(start) + r".*?" + _re_splice.escape(end),
-        _re_splice.S,
+        _re_splice.DOTALL,
     )
     if pat.search(text):
         return pat.sub(lambda _m: block, text, count=1)
@@ -3197,7 +3574,7 @@ def splice_heading_section(text: str, heading: str, body: str) -> str:
     lines = text.split("\n")
     hpat = _re_splice.compile(
         r"^(#{1,6})[ \t]+" + _re_splice.escape(name) + r"[ \t]*#*[ \t]*$",
-        _re_splice.I,
+        _re_splice.IGNORECASE,
     )
     body_lines = body.split("\n")
     for i, ln in enumerate(lines):
@@ -3228,14 +3605,19 @@ def _task_checkbox(tk: dict) -> str:
     return f"- [{box}] {tk['slug']} — {title} ({pr})"
 
 
-def export_tasks_markdown(conn, *, repo_ref: str | None = None,
-                          workflow_status: str | None = None,
-                          tree: bool = False) -> dict:
+def export_tasks_markdown(
+    conn,
+    *,
+    repo_ref: str | None = None,
+    workflow_status: str | None = None,
+    tree: bool = False,
+) -> dict:
     """In-scope tasks as a markdown checkbox list (done -> [x]).
     tree=True nests dependents under their dependencies, drawing the
     branch connectors to the LEFT of the checkbox."""
-    listing = task_list(conn, repo_ref=repo_ref,
-                        workflow_status=workflow_status, assigned_agent=None)
+    listing = task_list(
+        conn, repo_ref=repo_ref, workflow_status=workflow_status, assigned_agent=None
+    )
     if not listing.get("ok", True):
         return listing
     tasks = listing["tasks"]
@@ -3244,11 +3626,10 @@ def export_tasks_markdown(conn, *, repo_ref: str | None = None,
 
     if not tree:
         lines = [_task_checkbox(t) for t in tasks]
-        return {"ok": True, "count": len(lines),
-                "markdown": "\n".join(lines)}
+        return {"ok": True, "count": len(lines), "markdown": "\n".join(lines)}
 
     # dependency forest restricted to in-scope tasks
-    deps: dict[str, list[str]] = {s: [] for s in in_scope}    # s depends_on X
+    deps: dict[str, list[str]] = {s: [] for s in in_scope}  # s depends_on X
     children: dict[str, list[str]] = {s: [] for s in in_scope}
     for r in conn.execute(
         "SELECT task_slug, depends_on_slug FROM task_dependencies "
@@ -3429,8 +3810,15 @@ def task_list(
 
 _WF_DONE = {"done", "cancelled", "abandoned", "archived"}
 _WF_BLOCKED = {"blocked"}
-_WF_INPROG = {"in_progress", "in-progress", "doing", "wip", "active",
-              "review", "started"}
+_WF_INPROG = {
+    "in_progress",
+    "in-progress",
+    "doing",
+    "wip",
+    "active",
+    "review",
+    "started",
+}
 _TASK_PRIORITIES = {"p0", "p1", "p2", "p3"}
 
 
@@ -3487,9 +3875,12 @@ def task_edit(
         return {"ok": False, "error": str(error)}
     if repo_ref is not None:
         repo = resolve_repo(conn, repo_ref)
-        if not repo or not conn.execute(
-            "SELECT 1 FROM repos WHERE repo_path = ?", (repo["repo_path"],)
-        ).fetchone():
+        if (
+            not repo
+            or not conn.execute(
+                "SELECT 1 FROM repos WHERE repo_path = ?", (repo["repo_path"],)
+            ).fetchone()
+        ):
             return {"ok": False, "error": f"repo not found: {repo_ref}"}
         candidates["repo_path"] = repo["repo_path"]
     for field, value in candidates.items():
@@ -3540,8 +3931,7 @@ def _task_is_inprogress(conn, slug: str) -> bool:
     return bool(a)
 
 
-def task_next(conn, *, agent: str, repo_ref: str | None = None,
-              limit: int = 1) -> dict:
+def task_next(conn, *, agent: str, repo_ref: str | None = None, limit: int = 1) -> dict:
     """Highest-ROI unblocked slice `agent` can safely take now:
       - not done/blocked, git not done
       - every depends_on dependency is done
@@ -3627,10 +4017,10 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
                 reason_kind = "owner"
         if reason is None:
             conflicts = [
-                lk for lk in active_locks
-                if lk["agent_name"] != agent and _locks_conflict(
-                    _task_lock_candidate(conn, task), lk
-                )
+                lk
+                for lk in active_locks
+                if lk["agent_name"] != agent
+                and _locks_conflict(_task_lock_candidate(conn, task), lk)
             ]
             if conflicts:
                 scopes = ", ".join(sorted({lk["scope_key"] for lk in conflicts}))
@@ -3642,14 +4032,21 @@ def task_next(conn, *, agent: str, repo_ref: str | None = None,
             skipped_summary[reason_kind or "status"] += 1
             skipped.append({"slug": task["slug"], "reason": reason})
 
-    eligible.sort(key=lambda x: (_priority_rank(x["priority"]),
-                                 x["created_at"], x["slug"]))
+    eligible.sort(
+        key=lambda x: (_priority_rank(x["priority"]), x["created_at"], x["slug"])
+    )
     chosen = eligible[: max(1, limit)]
     for tk in chosen:
         tk["location"] = _task_location(conn, tk)
-    return {"ok": True, "agent": agent, "tasks": chosen,
-            "considered": len(rows), "eligible": len(eligible),
-            "skipped": skipped[:20], "skipped_summary": skipped_summary}
+    return {
+        "ok": True,
+        "agent": agent,
+        "tasks": chosen,
+        "considered": len(rows),
+        "eligible": len(eligible),
+        "skipped": skipped[:20],
+        "skipped_summary": skipped_summary,
+    }
 
 
 def _task_location(conn, task: dict) -> dict | None:
@@ -3663,15 +4060,20 @@ def _task_location(conn, task: dict) -> dict | None:
     if not rp:
         return None
     row = conn.execute(
-        "SELECT repo_key FROM repos WHERE repo_path = ?", (rp,)).fetchone()
+        "SELECT repo_key FROM repos WHERE repo_path = ?", (rp,)
+    ).fetchone()
     key = row["repo_key"] if row else None
     local = _box_id()
     boxes = []
     if key:
-        boxes = [{"box": a["box"], "repo_path": a["repo_path"]}
-                 for a in conn.execute(
-                     "SELECT box, repo_path FROM repo_aliases "
-                     "WHERE repo_key = ? ORDER BY box", (key,))]
+        boxes = [
+            {"box": a["box"], "repo_path": a["repo_path"]}
+            for a in conn.execute(
+                "SELECT box, repo_path FROM repo_aliases "
+                "WHERE repo_key = ? ORDER BY box",
+                (key,),
+            )
+        ]
     here = next((b["repo_path"] for b in boxes if b["box"] == local), None)
     here_exists = bool(here) and Path(here).exists()
     # Local means: an alias for this box that still exists on disk, or
@@ -3689,12 +4091,17 @@ def _task_location(conn, task: dict) -> dict | None:
 
 
 def _task_file_paths(conn, slug: str) -> list[str]:
-    return [r["file_path"] for r in conn.execute(
-        "SELECT file_path FROM task_files WHERE task_slug = ?", (slug,)
-    ).fetchall()]
+    return [
+        r["file_path"]
+        for r in conn.execute(
+            "SELECT file_path FROM task_files WHERE task_slug = ?", (slug,)
+        ).fetchall()
+    ]
 
 
-def _normalise_task_file_paths(repo_path: str | None, files: list[str] | None) -> list[str]:
+def _normalise_task_file_paths(
+    repo_path: str | None, files: list[str] | None
+) -> list[str]:
     out = []
     root = Path(repo_path).resolve() if repo_path else None
     for item in files or []:
@@ -3789,7 +4196,8 @@ def _newly_unblocked(conn, finished_slug: str) -> list[str]:
         unmet = False
         for e in conn.execute(
             "SELECT depends_on_slug FROM task_dependencies "
-            "WHERE task_slug = ? AND relation = 'depends_on'", (ts,)
+            "WHERE task_slug = ? AND relation = 'depends_on'",
+            (ts,),
         ):
             dep = conn.execute(
                 "SELECT workflow_status FROM tasks WHERE slug = ?",
@@ -3816,7 +4224,9 @@ def _claim_outcome_from_lock(lock: dict | None) -> dict:
     }
 
 
-def _active_claims_for_agent(conn, agent: str, *, exclude_slug: str | None = None) -> list[dict]:
+def _active_claims_for_agent(
+    conn, agent: str, *, exclude_slug: str | None = None
+) -> list[dict]:
     rows = conn.execute(
         """
         SELECT slug, title, repo_path, workflow_status
@@ -3834,10 +4244,17 @@ def _active_claims_for_agent(conn, agent: str, *, exclude_slug: str | None = Non
     return dicts(rows)
 
 
-def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
-               scope_key: str | None = None, force: bool = False,
-               files: list[str] | None = None,
-               allow_parallel: bool = False) -> dict:
+def task_claim(
+    conn,
+    *,
+    slug: str,
+    agent: str,
+    lock_kind: str = "edit",
+    scope_key: str | None = None,
+    force: bool = False,
+    files: list[str] | None = None,
+    allow_parallel: bool = False,
+) -> dict:
     """Atomic-ish: take ownership + the scoped lock + mark in_progress.
 
     Always returns a `claim_outcome` block so the CLI/MCP renderer can
@@ -3846,22 +4263,42 @@ def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
     collision class observed in real multi-agent sessions."""
     row = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
     if not row:
-        return {"ok": False, "error": f"task not found: {slug}",
-                "claim_outcome": {"claimed": False, "reason": "not_found",
-                                   "slug": slug, "agent": agent}}
+        return {
+            "ok": False,
+            "error": f"task not found: {slug}",
+            "claim_outcome": {
+                "claimed": False,
+                "reason": "not_found",
+                "slug": slug,
+                "agent": agent,
+            },
+        }
     task = dict(row)
     if (task["workflow_status"] or "").lower() in _WF_DONE:
-        return {"ok": False,
-                "error": f"task {slug} is already {task['workflow_status']}",
-                "claim_outcome": {"claimed": False, "reason": "already_done",
-                                   "slug": slug, "agent": agent,
-                                   "workflow_status": task["workflow_status"]}}
+        return {
+            "ok": False,
+            "error": f"task {slug} is already {task['workflow_status']}",
+            "claim_outcome": {
+                "claimed": False,
+                "reason": "already_done",
+                "slug": slug,
+                "agent": agent,
+                "workflow_status": task["workflow_status"],
+            },
+        }
     owner = task["assigned_agent"]
     if owner and owner != agent and not force:
-        return {"ok": False, "error": f"task {slug} is owned by {owner}",
-                "claim_outcome": {"claimed": False, "reason": "owned_by_other",
-                                   "slug": slug, "agent": agent,
-                                   "holder_agent": owner}}
+        return {
+            "ok": False,
+            "error": f"task {slug} is owned by {owner}",
+            "claim_outcome": {
+                "claimed": False,
+                "reason": "owned_by_other",
+                "slug": slug,
+                "agent": agent,
+                "holder_agent": owner,
+            },
+        }
     active_claims = _active_claims_for_agent(conn, agent, exclude_slug=slug)
     if active_claims and not allow_parallel:
         active_slugs = [claim["slug"] for claim in active_claims]
@@ -3884,46 +4321,80 @@ def task_claim(conn, *, slug: str, agent: str, lock_kind: str = "edit",
     added_files = _attach_task_files(conn, slug, task["repo_path"], files)
     files = _task_file_paths(conn, slug)
     lk = lock_acquire(
-        conn, scope_key=scope, repo_ref=task["repo_path"],
-        lock_kind=lock_kind, files=files, agent=agent, pid=None,
-        reason=f"claim {slug}", lease_seconds=1800, eta_minutes=None,
+        conn,
+        scope_key=scope,
+        repo_ref=task["repo_path"],
+        lock_kind=lock_kind,
+        files=files,
+        agent=agent,
+        pid=None,
+        reason=f"claim {slug}",
+        lease_seconds=1800,
+        eta_minutes=None,
         force=force,
     )
     if not lk.get("ok", True):
         conflicts = lk.get("conflicts") or []
         first = _claim_outcome_from_lock(conflicts[0] if conflicts else None)
-        outcome = {"claimed": False, "reason": "lock_conflict",
-                    "slug": slug, "agent": agent,
-                    "conflicting_locks": [_claim_outcome_from_lock(c)
-                                          for c in conflicts]}
+        outcome = {
+            "claimed": False,
+            "reason": "lock_conflict",
+            "slug": slug,
+            "agent": agent,
+            "conflicting_locks": [_claim_outcome_from_lock(c) for c in conflicts],
+        }
         outcome.update({k: v for k, v in first.items() if k != "scope_key"})
-        return {"ok": False, "error": "could not lock task scope",
-                "lock": lk, "claim_outcome": outcome}
-    conn.execute("UPDATE tasks SET assigned_agent = ?, updated_at = ? WHERE slug = ?",
-                 (agent, utc_now_iso(), slug))
+        return {
+            "ok": False,
+            "error": "could not lock task scope",
+            "lock": lk,
+            "claim_outcome": outcome,
+        }
+    conn.execute(
+        "UPDATE tasks SET assigned_agent = ?, updated_at = ? WHERE slug = ?",
+        (agent, utc_now_iso(), slug),
+    )
     task_assign(conn, slug, agent, f"claimed by {agent}")
-    task_set_status(conn, slug=slug, workflow_status="in_progress",
-                    git_status=None, note=f"claimed by {agent}")
+    task_set_status(
+        conn,
+        slug=slug,
+        workflow_status="in_progress",
+        git_status=None,
+        note=f"claimed by {agent}",
+    )
     lock_data = lk.get("lock") or {}
-    record_event(conn, kind="task.claimed",
-                 summary=f"{agent} claimed {slug}", repo_path=task["repo_path"],
-                 task_slug=slug, actor=agent,
-                 payload={
-                     "lock": lock_data.get("id"),
-                     "files": files,
-                     "added_files": added_files,
-                 })
+    record_event(
+        conn,
+        kind="task.claimed",
+        summary=f"{agent} claimed {slug}",
+        repo_path=task["repo_path"],
+        task_slug=slug,
+        actor=agent,
+        payload={
+            "lock": lock_data.get("id"),
+            "files": files,
+            "added_files": added_files,
+        },
+    )
     conn.commit()
-    return {"ok": True, "task": dict(conn.execute(
-        "SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()),
+    return {
+        "ok": True,
+        "task": dict(
+            conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
+        ),
         "lock": lock_data,
-        "claim_outcome": {"claimed": True, "reason": "acquired",
-                          "slug": slug, "agent": agent,
-                          "lock_id": lock_data.get("id"),
-                          "holder_agent": agent,
-                          "holder_box": lock_data.get("box_id"),
-                          "files": files,
-                          "added_files": added_files}}
+        "claim_outcome": {
+            "claimed": True,
+            "reason": "acquired",
+            "slug": slug,
+            "agent": agent,
+            "lock_id": lock_data.get("id"),
+            "holder_agent": agent,
+            "holder_box": lock_data.get("box_id"),
+            "files": files,
+            "added_files": added_files,
+        },
+    }
 
 
 def task_finish(conn, *, slug: str, agent: str, verify: bool = True) -> dict:
@@ -3940,47 +4411,68 @@ def task_finish(conn, *, slug: str, agent: str, verify: bool = True) -> dict:
         failed = False
         if aff.get("ok"):
             for kind in ("build", "test"):
-                names = {x["name"] for x in aff["affected"]
-                         if x["target_kind"] == kind}
+                names = {x["name"] for x in aff["affected"] if x["target_kind"] == kind}
                 if not names:
                     continue
-                rr = repo_run(conn, task["repo_path"], kind,
-                              only_targets=names)
-                results.append({"kind": kind, "ok": rr.get("ok", True),
-                                 "results": rr.get("results", [])})
+                rr = repo_run(conn, task["repo_path"], kind, only_targets=names)
+                results.append(
+                    {
+                        "kind": kind,
+                        "ok": rr.get("ok", True),
+                        "results": rr.get("results", []),
+                    }
+                )
                 if not rr.get("ok", True):
                     failed = True
-        verification = {"ran": bool(results), "failed": failed,
-                        "detail": results}
+        verification = {"ran": bool(results), "failed": failed, "detail": results}
         if failed:
-            return {"ok": False, "error": "verification failed; status not flipped",
-                    "task": task, "verification": verification}
-    task_set_status(conn, slug=slug, workflow_status="done",
-                    git_status="done", note=f"finished by {agent}")
+            return {
+                "ok": False,
+                "error": "verification failed; status not flipped",
+                "task": task,
+                "verification": verification,
+            }
+    task_set_status(
+        conn,
+        slug=slug,
+        workflow_status="done",
+        git_status="done",
+        note=f"finished by {agent}",
+    )
     released = []
-    for lkr in _lock_rows(conn, include_inactive=False,
-                          repo_path=task["repo_path"]):
-        if lkr["agent_name"] == agent and (
-            lkr["scope_key"] == f"task:{slug}"
-        ):
+    for lkr in _lock_rows(conn, include_inactive=False, repo_path=task["repo_path"]):
+        if lkr["agent_name"] == agent and (lkr["scope_key"] == f"task:{slug}"):
             lock_release(conn, lkr["id"], force=True)
             released.append(lkr["id"])
     unblocked = _newly_unblocked(conn, slug)
-    record_event(conn, kind="task.finished",
-                 summary=f"{agent} finished {slug}",
-                 repo_path=task["repo_path"], task_slug=slug, actor=agent,
-                 payload={"unblocked": unblocked, "released_locks": released})
+    record_event(
+        conn,
+        kind="task.finished",
+        summary=f"{agent} finished {slug}",
+        repo_path=task["repo_path"],
+        task_slug=slug,
+        actor=agent,
+        payload={"unblocked": unblocked, "released_locks": released},
+    )
     for ub in unblocked:
-        record_event(conn, kind="task.unblocked",
-                     summary=f"{ub} unblocked by {slug}",
-                     task_slug=ub, actor=agent,
-                     payload={"by": slug})
+        record_event(
+            conn,
+            kind="task.unblocked",
+            summary=f"{ub} unblocked by {slug}",
+            task_slug=ub,
+            actor=agent,
+            payload={"by": slug},
+        )
     conn.commit()
-    return {"ok": True,
-            "task": dict(conn.execute("SELECT * FROM tasks WHERE slug = ?",
-                                       (slug,)).fetchone()),
-            "verification": verification, "released_locks": released,
-            "unblocked": unblocked}
+    return {
+        "ok": True,
+        "task": dict(
+            conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
+        ),
+        "verification": verification,
+        "released_locks": released,
+        "unblocked": unblocked,
+    }
 
 
 # ---- external task-provider contract -------------------------------------
@@ -3991,10 +4483,17 @@ def task_finish(conn, *, slug: str, agent: str, verify: bool = True) -> dict:
 #              done/closed->done, blocked->blocked.
 
 _EXT_STATUS = {
-    "open": "idea", "todo": "idea", "backlog": "idea", "new": "idea",
-    "in_progress": "in_progress", "doing": "in_progress",
-    "started": "in_progress", "review": "in_progress",
-    "done": "done", "closed": "done", "complete": "done",
+    "open": "idea",
+    "todo": "idea",
+    "backlog": "idea",
+    "new": "idea",
+    "in_progress": "in_progress",
+    "doing": "in_progress",
+    "started": "in_progress",
+    "review": "in_progress",
+    "done": "done",
+    "closed": "done",
+    "complete": "done",
     "blocked": "blocked",
 }
 
@@ -4013,7 +4512,8 @@ def provider_sync_in(conn, source: str, items: list[dict]) -> dict:
         wf = _ext_workflow(it.get("status"))
         row = conn.execute(
             "SELECT slug, workflow_status FROM tasks "
-            "WHERE source = ? AND external_id = ?", (source, ext)
+            "WHERE source = ? AND external_id = ?",
+            (source, ext),
         ).fetchone()
         now = utc_now_iso()
         if row:
@@ -4021,19 +4521,32 @@ def provider_sync_in(conn, source: str, items: list[dict]) -> dict:
                 "UPDATE tasks SET title=?, workflow_status=?, priority=?, "
                 "why=COALESCE(?,why), what_text=COALESCE(?,what_text), "
                 "updated_at=? WHERE slug=?",
-                (it.get("title") or row["slug"], wf,
-                 it.get("priority", "p3"), it.get("why"), it.get("what"),
-                 now, row["slug"]),
+                (
+                    it.get("title") or row["slug"],
+                    wf,
+                    it.get("priority", "p3"),
+                    it.get("why"),
+                    it.get("what"),
+                    now,
+                    row["slug"],
+                ),
             )
             updated.append(row["slug"])
         else:
             create_task(
-                conn, slug=slug, repo_ref=it.get("repo_ref"),
-                title=it.get("title") or slug, why=it.get("why"),
-                what_text=it.get("what"), roi_note=None,
-                priority=it.get("priority", "p3"), workflow_status=wf,
-                git_status="not_started", assigned_agent=None,
-                delegation_current=None, delegation_other=None,
+                conn,
+                slug=slug,
+                repo_ref=it.get("repo_ref"),
+                title=it.get("title") or slug,
+                why=it.get("why"),
+                what_text=it.get("what"),
+                roi_note=None,
+                priority=it.get("priority", "p3"),
+                workflow_status=wf,
+                git_status="not_started",
+                assigned_agent=None,
+                delegation_current=None,
+                delegation_other=None,
                 parent_task_slug=None,
             )
             conn.execute(
@@ -4041,23 +4554,32 @@ def provider_sync_in(conn, source: str, items: list[dict]) -> dict:
                 (source, ext, slug),
             )
             created.append(slug)
-    record_event(conn, kind="provider.sync_in",
-                 summary=f"{source}: +{len(created)} ~{len(updated)}",
-                 payload={"source": source, "created": created,
-                          "updated": updated})
+    record_event(
+        conn,
+        kind="provider.sync_in",
+        summary=f"{source}: +{len(created)} ~{len(updated)}",
+        payload={"source": source, "created": created, "updated": updated},
+    )
     conn.commit()
-    return {"ok": True, "source": source,
-            "created": created, "updated": updated,
-            "message": f"{source}: {len(created)} created, {len(updated)} updated"}
+    return {
+        "ok": True,
+        "source": source,
+        "created": created,
+        "updated": updated,
+        "message": f"{source}: {len(created)} created, {len(updated)} updated",
+    }
 
 
 def provider_outbox(conn, source: str) -> dict:
     """Tasks owned by `source` + their current status, for an adapter to
     push back to the external system."""
-    rows = dicts(conn.execute(
-        "SELECT slug, external_id, title, workflow_status, git_status, "
-        "priority, assigned_agent FROM tasks WHERE source = ? ORDER BY slug", (source,)
-    ).fetchall())
+    rows = dicts(
+        conn.execute(
+            "SELECT slug, external_id, title, workflow_status, git_status, "
+            "priority, assigned_agent FROM tasks WHERE source = ? ORDER BY slug",
+            (source,),
+        ).fetchall()
+    )
     return {"ok": True, "source": source, "outbox": rows}
 
 
@@ -4148,7 +4670,11 @@ def task_set_status(
         repo_path=row["repo_path"],
         task_slug=slug,
         actor=row["assigned_agent"],
-        payload={"workflow_status": workflow_status, "git_status": git_status, "note": note},
+        payload={
+            "workflow_status": workflow_status,
+            "git_status": git_status,
+            "note": note,
+        },
     )
     conn.commit()
     return task_info(conn, slug)
@@ -4174,7 +4700,9 @@ def task_add_dependency(conn, slug: str, depends_on_slug: str, relation: str) ->
     return task_info(conn, slug)
 
 
-def task_add_conflict(conn, slug: str, conflicts_with_slug: str, reason: str | None) -> dict:
+def task_add_conflict(
+    conn, slug: str, conflicts_with_slug: str, reason: str | None
+) -> dict:
     now = utc_now_iso()
     conn.execute(
         """
@@ -4262,8 +4790,7 @@ def _known_boxes(conn) -> set[str]:
     the peer was removed) and is safe to reap once it goes quiet."""
     boxes = {_box_id()}
     try:
-        boxes |= {r[0] for r in conn.execute(
-            "SELECT box_id FROM box_identity")}
+        boxes |= {r[0] for r in conn.execute("SELECT box_id FROM box_identity")}
         boxes |= {r[0] for r in conn.execute("SELECT box_id FROM peers")}
     except sqlite3.OperationalError:
         pass
@@ -4282,15 +4809,20 @@ def _pid_is_alive(pid: int | None) -> bool:
         return True
 
 
-def _stale_lock_reason(row, now: datetime, *, local_box=None,
-                       known_boxes=None) -> str | None:
+def _stale_lock_reason(
+    row, now: datetime, *, local_box=None, known_boxes=None
+) -> str | None:
     updated = parse_iso(row["updated_at"])
     elapsed = (now - updated).total_seconds()
     if row["lease_seconds"] and elapsed > row["lease_seconds"]:
         return "lease_expired"
     # PID reaping is deliberately opt-in. Normal CLI/task claims store NULL
     # because the frog command process exits immediately and is not the agent.
-    if row["host"] == socket.gethostname() and row["pid"] and not _pid_is_alive(row["pid"]):
+    if (
+        row["host"] == socket.gethostname()
+        and row["pid"]
+        and not _pid_is_alive(row["pid"])
+    ):
         return "dead_pid"
     # Cross-box liveness: a lock owned by another box can only be kept
     # alive by that box's agent renewing it (which bumps updated_at).
@@ -4320,8 +4852,7 @@ def _mark_stale_locks(conn) -> list[dict]:
     known = _known_boxes(conn)
     stale = []
     for row in rows:
-        reason = _stale_lock_reason(row, now, local_box=local_box,
-                                    known_boxes=known)
+        reason = _stale_lock_reason(row, now, local_box=local_box, known_boxes=known)
         if reason:
             stale.append({"id": row["id"], "reason": reason, "row": row})
     for item in stale:
@@ -4336,8 +4867,9 @@ def _mark_stale_locks(conn) -> list[dict]:
         if reason == "dead_pid":
             summary = f"marked lock {lock_id} stale: dead pid {row['pid']}"
         elif reason in ("orphan_box", "remote_stale"):
-            summary = (f"marked lock {lock_id} stale: {reason} "
-                       f"(box {row['box_id']} silent)")
+            summary = (
+                f"marked lock {lock_id} stale: {reason} (box {row['box_id']} silent)"
+            )
         else:
             summary = f"marked lock {lock_id} stale"
         conn.execute("UPDATE locks SET status = 'stale' WHERE id = ?", (lock_id,))
@@ -4433,16 +4965,22 @@ def _locks_conflict(candidate: dict, lock: dict) -> bool:
         cr = set(candidate.get("rel_files") or [])
         lr = set(lock.get("rel_files") or [])
         if not cr or not lr:
-            return True   # a whole-repo lock on the same logical repo
+            return True  # a whole-repo lock on the same logical repo
         return bool(cr & lr)
     # Different logical repos (or repo_key unknown): a differing absolute
     # repo_path means no conflict.
-    if candidate["repo_path"] and lock["repo_path"] and candidate["repo_path"] != lock["repo_path"]:
+    if (
+        candidate["repo_path"]
+        and lock["repo_path"]
+        and candidate["repo_path"] != lock["repo_path"]
+    ):
         return False
     current_files = set(candidate["file_paths"])
     other_files = set(lock["file_paths"])
     if not current_files or not other_files:
-        return bool(candidate["repo_path"]) and candidate["repo_path"] == lock["repo_path"]
+        return (
+            bool(candidate["repo_path"]) and candidate["repo_path"] == lock["repo_path"]
+        )
     return bool(current_files & other_files)
 
 
@@ -4454,7 +4992,9 @@ def _is_task_scope_only(lock: dict) -> bool:
     )
 
 
-def lock_check(conn, *, scope_key: str, repo_ref: str | None, files: list[str] | None) -> dict:
+def lock_check(
+    conn, *, scope_key: str, repo_ref: str | None, files: list[str] | None
+) -> dict:
     repo_path = None
     if repo_ref:
         repo = resolve_repo(conn, repo_ref)
@@ -4466,14 +5006,28 @@ def lock_check(conn, *, scope_key: str, repo_ref: str | None, files: list[str] |
     nf = _normalise_files(files)
     rk = None
     if repo_path:
-        rr = conn.execute("SELECT repo_key FROM repos WHERE repo_path = ?",
-                          (repo_path,)).fetchone()
+        rr = conn.execute(
+            "SELECT repo_key FROM repos WHERE repo_path = ?", (repo_path,)
+        ).fetchone()
         rk = rr["repo_key"] if rr else None
-    candidate = {"scope_key": scope_key, "repo_path": repo_path,
-                 "file_paths": nf, "repo_key": rk,
-                 "rel_files": _rel_files(repo_path, nf)}
-    conflicts = [lock for lock in _lock_rows(conn, include_inactive=False) if _locks_conflict(candidate, lock)]
-    return {"ok": True, "scope_key": scope_key, "repo_path": repo_path, "conflicts": conflicts}
+    candidate = {
+        "scope_key": scope_key,
+        "repo_path": repo_path,
+        "file_paths": nf,
+        "repo_key": rk,
+        "rel_files": _rel_files(repo_path, nf),
+    }
+    conflicts = [
+        lock
+        for lock in _lock_rows(conn, include_inactive=False)
+        if _locks_conflict(candidate, lock)
+    ]
+    return {
+        "ok": True,
+        "scope_key": scope_key,
+        "repo_path": repo_path,
+        "conflicts": conflicts,
+    }
 
 
 def lock_acquire(
@@ -4493,15 +5047,18 @@ def lock_acquire(
     repo_path = None
     if repo_ref:
         repo = resolve_repo(conn, repo_ref)
-        repo_path = repo["repo_path"] if repo else str(Path(repo_ref).expanduser().resolve())
+        repo_path = (
+            repo["repo_path"] if repo else str(Path(repo_ref).expanduser().resolve())
+        )
     files = _normalise_files(files)
     lock_repo_key = None
     if repo_path:
         try:
             lock_repo_key = ensure_repo_key(conn, repo_path)
         except sqlite3.Error:
-            rr = conn.execute("SELECT repo_key FROM repos WHERE repo_path=?",
-                              (repo_path,)).fetchone()
+            rr = conn.execute(
+                "SELECT repo_key FROM repos WHERE repo_path=?", (repo_path,)
+            ).fetchone()
             lock_repo_key = rr["repo_key"] if rr else None
     rel_files = _rel_files(repo_path, files)
     # Reap expired leases in their own short transaction first.
@@ -4510,9 +5067,13 @@ def lock_acquire(
         conn.commit()
     except sqlite3.Error:
         pass
-    candidate = {"scope_key": scope_key, "repo_path": repo_path,
-                 "file_paths": files, "repo_key": lock_repo_key,
-                 "rel_files": rel_files}
+    candidate = {
+        "scope_key": scope_key,
+        "repo_path": repo_path,
+        "file_paths": files,
+        "repo_key": lock_repo_key,
+        "rel_files": rel_files,
+    }
     # The conflict check + insert MUST be atomic. A plain check-then-insert
     # let concurrent acquirers double-grant the same contended scope
     # (TOCTOU). BEGIN IMMEDIATE takes SQLite's write lock up front, so
@@ -4520,18 +5081,25 @@ def lock_acquire(
     conn.execute("BEGIN IMMEDIATE")
     try:
         rows = []
-        for row in conn.execute("SELECT * FROM locks WHERE status = 'active'").fetchall():
+        for row in conn.execute(
+            "SELECT * FROM locks WHERE status = 'active'"
+        ).fetchall():
             r = _resolve_lock_paths(dict(row))
             rows.append(r)
         conflicts = [r for r in rows if _locks_conflict(candidate, r)]
         if conflicts and not force:
             conn.rollback()
-            return {"ok": False, "error": "conflicting active lock exists",
-                    "conflicts": conflicts}
+            return {
+                "ok": False,
+                "error": "conflicting active lock exists",
+                "conflicts": conflicts,
+            }
         now = utc_now_iso()
         eta_finish_at = None
         if eta_minutes is not None:
-            eta_finish_at = (utc_now() + timedelta(minutes=eta_minutes)).isoformat(timespec="seconds")
+            eta_finish_at = (utc_now() + timedelta(minutes=eta_minutes)).isoformat(
+                timespec="seconds"
+            )
         conn.execute(
             """
             INSERT INTO locks(
@@ -4580,7 +5148,9 @@ def lock_renew(conn, lock_id: int, eta_minutes: int | None) -> dict:
         return {"ok": False, "error": f"lock not found: {lock_id}"}
     eta_finish_at = row["eta_finish_at"]
     if eta_minutes is not None:
-        eta_finish_at = (utc_now() + timedelta(minutes=eta_minutes)).isoformat(timespec="seconds")
+        eta_finish_at = (utc_now() + timedelta(minutes=eta_minutes)).isoformat(
+            timespec="seconds"
+        )
     conn.execute(
         "UPDATE locks SET updated_at = ?, eta_finish_at = ? WHERE id = ?",
         (utc_now_iso(), eta_finish_at, lock_id),
@@ -4643,7 +5213,9 @@ def lock_list(
     repo_path = None
     if repo_ref:
         repo = resolve_repo(conn, repo_ref)
-        repo_path = repo["repo_path"] if repo else str(Path(repo_ref).expanduser().resolve())
+        repo_path = (
+            repo["repo_path"] if repo else str(Path(repo_ref).expanduser().resolve())
+        )
     return {
         "ok": True,
         "status_filter": status or ("all" if include_inactive else "active"),
@@ -4659,16 +5231,18 @@ def lock_reap(conn) -> dict:
     'reap' is an operation an operator/cron can run and observe, not just a
     silent side effect of listing."""
     before = {
-        row["id"]
-        for row in conn.execute("SELECT id FROM locks WHERE status = 'stale'")
+        row["id"] for row in conn.execute("SELECT id FROM locks WHERE status = 'stale'")
     }
     marked = _mark_stale_locks(conn)
     after_rows = conn.execute(
         "SELECT id, scope_key, agent_name, repo_path FROM locks WHERE status = 'stale'"
     ).fetchall()
     reasons = {item["id"]: item["reason"] for item in marked}
-    newly = [dict(r) | {"reason": reasons.get(r["id"], "stale")}
-             for r in after_rows if r["id"] not in before]
+    newly = [
+        dict(r) | {"reason": reasons.get(r["id"], "stale")}
+        for r in after_rows
+        if r["id"] not in before
+    ]
     return {
         "ok": True,
         "message": f"reaped {len(newly)} stale lock(s)",
@@ -4676,7 +5250,9 @@ def lock_reap(conn) -> dict:
     }
 
 
-def event_hook_add(conn, url: str, *, kind: str = "webhook", enabled: bool = True) -> dict:
+def event_hook_add(
+    conn, url: str, *, kind: str = "webhook", enabled: bool = True
+) -> dict:
     url = (url or "").strip()
     kind = (kind or "webhook").strip() or "webhook"
     if not (url.startswith("http://") or url.startswith("https://")):
@@ -4693,7 +5269,12 @@ def event_hook_add(conn, url: str, *, kind: str = "webhook", enabled: bool = Tru
         """,
         (url, kind, 1 if enabled else 0, now, now),
     )
-    record_event(conn, kind="hook.added", summary=f"added {kind} event hook", payload={"url": url, "kind": kind})
+    record_event(
+        conn,
+        kind="hook.added",
+        summary=f"added {kind} event hook",
+        payload={"url": url, "kind": kind},
+    )
     conn.commit()
     row = conn.execute("SELECT * FROM event_hooks WHERE url = ?", (url,)).fetchone()
     return {"ok": True, "message": f"hook added: {url}", "hook": dict(row)}
@@ -4714,7 +5295,12 @@ def event_hook_remove(conn, hook_id: int) -> dict:
     if not row:
         return {"ok": False, "error": f"hook not found: {hook_id}"}
     conn.execute("DELETE FROM event_hooks WHERE id = ?", (hook_id,))
-    record_event(conn, kind="hook.removed", summary=f"removed event hook {hook_id}", payload={"hook": dict(row)})
+    record_event(
+        conn,
+        kind="hook.removed",
+        summary=f"removed event hook {hook_id}",
+        payload={"hook": dict(row)},
+    )
     conn.commit()
     return {"ok": True, "message": f"hook removed: {hook_id}", "hook": dict(row)}
 
@@ -4750,18 +5336,21 @@ def _post_json(url: str, body: dict, *, timeout: float = 5.0) -> tuple[int, str]
         return int(exc.code), text
 
 
-def event_hook_dispatch(conn, *, hook_id: int | None = None, limit: int = 50,
-                        request_fn=None) -> dict:
+def event_hook_dispatch(
+    conn, *, hook_id: int | None = None, limit: int = 50, request_fn=None
+) -> dict:
     request_fn = request_fn or _post_json
     clauses = ["enabled = 1"]
     params = []
     if hook_id is not None:
         clauses.append("id = ?")
         params.append(hook_id)
-    hooks = dicts(conn.execute(
-        "SELECT * FROM event_hooks WHERE " + " AND ".join(clauses) + " ORDER BY id",
-        tuple(params),
-    ).fetchall())
+    hooks = dicts(
+        conn.execute(
+            "SELECT * FROM event_hooks WHERE " + " AND ".join(clauses) + " ORDER BY id",
+            tuple(params),
+        ).fetchall()
+    )
     if hook_id is not None and not hooks:
         return {"ok": False, "error": f"enabled hook not found: {hook_id}"}
     dispatches = []
@@ -4786,21 +5375,30 @@ def event_hook_dispatch(conn, *, hook_id: int | None = None, limit: int = 50,
                     """,
                     (max_id, int(status), utc_now_iso(), utc_now_iso(), hook["id"]),
                 )
-                dispatches.append({"hook": hook, "sent": len(events), "status": int(status), "ok": True})
+                dispatches.append(
+                    {
+                        "hook": hook,
+                        "sent": len(events),
+                        "status": int(status),
+                        "ok": True,
+                    }
+                )
             else:
                 ok = False
                 conn.execute(
                     "UPDATE event_hooks SET last_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
                     (int(status), text[:500], utc_now_iso(), hook["id"]),
                 )
-                dispatches.append({
-                    "hook": hook,
-                    "sent": 0,
-                    "attempted": len(events),
-                    "status": int(status),
-                    "ok": False,
-                    "error": text[:500],
-                })
+                dispatches.append(
+                    {
+                        "hook": hook,
+                        "sent": 0,
+                        "attempted": len(events),
+                        "status": int(status),
+                        "ok": False,
+                        "error": text[:500],
+                    }
+                )
         except Exception as exc:
             ok = False
             err = str(exc)
@@ -4808,14 +5406,16 @@ def event_hook_dispatch(conn, *, hook_id: int | None = None, limit: int = 50,
                 "UPDATE event_hooks SET last_error = ?, updated_at = ? WHERE id = ?",
                 (err[:500], utc_now_iso(), hook["id"]),
             )
-            dispatches.append({
-                "hook": hook,
-                "sent": 0,
-                "attempted": len(events),
-                "status": None,
-                "ok": False,
-                "error": err,
-            })
+            dispatches.append(
+                {
+                    "hook": hook,
+                    "sent": 0,
+                    "attempted": len(events),
+                    "status": None,
+                    "ok": False,
+                    "error": err,
+                }
+            )
     conn.commit()
     return {
         "ok": ok,
@@ -4824,7 +5424,9 @@ def event_hook_dispatch(conn, *, hook_id: int | None = None, limit: int = 50,
     }
 
 
-def event_digest_markdown(conn, *, limit: int = 20, repo_ref: str | None = None) -> dict:
+def event_digest_markdown(
+    conn, *, limit: int = 20, repo_ref: str | None = None
+) -> dict:
     events = log_tail(conn, limit=limit, repo_ref=repo_ref)
     if not events.get("ok"):
         return events
@@ -4832,7 +5434,9 @@ def event_digest_markdown(conn, *, limit: int = 20, repo_ref: str | None = None)
     for event in events["events"]:
         task = f" `{event['task_slug']}`" if event.get("task_slug") else ""
         actor = f" @{event['actor']}" if event.get("actor") else ""
-        lines.append(f"- {event['created_at']} `{event['kind']}`{task}{actor}: {event['summary']}")
+        lines.append(
+            f"- {event['created_at']} `{event['kind']}`{task}{actor}: {event['summary']}"
+        )
     return {"ok": True, "markdown": "\n".join(lines), "events": events["events"]}
 
 
@@ -4860,8 +5464,7 @@ def _git_dirty_files(repo_path: str) -> list[str]:
     return sorted(set(out))
 
 
-def lock_check_file(conn, *, repo_ref: str | None, agent: str,
-                     file_path: str) -> dict:
+def lock_check_file(conn, *, repo_ref: str | None, agent: str, file_path: str) -> dict:
     """Ask: would editing this file conflict with someone else's active
     lock, and does the current agent hold a covering lock?
 
@@ -4877,8 +5480,12 @@ def lock_check_file(conn, *, repo_ref: str | None, agent: str,
     file_path may be a path inside the repo or an absolute path."""
     repo = _repo_required(conn, repo_ref)
     if not repo:
-        return {"ok": False, "error": f"repo not found: {repo_ref}",
-                "status": "unknown", "covered": False}
+        return {
+            "ok": False,
+            "error": f"repo not found: {repo_ref}",
+            "status": "unknown",
+            "covered": False,
+        }
     repo_path = repo["repo_path"]
     abs_path = str(Path(file_path).expanduser().resolve())
     if not abs_path.startswith(repo_path):
@@ -4887,19 +5494,20 @@ def lock_check_file(conn, *, repo_ref: str | None, agent: str,
             abs_path = candidate
     active = list(_lock_rows(conn, include_inactive=False, repo_path=repo_path))
     # Whole-repo locks count as coverage when they aren't pure task-scope.
-    repo_holders = sorted({
-        lk["agent_name"]
-        for lk in active
-        if not lk["file_paths"] and not _is_task_scope_only(lk)
-    })
+    repo_holders = sorted(
+        {
+            lk["agent_name"]
+            for lk in active
+            if not lk["file_paths"] and not _is_task_scope_only(lk)
+        }
+    )
     file_holders: dict[str, set[str]] = {}
     holding_locks_by_agent: dict[str, list[dict]] = {}
     for lk in active:
         for fp in lk["file_paths"]:
             if fp == abs_path:
                 file_holders.setdefault(fp, set()).add(lk["agent_name"])
-                holding_locks_by_agent.setdefault(
-                    lk["agent_name"], []).append(lk)
+                holding_locks_by_agent.setdefault(lk["agent_name"], []).append(lk)
     holders = set(file_holders.get(abs_path, set())) | set(repo_holders)
     if agent in holders:
         status = "covered"
@@ -4908,9 +5516,13 @@ def lock_check_file(conn, *, repo_ref: str | None, agent: str,
     else:
         status = "uncovered"
     conflicting = [
-        {"lock_id": lk["id"], "holder_agent": lk["agent_name"],
-         "holder_box": lk.get("box_id"), "scope_key": lk["scope_key"],
-         "files": lk["file_paths"]}
+        {
+            "lock_id": lk["id"],
+            "holder_agent": lk["agent_name"],
+            "holder_box": lk.get("box_id"),
+            "scope_key": lk["scope_key"],
+            "files": lk["file_paths"],
+        }
         for ag, locks in holding_locks_by_agent.items()
         for lk in locks
         if ag != agent
@@ -4943,8 +5555,7 @@ def lock_audit(conn, *, repo_ref: str | None, agent: str) -> dict:
     repo_path = repo["repo_path"]
     dirty = _git_dirty_files(repo_path)
     active = [
-        lk
-        for lk in _lock_rows(conn, include_inactive=False, repo_path=repo_path)
+        lk for lk in _lock_rows(conn, include_inactive=False, repo_path=repo_path)
     ]
     # Explicit no-file locks cover the whole repo. A no-file task:<slug> lock is
     # only task ownership; it does not cover unrelated dirty files.
@@ -5034,8 +5645,12 @@ def status_summary(conn, *, repo_ref: str | None) -> dict:
         "ok": True,
         "repo_path": repo_path,
         "counts": {
-            "repos": conn.execute("SELECT COUNT(*) AS count FROM repos WHERE third_party = 0").fetchone()["count"],
-            "files": conn.execute("SELECT COUNT(*) AS count FROM files").fetchone()["count"],
+            "repos": conn.execute(
+                "SELECT COUNT(*) AS count FROM repos WHERE third_party = 0"
+            ).fetchone()["count"],
+            "files": conn.execute("SELECT COUNT(*) AS count FROM files").fetchone()[
+                "count"
+            ],
             "tasks": sum(row["count"] for row in tasks),
             "active_locks": active_locks,
         },
@@ -5107,10 +5722,15 @@ def event_mirror_pull(conn, *, workspace: str, events: list[dict]) -> dict:
                payload_json, mirrored_at)
                VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (
-                workspace, rid, ev.get("created_at") or now,
-                ev.get("kind") or "?", ev.get("repo_path"),
-                ev.get("task_slug"), ev.get("actor"),
-                ev.get("summary") or "", json.dumps(ev.get("payload") or {}),
+                workspace,
+                rid,
+                ev.get("created_at") or now,
+                ev.get("kind") or "?",
+                ev.get("repo_path"),
+                ev.get("task_slug"),
+                ev.get("actor"),
+                ev.get("summary") or "",
+                json.dumps(ev.get("payload") or {}),
                 now,
             ),
         )
@@ -5118,8 +5738,13 @@ def event_mirror_pull(conn, *, workspace: str, events: list[dict]) -> dict:
         max_id = max(max_id, rid)
     if added:
         conn.commit()
-    return {"ok": True, "workspace": workspace, "pulled": added,
-            "cursor": max_id, "message": f"mirrored {added} event(s) from {workspace}"}
+    return {
+        "ok": True,
+        "workspace": workspace,
+        "pulled": added,
+        "cursor": max_id,
+        "message": f"mirrored {added} event(s) from {workspace}",
+    }
 
 
 def event_mirror_list(conn, *, workspace: str | None, limit: int = 20) -> dict:
@@ -5209,8 +5834,7 @@ UNIT_KIND_BY_SOURCE = {
 }
 
 
-_REPO_ACTIONS = ["build", "test", "lint", "scan", "doctor",
-                 "status", "info"]
+_REPO_ACTIONS = ["build", "test", "lint", "scan", "doctor", "status", "info"]
 
 
 def repo_tree_snapshot(conn, *, include_third_party: bool = True) -> dict:
@@ -5218,52 +5842,56 @@ def repo_tree_snapshot(conn, *, include_third_party: bool = True) -> dict:
     repo with its units and the actions available on it, plus a nested
     directory tree (common-prefix rooted) so the same data can be shown
     either as a flat repo list or navigated as a filesystem tree."""
-    repos = repo_list(conn,
-                       include_third_party=include_third_party)["repos"]
+    repos = repo_list(conn, include_third_party=include_third_party)["repos"]
     units_by_repo: dict[str, list[str]] = {}
     for row in conn.execute(
-            "SELECT repo_path, rel_path, unit_path FROM units"
-            " ORDER BY repo_path, rel_path").fetchall():
+        "SELECT repo_path, rel_path, unit_path FROM units ORDER BY repo_path, rel_path"
+    ).fetchall():
         units_by_repo.setdefault(row["repo_path"], []).append(
-            row["rel_path"] or row["unit_path"] or "?")
+            row["rel_path"] or row["unit_path"] or "?"
+        )
     items = []
     for r in repos:
-        items.append({
-            "repo_path": r["repo_path"],
-            "name": r.get("name") or Path(r["repo_path"]).name,
-            "repo_key": r.get("repo_key"),
-            "status": r.get("status"),
-            "third_party": bool(r.get("third_party")),
-            "units": sorted(units_by_repo.get(r["repo_path"], [])),
-            "actions": list(_REPO_ACTIONS),
-        })
+        items.append(
+            {
+                "repo_path": r["repo_path"],
+                "name": r.get("name") or Path(r["repo_path"]).name,
+                "repo_key": r.get("repo_key"),
+                "status": r.get("status"),
+                "third_party": bool(r.get("third_party")),
+                "units": sorted(units_by_repo.get(r["repo_path"], [])),
+                "actions": list(_REPO_ACTIONS),
+            }
+        )
     items.sort(key=lambda x: x["repo_path"])
 
     paths = [it["repo_path"] for it in items]
     prefix = os.path.dirname(os.path.commonprefix(paths)) if paths else "/"
-    root = {"name": prefix or "/", "path": prefix or "/",
-            "dirs": {}, "repos": []}
+    root = {"name": prefix or "/", "path": prefix or "/", "dirs": {}, "repos": []}
     by_path = {it["repo_path"]: it for it in items}
     for rp in paths:
-        rel = rp[len(prefix):].strip("/")
+        rel = rp[len(prefix) :].strip("/")
         parts = rel.split("/") if rel else [os.path.basename(rp)]
         node = root
         for comp in parts[:-1]:
             child = node["dirs"].get(comp)
             if child is None:
-                child = {"name": comp,
-                         "path": os.path.join(node["path"], comp),
-                         "dirs": {}, "repos": []}
+                child = {
+                    "name": comp,
+                    "path": os.path.join(node["path"], comp),
+                    "dirs": {},
+                    "repos": [],
+                }
                 node["dirs"][comp] = child
             node = child
         node["repos"].append(by_path[rp])
 
     def _ser(n):
         return {
-            "name": n["name"], "path": n["path"],
+            "name": n["name"],
+            "path": n["path"],
             "dirs": [_ser(n["dirs"][k]) for k in sorted(n["dirs"])],
-            "repos": sorted(n["repos"],
-                            key=lambda x: x["repo_path"]),
+            "repos": sorted(n["repos"], key=lambda x: x["repo_path"]),
         }
 
     # Box dimension: this box + every federated peer, each with the
@@ -5273,45 +5901,63 @@ def repo_tree_snapshot(conn, *, include_third_party: bool = True) -> dict:
     local_box = _box_id()
     local_host = socket.gethostname()
     by_key = {it["repo_key"]: it for it in items if it.get("repo_key")}
-    boxes = [{
-        "box_id": local_box, "hostname": local_host, "is_local": True,
-        "ssh_target": None,
-        "repos": [dict(it, on_path=it["repo_path"]) for it in items],
-    }]
+    boxes = [
+        {
+            "box_id": local_box,
+            "hostname": local_host,
+            "is_local": True,
+            "ssh_target": None,
+            "repos": [dict(it, on_path=it["repo_path"]) for it in items],
+        }
+    ]
     try:
         peers = conn.execute(
-            "SELECT box_id, hostname, ssh_target FROM peers "
-            "ORDER BY box_id").fetchall()
+            "SELECT box_id, hostname, ssh_target FROM peers ORDER BY box_id"
+        ).fetchall()
     except sqlite3.OperationalError:
         peers = []
     for pr in peers:
         pbox = pr["box_id"]
         prepos = []
         for a in conn.execute(
-                "SELECT repo_key, repo_path FROM repo_aliases "
-                "WHERE box = ? ORDER BY repo_path", (pbox,)):
+            "SELECT repo_key, repo_path FROM repo_aliases "
+            "WHERE box = ? ORDER BY repo_path",
+            (pbox,),
+        ):
             base = by_key.get(a["repo_key"])
-            prepos.append({
-                "repo_path": a["repo_path"],
-                "on_path": a["repo_path"],
-                "name": (base["name"] if base
-                         else os.path.basename(a["repo_path"])),
-                "repo_key": a["repo_key"],
-                "status": (base["status"] if base else None),
-                "third_party": bool(base["third_party"]) if base else False,
-                "units": [],          # remote units not known from here
-                "actions": list(_REPO_ACTIONS),
-                "remote": True,
-            })
-        boxes.append({
-            "box_id": pbox, "hostname": pr["hostname"],
-            "is_local": False, "ssh_target": pr["ssh_target"],
-            "repos": prepos,
-        })
+            prepos.append(
+                {
+                    "repo_path": a["repo_path"],
+                    "on_path": a["repo_path"],
+                    "name": (
+                        base["name"] if base else os.path.basename(a["repo_path"])
+                    ),
+                    "repo_key": a["repo_key"],
+                    "status": (base["status"] if base else None),
+                    "third_party": bool(base["third_party"]) if base else False,
+                    "units": [],  # remote units not known from here
+                    "actions": list(_REPO_ACTIONS),
+                    "remote": True,
+                }
+            )
+        boxes.append(
+            {
+                "box_id": pbox,
+                "hostname": pr["hostname"],
+                "is_local": False,
+                "ssh_target": pr["ssh_target"],
+                "repos": prepos,
+            }
+        )
 
-    return {"ok": True, "repos": items, "root": prefix or "/",
-            "tree": _ser(root), "boxes": boxes,
-            "local_box": local_box}
+    return {
+        "ok": True,
+        "repos": items,
+        "root": prefix or "/",
+        "tree": _ser(root),
+        "boxes": boxes,
+        "local_box": local_box,
+    }
 
 
 def board_snapshot(conn, *, recent_limit: int = 14) -> dict:
@@ -5330,11 +5976,12 @@ def board_snapshot(conn, *, recent_limit: int = 14) -> dict:
         unmet = []
         for d in conn.execute(
             "SELECT depends_on_slug FROM task_dependencies "
-            "WHERE task_slug=? AND relation='depends_on'", (task["slug"],)
+            "WHERE task_slug=? AND relation='depends_on'",
+            (task["slug"],),
         ):
             dd = conn.execute(
                 "SELECT workflow_status FROM tasks WHERE slug=?",
-                (d["depends_on_slug"],)
+                (d["depends_on_slug"],),
             ).fetchone()
             if not dd or (dd["workflow_status"] or "").lower() not in _WF_DONE:
                 unmet.append(d["depends_on_slug"])
@@ -5350,18 +5997,25 @@ def board_snapshot(conn, *, recent_limit: int = 14) -> dict:
         cols[col].append(task)
         if col == "idea" and not unmet:
             ready.append(task["slug"])
-    recent = dicts(conn.execute(
-        "SELECT id,created_at,kind,summary,task_slug,actor FROM event_log "
-        "WHERE kind LIKE 'task.%' OR kind LIKE 'lock.%' "
-        "ORDER BY id DESC LIMIT ?", (recent_limit,)
-    ).fetchall())
+    recent = dicts(
+        conn.execute(
+            "SELECT id,created_at,kind,summary,task_slug,actor FROM event_log "
+            "WHERE kind LIKE 'task.%' OR kind LIKE 'lock.%' "
+            "ORDER BY id DESC LIMIT ?",
+            (recent_limit,),
+        ).fetchall()
+    )
     recent.reverse()
-    return {"ok": True, "columns": cols, "ready": ready,
-            "recent": recent,
-            "counts": {k: len(v) for k, v in cols.items()},
-            "max_event_id": conn.execute(
-                "SELECT COALESCE(MAX(id),0) m FROM event_log"
-            ).fetchone()["m"]}
+    return {
+        "ok": True,
+        "columns": cols,
+        "ready": ready,
+        "recent": recent,
+        "counts": {k: len(v) for k, v in cols.items()},
+        "max_event_id": conn.execute(
+            "SELECT COALESCE(MAX(id),0) m FROM event_log"
+        ).fetchone()["m"],
+    }
 
 
 def log_why(conn, slug: str) -> dict:
@@ -5370,19 +6024,30 @@ def log_why(conn, slug: str) -> dict:
     task = conn.execute("SELECT * FROM tasks WHERE slug = ?", (slug,)).fetchone()
     if not task:
         return {"ok": False, "error": f"task not found: {slug}"}
-    events = dicts(conn.execute(
-        "SELECT * FROM event_log WHERE task_slug = ? ORDER BY id", (slug,)
-    ).fetchall())
-    history = dicts(conn.execute(
-        "SELECT * FROM task_status_history WHERE task_slug = ? ORDER BY changed_at",
-        (slug,),
-    ).fetchall())
-    assignments = dicts(conn.execute(
-        "SELECT * FROM task_assignments WHERE task_slug = ? ORDER BY assigned_at",
-        (slug,),
-    ).fetchall())
-    return {"ok": True, "task": dict(task), "events": events,
-            "history": history, "assignments": assignments}
+    events = dicts(
+        conn.execute(
+            "SELECT * FROM event_log WHERE task_slug = ? ORDER BY id", (slug,)
+        ).fetchall()
+    )
+    history = dicts(
+        conn.execute(
+            "SELECT * FROM task_status_history WHERE task_slug = ? ORDER BY changed_at",
+            (slug,),
+        ).fetchall()
+    )
+    assignments = dicts(
+        conn.execute(
+            "SELECT * FROM task_assignments WHERE task_slug = ? ORDER BY assigned_at",
+            (slug,),
+        ).fetchall()
+    )
+    return {
+        "ok": True,
+        "task": dict(task),
+        "events": events,
+        "history": history,
+        "assignments": assignments,
+    }
 
 
 def log_blame(conn, file_path: str) -> dict:
@@ -5390,32 +6055,45 @@ def log_blame(conn, file_path: str) -> dict:
     it, and the repo events around it -- 'who touched this, under which
     task, holding which lock, when'."""
     fp = str(Path(file_path).expanduser().resolve())
-    file_row = conn.execute(
-        "SELECT * FROM files WHERE file_path = ?", (fp,)
-    ).fetchone()
-    tasks = dicts(conn.execute(
-        """SELECT t.slug, t.title, t.workflow_status, tf.role, tf.created_at
+    file_row = conn.execute("SELECT * FROM files WHERE file_path = ?", (fp,)).fetchone()
+    tasks = dicts(
+        conn.execute(
+            """SELECT t.slug, t.title, t.workflow_status, tf.role, tf.created_at
            FROM task_files tf JOIN tasks t ON t.slug = tf.task_slug
            WHERE tf.file_path = ? ORDER BY tf.created_at""",
-        (fp,),
-    ).fetchall())
+            (fp,),
+        ).fetchall()
+    )
     locks = []
     for lk in _lock_rows(conn, include_inactive=True):
         if fp in lk["file_paths"]:
-            locks.append({
-                "id": lk["id"], "agent_name": lk["agent_name"],
-                "lock_kind": lk["lock_kind"], "status": lk["status"],
-                "started_at": lk["started_at"], "scope_key": lk["scope_key"],
-            })
+            locks.append(
+                {
+                    "id": lk["id"],
+                    "agent_name": lk["agent_name"],
+                    "lock_kind": lk["lock_kind"],
+                    "status": lk["status"],
+                    "started_at": lk["started_at"],
+                    "scope_key": lk["scope_key"],
+                }
+            )
     repo_path = file_row["repo_path"] if file_row else None
     events = []
     if repo_path:
-        events = dicts(conn.execute(
-            "SELECT * FROM event_log WHERE repo_path = ? ORDER BY id DESC LIMIT 50",
-            (repo_path,),
-        ).fetchall())
-    return {"ok": True, "file_path": fp, "repo_path": repo_path,
-            "tasks": tasks, "locks": locks, "events": events}
+        events = dicts(
+            conn.execute(
+                "SELECT * FROM event_log WHERE repo_path = ? ORDER BY id DESC LIMIT 50",
+                (repo_path,),
+            ).fetchall()
+        )
+    return {
+        "ok": True,
+        "file_path": fp,
+        "repo_path": repo_path,
+        "tasks": tasks,
+        "locks": locks,
+        "events": events,
+    }
 
 
 def _repo_required(conn, repo_ref: str | None) -> dict | None:
@@ -5427,7 +6105,9 @@ def _repo_required(conn, repo_ref: str | None) -> dict | None:
     repo = resolve_repo(conn, repo_ref)
     if not repo:
         return None
-    if not conn.execute("SELECT 1 FROM repos WHERE repo_path = ?", (repo["repo_path"],)).fetchone():
+    if not conn.execute(
+        "SELECT 1 FROM repos WHERE repo_path = ?", (repo["repo_path"],)
+    ).fetchone():
         register_repo(
             conn,
             repo_path=repo["repo_path"],
@@ -5463,7 +6143,10 @@ def _manifest_candidates(repo_path: Path) -> list[tuple[str, Path]]:
         for path in [repo_path / name, *repo_path.glob(f"*/{name}")]:
             if path.exists():
                 candidates.append((kind, path))
-    return sorted({(kind, path.resolve()) for kind, path in candidates}, key=lambda item: str(item[1]))
+    return sorted(
+        {(kind, path.resolve()) for kind, path in candidates},
+        key=lambda item: str(item[1]),
+    )
 
 
 def _upsert_unit(
@@ -5493,7 +6176,9 @@ def _upsert_unit(
     )
 
 
-def unit_discover(conn, *, repo_ref: str | None = None, all_repos: bool = False) -> dict:
+def unit_discover(
+    conn, *, repo_ref: str | None = None, all_repos: bool = False
+) -> dict:
     repos: list[dict]
     if all_repos:
         repos = repo_list(conn, include_third_party=True)["repos"]
@@ -5501,7 +6186,10 @@ def unit_discover(conn, *, repo_ref: str | None = None, all_repos: bool = False)
         if not repo_ref:
             inferred = infer_repo_from_cwd(conn)
             if not inferred:
-                return {"ok": False, "error": "no repo specified and cwd is not inside a known repo"}
+                return {
+                    "ok": False,
+                    "error": "no repo specified and cwd is not inside a known repo",
+                }
             repo_ref = inferred["repo_path"]
         repo = _repo_required(conn, repo_ref)
         if not repo:
@@ -5515,15 +6203,22 @@ def unit_discover(conn, *, repo_ref: str | None = None, all_repos: bool = False)
         by_dir: dict[Path, set[str]] = {}
         for source_kind, path in _manifest_candidates(repo_root):
             by_dir.setdefault(path.parent.resolve(), set()).add(source_kind)
-        for workdir, source_kinds in sorted(by_dir.items(), key=lambda item: str(item[0])):
+        for workdir, source_kinds in sorted(
+            by_dir.items(), key=lambda item: str(item[0])
+        ):
             rel_path = "."
             if workdir != repo_root:
                 rel_path = workdir.relative_to(repo_root).as_posix()
-            if any(part in DISCOVERY_EXCLUDED_DIRS or part == ".claude" for part in workdir.parts):
+            if any(
+                part in DISCOVERY_EXCLUDED_DIRS or part == ".claude"
+                for part in workdir.parts
+            ):
                 continue
             if workdir != repo_root and ".git" in workdir.parts:
                 continue
-            kind = "+".join(sorted(UNIT_KIND_BY_SOURCE.get(kind, kind) for kind in source_kinds))
+            kind = "+".join(
+                sorted(UNIT_KIND_BY_SOURCE.get(kind, kind) for kind in source_kinds)
+            )
             _upsert_unit(
                 conn,
                 repo_path=repo["repo_path"],
@@ -5633,13 +6328,21 @@ def _insert_target(
         )
 
 
-def _record_detection_source(conn, *, repo_path: str, source_kind: str, source_path: Path, payload: dict) -> None:
+def _record_detection_source(
+    conn, *, repo_path: str, source_kind: str, source_path: Path, payload: dict
+) -> None:
     conn.execute(
         """
         INSERT INTO repo_detection_sources(repo_path, source_kind, source_path, scanned_at, payload_json)
         VALUES(?, ?, ?, ?, ?)
         """,
-        (repo_path, source_kind, str(source_path), utc_now_iso(), json.dumps(payload, sort_keys=True)),
+        (
+            repo_path,
+            source_kind,
+            str(source_path),
+            utc_now_iso(),
+            json.dumps(payload, sort_keys=True),
+        ),
     )
 
 
@@ -5650,7 +6353,21 @@ def _make_target_name(repo_root: Path, workdir: Path, label: str) -> str:
     return f"{rel}:{label}"
 
 
-_RUNNER_KIND_MAP = {"build":"build","clean":"clean","test":"test","lint":"lint","check":"check","verify":"verify","deploy":"deploy","dev":"dev","start":"start","ci":"verify","fmt":"lint","format":"lint","typecheck":"check"}
+_RUNNER_KIND_MAP = {
+    "build": "build",
+    "clean": "clean",
+    "test": "test",
+    "lint": "lint",
+    "check": "check",
+    "verify": "verify",
+    "deploy": "deploy",
+    "dev": "dev",
+    "start": "start",
+    "ci": "verify",
+    "fmt": "lint",
+    "format": "lint",
+    "typecheck": "check",
+}
 
 
 def _runner_target_kind(name: str) -> tuple[str, float]:
@@ -5662,11 +6379,15 @@ def _runner_target_kind(name: str) -> tuple[str, float]:
     return "task", 0.85
 
 
-def _emit_runner_targets(conn, repo_root: Path, path: Path, *, runner: str,
-                         invoke: str, names: list[str]) -> None:
+def _emit_runner_targets(
+    conn, repo_root: Path, path: Path, *, runner: str, invoke: str, names: list[str]
+) -> None:
     _record_detection_source(
-        conn, repo_path=str(repo_root), source_kind=runner,
-        source_path=path, payload={"recipes": names},
+        conn,
+        repo_path=str(repo_root),
+        source_kind=runner,
+        source_path=path,
+        payload={"recipes": names},
     )
     for nm in names:
         kind, conf = _runner_target_kind(nm)
@@ -5700,8 +6421,9 @@ def _detect_from_taskfile(conn, repo_root: Path, path: Path) -> None:
             m = re.match(r"^  ([A-Za-z0-9_:.-]+):\s*", line)
             if m:
                 names.append(m.group(1))
-    _emit_runner_targets(conn, repo_root, path, runner="task",
-                         invoke="task", names=sorted(set(names)))
+    _emit_runner_targets(
+        conn, repo_root, path, runner="task", invoke="task", names=sorted(set(names))
+    )
 
 
 def _detect_from_justfile(conn, repo_root: Path, path: Path) -> None:
@@ -5714,8 +6436,9 @@ def _detect_from_justfile(conn, repo_root: Path, path: Path) -> None:
         m = re.match(r"^([A-Za-z0-9_-]+)\s*(\([^)]*\))?\s*:", line)
         if m and "=" not in line.split(":", 1)[0]:
             names.append(m.group(1))
-    _emit_runner_targets(conn, repo_root, path, runner="just",
-                         invoke="just", names=sorted(set(names)))
+    _emit_runner_targets(
+        conn, repo_root, path, runner="just", invoke="just", names=sorted(set(names))
+    )
 
 
 def _detect_from_mise(conn, repo_root: Path, path: Path) -> None:
@@ -5724,8 +6447,14 @@ def _detect_from_mise(conn, repo_root: Path, path: Path) -> None:
         m = re.match(r"^\[tasks\.([A-Za-z0-9_:.-]+)\]\s*$", line)
         if m:
             names.append(m.group(1))
-    _emit_runner_targets(conn, repo_root, path, runner="mise",
-                         invoke="mise run", names=sorted(set(names)))
+    _emit_runner_targets(
+        conn,
+        repo_root,
+        path,
+        runner="mise",
+        invoke="mise run",
+        names=sorted(set(names)),
+    )
 
 
 def _detect_from_makefile(conn, repo_root: Path, path: Path) -> None:
@@ -5733,7 +6462,9 @@ def _detect_from_makefile(conn, repo_root: Path, path: Path) -> None:
     targets = sorted(
         {
             match.group(1)
-            for match in re.finditer(r"^([A-Za-z0-9_.-]+)\s*:", text, flags=re.MULTILINE)
+            for match in re.finditer(
+                r"^([A-Za-z0-9_.-]+)\s*:", text, flags=re.MULTILINE
+            )
             if not match.group(1).startswith(".")
         }
     )
@@ -5757,7 +6488,9 @@ def _detect_from_makefile(conn, repo_root: Path, path: Path) -> None:
         if target in targets:
             artifact_paths = []
             if target == "build":
-                artifact_paths = [str(path.parent / entry) for entry in KNOWN_ARTIFACT_DIRS]
+                artifact_paths = [
+                    str(path.parent / entry) for entry in KNOWN_ARTIFACT_DIRS
+                ]
             _insert_target(
                 conn,
                 repo_path=str(repo_root),
@@ -5800,7 +6533,9 @@ def _detect_from_package_json(conn, repo_root: Path, path: Path) -> None:
             continue
         artifact_paths = []
         if command_kind == "build":
-            artifact_paths = [str(path.parent / entry) for entry in ("dist", "build", ".next", "out")]
+            artifact_paths = [
+                str(path.parent / entry) for entry in ("dist", "build", ".next", "out")
+            ]
         _insert_target(
             conn,
             repo_path=str(repo_root),
@@ -5810,7 +6545,9 @@ def _detect_from_package_json(conn, repo_root: Path, path: Path) -> None:
             workdir=str(path.parent),
             runner="npm",
             source=str(path),
-            confidence=0.95 if script_name in {"build", "clean", "test", "lint", "deploy"} else 0.72,
+            confidence=0.95
+            if script_name in {"build", "clean", "test", "lint", "deploy"}
+            else 0.72,
             artifact_paths=artifact_paths,
             network_required=script_name in {"deploy", "dev"},
         )
@@ -5954,7 +6691,9 @@ def repo_scan(conn, repo_ref: str) -> dict:
     repo_root = Path(repo["repo_path"])
     conn.execute("DELETE FROM repo_targets WHERE repo_path = ?", (repo["repo_path"],))
     conn.execute("DELETE FROM repo_artifacts WHERE repo_path = ?", (repo["repo_path"],))
-    conn.execute("DELETE FROM repo_detection_sources WHERE repo_path = ?", (repo["repo_path"],))
+    conn.execute(
+        "DELETE FROM repo_detection_sources WHERE repo_path = ?", (repo["repo_path"],)
+    )
     detectors = {
         "taskfile": _detect_from_taskfile,
         "justfile": _detect_from_justfile,
@@ -5972,8 +6711,12 @@ def repo_scan(conn, repo_ref: str) -> dict:
             continue
         try:
             detect(conn, repo_root, path)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError,
-                tomllib.TOMLDecodeError) as e:
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            tomllib.TOMLDecodeError,
+        ) as e:
             # A single malformed/empty/unreadable manifest (real example:
             # an empty package.json stub) must not abort scanning this
             # repo's other manifests, let alone every other repo queued
@@ -5994,8 +6737,10 @@ def repo_scan(conn, repo_ref: str) -> dict:
         kind="repo.scanned",
         summary=f"scanned repo {repo['name']}",
         repo_path=repo["repo_path"],
-        payload={"sources": len(_manifest_candidates(repo_root)),
-                 "skipped": len(skipped)},
+        payload={
+            "sources": len(_manifest_candidates(repo_root)),
+            "skipped": len(skipped),
+        },
     )
     conn.commit()
     return repo_targets(conn, repo_ref)
@@ -6043,7 +6788,20 @@ def _source_latest_mtime(workdir: Path) -> float:
     for path in workdir.rglob("*"):
         if not path.is_file():
             continue
-        if any(part in {"node_modules", ".git", "__pycache__", "dist", "build", ".next", "out", "target"} for part in path.parts):
+        if any(
+            part
+            in {
+                "node_modules",
+                ".git",
+                "__pycache__",
+                "dist",
+                "build",
+                ".next",
+                "out",
+                "target",
+            }
+            for part in path.parts
+        ):
             continue
         if path.suffix and path.suffix not in SOURCE_EXTENSIONS:
             continue
@@ -6089,11 +6847,18 @@ def repo_artifacts_stale(conn, repo_ref: str) -> dict:
         artifact_path = Path(artifact["path_hint"])
         exists = artifact_path.exists()
         artifact["stale"] = (not exists) or (
-            exists and artifact.get("mtime") is not None and artifact["mtime"] < latest_source
+            exists
+            and artifact.get("mtime") is not None
+            and artifact["mtime"] < latest_source
         )
         if artifact["stale"]:
             stale.append(artifact)
-    return {"ok": True, "repo": repo, "artifacts": stale, "source_latest_mtime": latest_source}
+    return {
+        "ok": True,
+        "repo": repo,
+        "artifacts": stale,
+        "source_latest_mtime": latest_source,
+    }
 
 
 def repo_doctor(conn, repo_ref: str) -> dict:
@@ -6123,7 +6888,9 @@ def repo_doctor(conn, repo_ref: str) -> dict:
             "no runnable targets detected; add a Makefile, Taskfile, justfile, "
             "mise.toml, package.json, Cargo.toml, pyproject.toml, or compose file"
         )
-    if target_counts and not any(kind in target_counts for kind in ("check", "test", "verify")):
+    if target_counts and not any(
+        kind in target_counts for kind in ("check", "test", "verify")
+    ):
         advice.append(
             "no verification target detected; add a check, test, or verify target"
         )
@@ -6133,7 +6900,10 @@ def repo_doctor(conn, repo_ref: str) -> dict:
     seen_artifact_paths: set[str] = set()
     for artifact in sorted(
         raw_stale_artifacts,
-        key=lambda item: (item.get("path_hint") or "", item.get("target_kind") == "clean"),
+        key=lambda item: (
+            item.get("path_hint") or "",
+            item.get("target_kind") == "clean",
+        ),
     ):
         path_hint = artifact.get("path_hint") or ""
         if path_hint in seen_artifact_paths:
@@ -6183,26 +6953,30 @@ def _target_input_hash(target: dict) -> str:
     try:
         inside = subprocess.run(
             ["git", "-C", wd, "rev-parse", "--is-inside-work-tree"],
-            text=True, capture_output=True,
+            text=True,
+            capture_output=True,
         )
         if inside.returncode == 0 and inside.stdout.strip() == "true":
             used_git = True
             tree = subprocess.run(
                 ["git", "-C", wd, "ls-files", "-s", "--", "."],
-                text=True, capture_output=True,
+                text=True,
+                capture_output=True,
             )
             h.update(b"tree:")
             h.update(tree.stdout.encode())
             # include unstaged/dirty content so a working-tree edit busts cache
             dirty = subprocess.run(
                 ["git", "-C", wd, "diff", "--", "."],
-                text=True, capture_output=True,
+                text=True,
+                capture_output=True,
             )
             h.update(b"dirty:")
             h.update(dirty.stdout.encode())
             untr = subprocess.run(
                 ["git", "-C", wd, "ls-files", "-o", "--exclude-standard", "--", "."],
-                text=True, capture_output=True,
+                text=True,
+                capture_output=True,
             )
             h.update(b"untracked:")
             h.update(untr.stdout.encode())
@@ -6223,7 +6997,9 @@ def _cached_success(conn, repo_path: str, target: dict, input_hash: str) -> bool
         """,
         (
             repo_path,
-            target["target_kind"] if "target_kind" in target else target.get("_kind", ""),
+            target["target_kind"]
+            if "target_kind" in target
+            else target.get("_kind", ""),
             target["name"],
             relative_repo_path(repo_path, target["workdir"]),
             target["command"],
@@ -6241,7 +7017,8 @@ def _changed_files(repo_path: str, since: str | None) -> list[str]:
         if since:
             d = subprocess.run(
                 ["git", "-C", repo_path, "diff", "--name-only", since, "--", "."],
-                text=True, capture_output=True,
+                text=True,
+                capture_output=True,
             )
             for rel in d.stdout.splitlines():
                 if rel.strip():
@@ -6292,8 +7069,9 @@ def _targets_for_files(conn, repo_path: str, files: list[str]) -> list[dict]:
     return affected
 
 
-def repo_dep_add(conn, dependent_ref: str, dependency_ref: str,
-                  note: str | None = None) -> dict:
+def repo_dep_add(
+    conn, dependent_ref: str, dependency_ref: str, note: str | None = None
+) -> dict:
     dep = _repo_required(conn, dependent_ref)
     on = _repo_required(conn, dependency_ref)
     if not dep:
@@ -6308,14 +7086,19 @@ def repo_dep_add(conn, dependent_ref: str, dependency_ref: str,
         (dep["repo_path"], on["repo_path"], note, utc_now_iso()),
     )
     record_event(
-        conn, kind="repo.dep.added",
+        conn,
+        kind="repo.dep.added",
         summary=f"{dep['name']} depends on {on['name']}",
         repo_path=dep["repo_path"],
         payload={"dependency": on["repo_path"], "note": note},
     )
     conn.commit()
-    return {"ok": True, "message": f"{dep['name']} -> {on['name']}",
-            "dependent": dep["repo_path"], "dependency": on["repo_path"]}
+    return {
+        "ok": True,
+        "message": f"{dep['name']} -> {on['name']}",
+        "dependent": dep["repo_path"],
+        "dependency": on["repo_path"],
+    }
 
 
 def repo_dep_list(conn, repo_ref: str | None = None) -> dict:
@@ -6344,13 +7127,28 @@ def _dependents_of(conn, dependency_repo_path: str) -> list[str]:
     return [r["dependent_repo_path"] for r in rows]
 
 
-def repo_diff(conn, repo_ref: str, *, stat_only: bool = False,
-              include_tasks: bool = False, include_impact: bool = False) -> dict:
+def repo_diff(
+    conn,
+    repo_ref: str,
+    *,
+    stat_only: bool = False,
+    include_tasks: bool = False,
+    include_impact: bool = False,
+) -> dict:
     repo = _repo_required(conn, repo_ref)
     if not repo:
         return {"ok": False, "error": f"repo not found: {repo_ref}"}
     rp = repo["repo_path"]
-    args = ["git", "-C", rp, "diff", "--stat" if stat_only else "--patch", "HEAD", "--", "."]
+    args = [
+        "git",
+        "-C",
+        rp,
+        "diff",
+        "--stat" if stat_only else "--patch",
+        "HEAD",
+        "--",
+        ".",
+    ]
     try:
         proc = subprocess.run(args, text=True, capture_output=True)
         diff = proc.stdout if proc.returncode == 0 else ""
@@ -6362,14 +7160,13 @@ def repo_diff(conn, repo_ref: str, *, stat_only: bool = False,
             conn, repo_ref=rp, workflow_status=None, assigned_agent=None
         ).get("tasks", [])
     if include_impact:
-        out["impacted_targets"] = _targets_for_files(
-            conn, rp, _changed_files(rp, None)
-        )
+        out["impacted_targets"] = _targets_for_files(conn, rp, _changed_files(rp, None))
     return out
 
 
-def repo_affected(conn, repo_ref: str, *, since: str | None = None,
-                  target_kind: str | None = None) -> dict:
+def repo_affected(
+    conn, repo_ref: str, *, since: str | None = None, target_kind: str | None = None
+) -> dict:
     repo = _repo_required(conn, repo_ref)
     if not repo:
         return {"ok": False, "error": f"repo not found: {repo_ref}"}
@@ -6404,7 +7201,14 @@ def repo_affected(conn, repo_ref: str, *, since: str | None = None,
     return result
 
 
-def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, only_targets: set | None = None) -> dict:
+def repo_run(
+    conn,
+    repo_ref: str,
+    target_kind: str,
+    *,
+    use_cache: bool = True,
+    only_targets: set | None = None,
+) -> dict:
     repo = _repo_required(conn, repo_ref)
     if not repo:
         return {"ok": False, "error": f"repo not found: {repo_ref}"}
@@ -6436,30 +7240,46 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
     if only_targets is not None:
         targets = [t for t in targets if t["name"] in only_targets]
         if not targets:
-            return {"ok": True, "repo": repo, "results": [],
-                    "message": "no affected targets for this kind"}
+            return {
+                "ok": True,
+                "repo": repo,
+                "results": [],
+                "message": "no affected targets for this kind",
+            }
     for target in targets:
         target = dict(target)
         target["target_kind"] = target_kind
         cache_workdir = relative_repo_path(repo["repo_path"], target["workdir"])
         input_hash = _target_input_hash(target)
         if use_cache and _cached_success(conn, repo["repo_path"], target, input_hash):
-            results.append({
-                "name": target["name"],
-                "target_kind": target_kind,
-                "command": target["command"],
-                "workdir": target["workdir"],
-                "returncode": 0,
-                "status": "cached",
-                "stdout": "",
-                "stderr": "",
-            })
+            results.append(
+                {
+                    "name": target["name"],
+                    "target_kind": target_kind,
+                    "command": target["command"],
+                    "workdir": target["workdir"],
+                    "returncode": 0,
+                    "status": "cached",
+                    "stdout": "",
+                    "stderr": "",
+                }
+            )
             conn.execute(
                 """INSERT INTO target_runs(repo_path,target_kind,target_name,
                    workdir,command,input_hash,returncode,status,duration_ms,ran_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (repo["repo_path"], target_kind, target["name"], cache_workdir,
-                 target["command"], input_hash, 0, "cached", 0, utc_now_iso()),
+                (
+                    repo["repo_path"],
+                    target_kind,
+                    target["name"],
+                    cache_workdir,
+                    target["command"],
+                    input_hash,
+                    0,
+                    "cached",
+                    0,
+                    utc_now_iso(),
+                ),
             )
             record_event(
                 conn,
@@ -6472,31 +7292,45 @@ def repo_run(conn, repo_ref: str, target_kind: str, *, use_cache: bool = True, o
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                target["command"], cwd=target["workdir"], shell=True,
-                text=True, capture_output=True,
+                target["command"],
+                cwd=target["workdir"],
+                shell=True,
+                text=True,
+                capture_output=True,
             )
         except OSError as exc:
             proc = subprocess.CompletedProcess(target["command"], 127, "", str(exc))
         duration_ms = int((time.monotonic() - started) * 1000)
         if proc.returncode != 0:
             ok = False
-        results.append({
-            "name": target["name"],
-            "target_kind": target_kind,
-            "command": target["command"],
-            "workdir": target["workdir"],
-            "returncode": proc.returncode,
-            "status": "ran",
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-        })
+        results.append(
+            {
+                "name": target["name"],
+                "target_kind": target_kind,
+                "command": target["command"],
+                "workdir": target["workdir"],
+                "returncode": proc.returncode,
+                "status": "ran",
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+            }
+        )
         conn.execute(
             """INSERT INTO target_runs(repo_path,target_kind,target_name,
                workdir,command,input_hash,returncode,status,duration_ms,ran_at)
                VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (repo["repo_path"], target_kind, target["name"], cache_workdir,
-             target["command"], input_hash, proc.returncode, "ran",
-             duration_ms, utc_now_iso()),
+            (
+                repo["repo_path"],
+                target_kind,
+                target["name"],
+                cache_workdir,
+                target["command"],
+                input_hash,
+                proc.returncode,
+                "ran",
+                duration_ms,
+                utc_now_iso(),
+            ),
         )
         record_event(
             conn,

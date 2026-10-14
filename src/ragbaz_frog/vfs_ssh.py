@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
-import os
 import posixpath
 import stat
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import BinaryIO, Iterator, Optional, TextIO, Union
+from typing import BinaryIO, TextIO
 
 from .vfs import VFS, VFSStat, register_vfs
 
 try:
     import paramiko
-    from paramiko.sftp_client import SFTPClient
     from paramiko.sftp_attr import SFTPAttributes
+    from paramiko.sftp_client import SFTPClient
 except ImportError:
     paramiko = None
     SFTPClient = None
@@ -27,11 +27,11 @@ class SSHConnection:
     host: str
     username: str
     port: int = 22
-    password: Optional[str] = None
-    key_filename: Optional[str] = None
+    password: str | None = None
+    key_filename: str | None = None
     timeout: int = 30
 
-    def connect(self) -> "paramiko.SSHClient":
+    def connect(self) -> paramiko.SSHClient:
         if paramiko is None:
             raise RuntimeError("paramiko not installed: pip install paramiko")
         client = paramiko.SSHClient()
@@ -59,14 +59,16 @@ class SSHVFS(VFS):
         username: str,
         root: str = "/",
         port: int = 22,
-        password: Optional[str] = None,
-        key_filename: Optional[str] = None,
+        password: str | None = None,
+        key_filename: str | None = None,
         timeout: int = 30,
     ):
-        self._conn = SSHConnection(host, username, port, password, key_filename, timeout)
+        self._conn = SSHConnection(
+            host, username, port, password, key_filename, timeout
+        )
         self._root = root.rstrip("/") or "/"
-        self._client: Optional[paramiko.SSHClient] = None
-        self._sftp: Optional[SFTPClient] = None
+        self._client: paramiko.SSHClient | None = None
+        self._sftp: SFTPClient | None = None
         self._cwd = self._root
 
     def _ensure_connected(self) -> SFTPClient:
@@ -98,7 +100,7 @@ class SSHVFS(VFS):
     def _from_remote(self, path: str) -> str:
         if not path.startswith(self._root):
             return "/" + path.lstrip("/")
-        rel = path[len(self._root):].lstrip("/")
+        rel = path[len(self._root) :].lstrip("/")
         return "/" + rel if rel else "/"
 
     def _stat_from_attr(self, attr: SFTPAttributes, path: str) -> VFSStat:
@@ -137,7 +139,9 @@ class SSHVFS(VFS):
         attr = self._ensure_connected().stat(self._to_remote(path))
         return self._stat_from_attr(attr, path)
 
-    def read_text(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
+    def read_text(
+        self, path: str, encoding: str = "utf-8", errors: str = "strict"
+    ) -> str:
         data = self.read_bytes(path)
         return data.decode(encoding, errors=errors)
 
@@ -215,12 +219,14 @@ class SSHVFS(VFS):
         yield from _walk(remote_root)
 
     # --- Optimized remote discovery methods ---
-    
+
     def _exec_command(self, command: str) -> tuple[int, str, str]:
         """Execute a command on the remote host via SSH."""
         if self._client is None:
             self._client = self._conn.connect()
-        stdin, stdout, stderr = self._client.exec_command(command, timeout=self._conn.timeout)
+        stdin, stdout, stderr = self._client.exec_command(
+            command, timeout=self._conn.timeout
+        )
         exit_status = stdout.channel.recv_exit_status()
         stdout_text = stdout.read().decode("utf-8", errors="replace")
         stderr_text = stderr.read().decode("utf-8", errors="replace")
@@ -228,7 +234,7 @@ class SSHVFS(VFS):
 
     def find_manifests(self, manifests: list[str], root: str = "/") -> list[str]:
         """Find all manifest files using remote find command.
-        
+
         Returns list of VFS paths to manifest files.
         """
         root_remote = self._to_remote(root)
@@ -239,12 +245,16 @@ class SSHVFS(VFS):
         exit_status, stdout, stderr = self._exec_command(cmd)
         if exit_status != 0:
             raise RuntimeError(f"Remote find failed: {stderr}")
-        matches = [self.join(root, line.strip()) for line in stdout.strip().split("\n") if line.strip()]
+        matches = [
+            self.join(root, line.strip())
+            for line in stdout.strip().split("\n")
+            if line.strip()
+        ]
         return matches
 
     def find_git_repos(self, root: str = "/") -> list[str]:
         """Find all git repositories using remote find for .git/HEAD.
-        
+
         Returns list of VFS paths to repository roots.
         """
         root_remote = self._to_remote(root)
@@ -260,12 +270,16 @@ class SSHVFS(VFS):
         exit_status, stdout, stderr = self._exec_command(cmd)
         if exit_status != 0:
             raise RuntimeError(f"Remote git find failed: {stderr}")
-        matches = [self.join("/", line.strip()) for line in stdout.strip().split("\n") if line.strip()]
+        matches = [
+            self.join("/", line.strip())
+            for line in stdout.strip().split("\n")
+            if line.strip()
+        ]
         return matches
 
     def git_ls_files(self, repo_root: str) -> list[str]:
         """List tracked files in a git repository using git ls-files.
-        
+
         Returns list of VFS paths relative to repo root.
         """
         repo_remote = self._to_remote(repo_root)
@@ -277,9 +291,11 @@ class SSHVFS(VFS):
         files = [line.strip() for line in stdout.strip().split("\n") if line.strip()]
         return [self.join(repo_root, f) for f in files]
 
-    def find_manifests_in_repos(self, manifests: list[str], root: str = "/") -> dict[str, list[str]]:
+    def find_manifests_in_repos(
+        self, manifests: list[str], root: str = "/"
+    ) -> dict[str, list[str]]:
         """Find manifest files grouped by their git repository root.
-        
+
         Returns dict mapping repo_root -> list of manifest paths within that repo.
         """
         # First find all git repos
@@ -289,8 +305,7 @@ class SSHVFS(VFS):
             # For each repo, find manifests within it using git ls-files
             tracked_files = self.git_ls_files(repo_root)
             manifests_in_repo = [
-                f for f in tracked_files 
-                if any(f.endswith(m) for m in manifests)
+                f for f in tracked_files if any(f.endswith(m) for m in manifests)
             ]
             if manifests_in_repo:
                 result[repo_root] = manifests_in_repo
@@ -308,8 +323,11 @@ class SSHVFS(VFS):
         return fnmatch.fnmatch(name, pattern)
 
     @contextlib.contextmanager
-    def open(self, path: str, mode: str = "r", encoding: Optional[str] = None) -> Union[TextIO, BinaryIO]:
+    def open(
+        self, path: str, mode: str = "r", encoding: str | None = None
+    ) -> TextIO | BinaryIO:
         import io
+
         sftp = self._ensure_connected()
         remote = self._to_remote(path)
         if "b" in mode:

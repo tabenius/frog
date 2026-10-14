@@ -4,11 +4,8 @@ import json
 import os
 import sqlite3
 from pathlib import Path
-from typing import Optional
 
-from ragbaz_frog import DEFAULT_CONFIG_PATH
 from ragbaz_frog import store
-
 
 # Config file search order (first match wins)
 # 1. Explicit --config flag
@@ -80,16 +77,23 @@ def _migrate_legacy_config() -> None:
     # Write new config as YAML
     try:
         import yaml
-        NEW_CONFIG_YAML.write_text(yaml.safe_dump(legacy_data, sort_keys=True, indent=2), encoding="utf-8")
+
+        NEW_CONFIG_YAML.write_text(
+            yaml.safe_dump(legacy_data, sort_keys=True, indent=2), encoding="utf-8"
+        )
     except ImportError:
         # Fallback to JSON if PyYAML not available
-        NEW_CONFIG_JSON.write_text(json.dumps(legacy_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        NEW_CONFIG_JSON.write_text(
+            json.dumps(legacy_data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
     # Backup legacy config
     backup = LEGACY_CONFIG_PATH.with_suffix(".json.bak")
     LEGACY_CONFIG_PATH.rename(backup)
 
-    print(f"[frog] Migrated config: {LEGACY_CONFIG_PATH} -> {NEW_CONFIG_YAML if NEW_CONFIG_YAML.exists() else NEW_CONFIG_JSON}")
+    print(
+        f"[frog] Migrated config: {LEGACY_CONFIG_PATH} -> {NEW_CONFIG_YAML if NEW_CONFIG_YAML.exists() else NEW_CONFIG_JSON}"
+    )
     print(f"[frog] Legacy config backed up to: {backup}")
 
 
@@ -99,6 +103,7 @@ def _load_config_file(path: Path) -> dict:
     if path.suffix in (".yaml", ".yml"):
         try:
             import yaml
+
             return yaml.safe_load(content) or {}
         except ImportError:
             raise RuntimeError(
@@ -114,14 +119,19 @@ def _write_config_file(path: Path, payload: dict) -> None:
     if path.suffix in (".yaml", ".yml"):
         try:
             import yaml
-            path.write_text(yaml.safe_dump(payload, sort_keys=True, indent=2), encoding="utf-8")
+
+            path.write_text(
+                yaml.safe_dump(payload, sort_keys=True, indent=2), encoding="utf-8"
+            )
         except ImportError:
             raise RuntimeError(
                 f"Config file {path} is YAML but PyYAML is not installed. "
                 "Install with: pip install pyyaml"
             )
     else:
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
 
 def infer_local_root() -> str:
@@ -201,7 +211,7 @@ def load_config(path: str | None = None) -> dict:
 
 
 def workspace_frog_bin(root: str) -> str:
-    return str((Path(root).expanduser().resolve() / "ragbaz-frog" / "bin" / "frog"))
+    return str(Path(root).expanduser().resolve() / "ragbaz-frog" / "bin" / "frog")
 
 
 def resolve_workspace(name: str | None, path: str | None = None) -> dict | None:
@@ -212,7 +222,9 @@ def resolve_workspace(name: str | None, path: str | None = None) -> dict | None:
     workspace = data["workspaces"].get(workspace_name)
     if not workspace:
         return None
-    host = data["hosts"].get(workspace["host"], {"name": workspace["host"], "transport": "unknown"})
+    host = data["hosts"].get(
+        workspace["host"], {"name": workspace["host"], "transport": "unknown"}
+    )
     return {
         **workspace,
         "name": workspace_name,
@@ -274,12 +286,20 @@ def add_host(
         "notes": notes,
     }
     saved_to = save_config(data, path)
-    return {"ok": True, "message": f"configured host {name}", "host": data["hosts"][name], "config_path": saved_to}
+    return {
+        "ok": True,
+        "message": f"configured host {name}",
+        "host": data["hosts"][name],
+        "config_path": saved_to,
+    }
 
 
 def list_hosts(path: str | None = None) -> dict:
     data = load_config(path)
-    return {"ok": True, "hosts": [data["hosts"][name] for name in sorted(data["hosts"].keys())]}
+    return {
+        "ok": True,
+        "hosts": [data["hosts"][name] for name in sorted(data["hosts"].keys())],
+    }
 
 
 def add_workspace(
@@ -306,7 +326,9 @@ def add_workspace(
     if db_uri:
         workspace_data["db_uri"] = db_uri
     elif data["hosts"][host_name].get("transport") != "local":
-        workspace_data["db_uri"] = f"ssh://{data['hosts'][host_name].get('ssh_target', '')}{root}"
+        workspace_data["db_uri"] = (
+            f"ssh://{data['hosts'][host_name].get('ssh_target', '')}{root}"
+        )
     data["workspaces"][name] = workspace_data
     if use_default or not data.get("current_workspace"):
         data["current_workspace"] = name
@@ -328,7 +350,9 @@ def list_workspaces(path: str | None = None) -> dict:
         workspace = dict(data["workspaces"][name])
         workspace["is_current"] = data.get("current_workspace") == name
         workspace["is_coordinator"] = coordinator_workspace == name
-        workspace.update(_workspace_activity(workspace, data["hosts"].get(workspace["host"], {})))
+        workspace.update(
+            _workspace_activity(workspace, data["hosts"].get(workspace["host"], {}))
+        )
         items.append(workspace)
     return {
         "ok": True,
@@ -344,7 +368,12 @@ def use_workspace(name: str, path: str | None = None) -> dict:
         return {"ok": False, "error": f"unknown workspace: {name}"}
     data["current_workspace"] = name
     saved_to = save_config(data, path)
-    return {"ok": True, "message": f"selected workspace {name}", "current_workspace": name, "config_path": saved_to}
+    return {
+        "ok": True,
+        "message": f"selected workspace {name}",
+        "current_workspace": name,
+        "config_path": saved_to,
+    }
 
 
 def info(path: str | None = None) -> dict:
@@ -365,19 +394,21 @@ def info(path: str | None = None) -> dict:
 
 def path_setup(shell: str, path: str | None = None) -> dict:
     workspace = resolve_workspace(None, path)
-    frog_bin = workspace_frog_bin(workspace["root"] if workspace else infer_local_root())
+    frog_bin = workspace_frog_bin(
+        workspace["root"] if workspace else infer_local_root()
+    )
     bin_dir = str(Path(frog_bin).parent)
     if shell == "fish":
         lines = [
-            f"mkdir -p ~/.config/fish/conf.d",
-            f'printf \'set -gx PATH "{bin_dir}" $PATH\\n\' > ~/.config/fish/conf.d/ragbaz-frog-path.fish',
-            f"source ~/.config/fish/conf.d/ragbaz-frog-path.fish",
+            "mkdir -p ~/.config/fish/conf.d",
+            f"printf 'set -gx PATH \"{bin_dir}\" $PATH\\n' > ~/.config/fish/conf.d/ragbaz-frog-path.fish",
+            "source ~/.config/fish/conf.d/ragbaz-frog-path.fish",
         ]
     elif shell == "bash":
         lines = [
-            f"mkdir -p ~/.config/ragbaz-frog",
+            "mkdir -p ~/.config/ragbaz-frog",
             f"grep -qxF 'export PATH=\"{bin_dir}:$PATH\"' ~/.bashrc || echo 'export PATH=\"{bin_dir}:$PATH\"' >> ~/.bashrc",
-            f"source ~/.bashrc",
+            "source ~/.bashrc",
         ]
     else:
         return {"ok": False, "error": f"unsupported shell: {shell}"}
@@ -400,7 +431,9 @@ def _workspace_activity(workspace: dict, host: dict) -> dict:
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        repo_count = conn.execute("SELECT COUNT(*) AS count FROM repos").fetchone()["count"]
+        repo_count = conn.execute("SELECT COUNT(*) AS count FROM repos").fetchone()[
+            "count"
+        ]
         conn.close()
     except sqlite3.Error:
         pass

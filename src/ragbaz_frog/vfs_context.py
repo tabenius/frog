@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import contextlib
-import os
-import threading
-from typing import Optional
 
-from .vfs import VFS, default_vfs, create_vfs, parse_vfs_uri
 from .config import resolve_workspace
+from .vfs import VFS, create_vfs, default_vfs
 
-_vfs_context: contextlib.ContextVar[Optional[VFS]] = contextlib.ContextVar("frog_vfs", default=None)
+_vfs_context: contextlib.ContextVar[VFS | None] = contextlib.ContextVar(
+    "frog_vfs", default=None
+)
 
 
 def current_vfs() -> VFS:
@@ -22,7 +21,9 @@ def current_vfs() -> VFS:
 
 
 @contextlib.contextmanager
-def workspace_vfs(workspace_name: Optional[str] = None, config_path: Optional[str] = None) -> VFS:
+def workspace_vfs(
+    workspace_name: str | None = None, config_path: str | None = None
+) -> VFS:
     """Context manager that sets up VFS for a workspace."""
     workspace = resolve_workspace(workspace_name, config_path)
     db_uri = workspace.get("db_uri")
@@ -46,7 +47,7 @@ def set_vfs(vfs: VFS) -> None:
     _vfs_context.set(vfs)
 
 
-def get_db_path(vfs: Optional[VFS] = None) -> str:
+def get_db_path(vfs: VFS | None = None) -> str:
     """Get the database path from the current workspace or VFS."""
     vfs = vfs or current_vfs()
     workspace = resolve_workspace(None, None)
@@ -54,4 +55,4 @@ def get_db_path(vfs: Optional[VFS] = None) -> str:
 
 
 # Re-export for convenience
-from . import DEFAULT_DB_PATH, DEFAULT_CONFIG_PATH
+from . import DEFAULT_DB_PATH

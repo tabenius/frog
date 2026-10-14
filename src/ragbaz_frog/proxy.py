@@ -1,4 +1,7 @@
-import socket, threading, logging, time, signal, sys
+import logging
+import signal
+import socket
+import threading
 
 logger = logging.getLogger("frog.proxy")
 
@@ -19,9 +22,13 @@ def _forward(src, dst, label):
         pass
 
 
-def start(bind_addr: str = DEFAULT_BIND, bind_port: int = DEFAULT_PORT,
-          target_host: str = DEFAULT_TARGET, target_port: int = DEFAULT_TARGET_PORT,
-          shutdown_event: threading.Event = None):
+def start(
+    bind_addr: str = DEFAULT_BIND,
+    bind_port: int = DEFAULT_PORT,
+    target_host: str = DEFAULT_TARGET,
+    target_port: int = DEFAULT_TARGET_PORT,
+    shutdown_event: threading.Event = None,
+):
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -32,7 +39,9 @@ def start(bind_addr: str = DEFAULT_BIND, bind_port: int = DEFAULT_PORT,
         return
     s.listen(10)
     s.settimeout(1.0)
-    logger.info("Proxy listening %s:%d -> %s:%d", bind_addr, bind_port, target_host, target_port)
+    logger.info(
+        "Proxy listening %s:%d -> %s:%d", bind_addr, bind_port, target_host, target_port
+    )
 
     running = True
     while running:
@@ -41,9 +50,11 @@ def start(bind_addr: str = DEFAULT_BIND, bind_port: int = DEFAULT_PORT,
         try:
             conn, addr = s.accept()
             logger.debug("Connection from %s", addr)
-            t = threading.Thread(target=_handle, args=(conn, target_host, target_port), daemon=True)
+            t = threading.Thread(
+                target=_handle, args=(conn, target_host, target_port), daemon=True
+            )
             t.start()
-        except socket.timeout:
+        except TimeoutError:
             continue
         except OSError:
             break
@@ -53,7 +64,7 @@ def start(bind_addr: str = DEFAULT_BIND, bind_port: int = DEFAULT_PORT,
 def _handle(conn, target_host, target_port):
     try:
         remote = socket.create_connection((target_host, target_port), timeout=10)
-    except (socket.timeout, ConnectionRefusedError, OSError) as e:
+    except (TimeoutError, ConnectionRefusedError, OSError) as e:
         logger.warning("Cannot connect to %s:%d: %s", target_host, target_port, e)
         conn.close()
         return
@@ -67,8 +78,12 @@ def _handle(conn, target_host, target_port):
     remote.close()
 
 
-def serve_forever(bind_addr=DEFAULT_BIND, bind_port=DEFAULT_PORT,
-                  target_host=DEFAULT_TARGET, target_port=DEFAULT_TARGET_PORT):
+def serve_forever(
+    bind_addr=DEFAULT_BIND,
+    bind_port=DEFAULT_PORT,
+    target_host=DEFAULT_TARGET,
+    target_port=DEFAULT_TARGET_PORT,
+):
     stop = threading.Event()
 
     def _signal(signum, frame):
@@ -82,6 +97,7 @@ def serve_forever(bind_addr=DEFAULT_BIND, bind_port=DEFAULT_PORT,
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+    )
     serve_forever()

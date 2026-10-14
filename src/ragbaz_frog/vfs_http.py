@@ -8,8 +8,9 @@ import posixpath
 import stat
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from datetime import datetime
-from typing import BinaryIO, Iterator, Optional, TextIO, Union
+from typing import BinaryIO, TextIO
 
 from .vfs import VFS, VFSStat, register_vfs
 
@@ -23,22 +24,29 @@ class HTTPVFS(VFS):
         self,
         uri: str,
         base_url: str,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        headers: Optional[dict] = None,
+        username: str | None = None,
+        password: str | None = None,
+        headers: dict | None = None,
         timeout: int = 30,
     ):
         self._base_url = base_url.rstrip("/")
         self._auth = None
         if username and password:
             import base64
+
             credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
             self._auth = f"Basic {credentials}"
         self._headers = headers or {}
         self._timeout = timeout
         self._cwd = "/"
 
-    def _make_request(self, method: str, path: str, data: Optional[bytes] = None, headers: Optional[dict] = None) -> urllib.request.urlopen:
+    def _make_request(
+        self,
+        method: str,
+        path: str,
+        data: bytes | None = None,
+        headers: dict | None = None,
+    ) -> urllib.request.urlopen:
         url = self._base_url + path
         req_headers = dict(self._headers)
         if headers:
@@ -79,12 +87,17 @@ class HTTPVFS(VFS):
                 mtime = datetime.now().timestamp()
                 if last_modified:
                     from email.utils import parsedate_to_datetime
+
                     mtime = parsedate_to_datetime(last_modified).timestamp()
                 return VFSStat(size, mtime, stat.S_IFREG | 0o644, False, True)
         except Exception:
-            return VFSStat(0, datetime.now().timestamp(), stat.S_IFREG | 0o644, False, True)
+            return VFSStat(
+                0, datetime.now().timestamp(), stat.S_IFREG | 0o644, False, True
+            )
 
-    def read_text(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
+    def read_text(
+        self, path: str, encoding: str = "utf-8", errors: str = "strict"
+    ) -> str:
         data = self.read_bytes(path)
         return data.decode(encoding, errors=errors)
 
@@ -117,8 +130,11 @@ class HTTPVFS(VFS):
         return []
 
     @contextlib.contextmanager
-    def open(self, path: str, mode: str = "r", encoding: Optional[str] = None) -> Union[TextIO, BinaryIO]:
+    def open(
+        self, path: str, mode: str = "r", encoding: str | None = None
+    ) -> TextIO | BinaryIO:
         import io
+
         if "w" in mode or "a" in mode or "+" in mode:
             raise NotImplementedError("HTTPVFS is read-only")
         data = self.read_bytes(path)
@@ -175,13 +191,15 @@ class WebDAVVFS(VFS):
 
         self._host = host.rstrip("/")
         self._root = root.rstrip("/") or "/"
-        self._client = webdav_client.Client({
-            "webdav_hostname": self._host,
-            "webdav_login": username,
-            "webdav_password": password,
-            "webdav_timeout": timeout,
-            "webdav_root": self._root,
-        })
+        self._client = webdav_client.Client(
+            {
+                "webdav_hostname": self._host,
+                "webdav_login": username,
+                "webdav_password": password,
+                "webdav_timeout": timeout,
+                "webdav_root": self._root,
+            }
+        )
         self._cwd = self._root
 
     def _to_remote(self, path: str) -> str:
@@ -193,7 +211,7 @@ class WebDAVVFS(VFS):
     def _from_remote(self, path: str) -> str:
         if not path.startswith(self._root):
             return "/" + path.lstrip("/")
-        rel = path[len(self._root):].lstrip("/")
+        rel = path[len(self._root) :].lstrip("/")
         return "/" + rel if rel else "/"
 
     def exists(self, path: str) -> bool:
@@ -231,14 +249,19 @@ class WebDAVVFS(VFS):
                 is_file=not is_dir,
             )
         except Exception:
-            return VFSStat(0, datetime.now().timestamp(), stat.S_IFREG | 0o644, False, True)
+            return VFSStat(
+                0, datetime.now().timestamp(), stat.S_IFREG | 0o644, False, True
+            )
 
-    def read_text(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
+    def read_text(
+        self, path: str, encoding: str = "utf-8", errors: str = "strict"
+    ) -> str:
         data = self.read_bytes(path)
         return data.decode(encoding, errors=errors)
 
     def read_bytes(self, path: str) -> bytes:
         import io
+
         remote = self._to_remote(path)
         buffer = io.BytesIO()
         self._client.download_from(remote, buffer)
@@ -249,6 +272,7 @@ class WebDAVVFS(VFS):
 
     def write_bytes(self, path: str, content: bytes) -> None:
         import io
+
         remote = self._to_remote(path)
         parent = posixpath.dirname(remote)
         if parent and parent != self._root:
@@ -325,8 +349,11 @@ class WebDAVVFS(VFS):
         return matches
 
     @contextlib.contextmanager
-    def open(self, path: str, mode: str = "r", encoding: Optional[str] = None) -> Union[TextIO, BinaryIO]:
+    def open(
+        self, path: str, mode: str = "r", encoding: str | None = None
+    ) -> TextIO | BinaryIO:
         import io
+
         if "b" in mode:
             buffer = io.BytesIO()
             if "r" in mode:
@@ -341,7 +368,9 @@ class WebDAVVFS(VFS):
             if "r" in mode:
                 self._client.download_from(self._to_remote(path), buffer)
                 buffer.seek(0)
-            wrapper = io.TextIOWrapper(buffer, encoding=encoding or "utf-8", write_through=True)
+            wrapper = io.TextIOWrapper(
+                buffer, encoding=encoding or "utf-8", write_through=True
+            )
             yield wrapper
             if "w" in mode or "a" in mode:
                 wrapper.flush()
