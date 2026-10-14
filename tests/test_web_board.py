@@ -66,6 +66,21 @@ class WebBoardTests(unittest.TestCase):
                 web_board.projection(path)
             self.assertFalse(path.exists())
 
+    def test_read_connections_explicitly_enable_sqlite_uri_mode(self):
+        connect = sqlite3.connect
+        def checked(path, *args, **kwargs):
+            self.assertTrue(kwargs.get('uri'), 'SQLite must interpret mode=ro on every build')
+            self.assertIn('?mode=ro', str(path))
+            return connect(path, *args, **kwargs)
+        with patch.object(web_board.sqlite3, 'connect', side_effect=checked):
+            web_board.projection(self.db)
+            web_board.repository_story(self.db, 'frog')
+            source = web_board.DatabaseSource(self.db)
+            try:
+                source.version()
+            finally:
+                source.close()
+
     def test_repository_story_reads_bounded_description_and_git_without_inferred_completion(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

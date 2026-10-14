@@ -36,7 +36,7 @@ ASSETS = {"/": ("board.html", "text/html; charset=utf-8"),
 def projection(db_path: str | Path) -> dict:
     """Capture one consistent SQLite read transaction, with explicit fields only."""
     path = Path(db_path).expanduser().resolve()
-    conn = sqlite3.connect(path.as_uri() + "?mode=ro", timeout=5)
+    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA query_only = ON")
@@ -81,7 +81,7 @@ def projection(db_path: str | Path) -> dict:
 
 def repository_story(db_path: str | Path, repo_id: str) -> dict:
     """Bounded, on-demand local README/Git history; never infer task completion."""
-    conn = sqlite3.connect(Path(db_path).expanduser().resolve().as_uri() + "?mode=ro", timeout=5)
+    conn = sqlite3.connect(Path(db_path).expanduser().resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
     try:
         row = conn.execute("SELECT repo_path, name FROM repos WHERE name=? AND COALESCE(status,'active') != 'archived'", (repo_id,)).fetchone()
     finally:
@@ -158,7 +158,7 @@ class DatabaseSource(SnapshotSource):
             # stays the same; reconnection alone would hide other writers.
             if self._connection is not None:
                 self._connection.close()
-            self._connection = sqlite3.connect(path.as_uri() + "?mode=ro", timeout=2)
+            self._connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)
             self._connection.execute("PRAGMA query_only=ON")
             self._identity = identity
         return identity, self._connection.execute("PRAGMA data_version").fetchone()[0]
