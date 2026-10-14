@@ -5,6 +5,10 @@
 It keeps human-readable rules in files and shared machine-readable coordination
 state in `/data/src/AGENTS.db`.
 
+- [Live read-only web board and repository Start view](docs/WEB-KANBAN.md)
+- [Reusable post-commit hooks: webhooks and local commands](docs/HOOKS.md)
+- [Experimental Rust model, WIT and multi-workspace Cloudflare D1](docs/RUST-D1-MODEL.md)
+
 ## Related projects: WeftMark and Sylvae
 
 Workspace attestation tooling and its historical bundle are owned by WeftMark:
@@ -83,6 +87,11 @@ On first run, `frog` bootstraps a local config at
 from the installed tree.
 
 ## Command surface
+
+Live read-only web board: `frog web serve` (literal loopback) and
+`frog web snapshot` (private JSON). It projects the same task/dependency lanes as
+the TUI, with filters, task inspection, and explicit freshness. See
+[web kanban contract and fleet examples](docs/WEB-KANBAN.md).
 
 Strict grammar: `frog <command> <subcommand> [args]`. No positional
 guessing — there is no bare `frog <repo> <action>` or `frog <action>`

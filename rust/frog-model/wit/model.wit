@@ -1,0 +1,34 @@
+package frog:model@0.1.0;
+
+interface types {
+    record register-repo { repo-id: string, title: string }
+    record create-task { repo-id: string, task-id: string, title: string, priority: u8 }
+    record claim-task { task-id: string, expected-revision: u32 }
+    record transition-task { task-id: string, expected-revision: u32, status: string }
+    record board-query { repo-id: option<string>, limit: u32 }
+    record event-query { after: string, limit: u32 }
+    variant command {
+        register-repo(register-repo), create-task(create-task), claim-task(claim-task),
+        transition-task(transition-task), board(board-query), repositories(u32), events(event-query)
+    }
+    record request { workspace-id: string, actor: string, operation-id: string, command: command }
+    variant parameter { null, text(string), integer(s64) }
+    record statement { sql: string, params: list<parameter> }
+    record plan { schema: string, read-only: bool, result-kind: string, statements: list<statement> }
+}
+
+interface tracing {
+    // Host counter only; no request arguments, tokens, task titles or paths.
+    counter: func(name: string, value: u64);
+}
+
+interface planner {
+    use types.{request, plan};
+    // Pure validation/planning. Host auth and atomic execution are mandatory.
+    plan-operation: func(input: request) -> result<plan, string>;
+}
+
+world model-planner {
+    import tracing;
+    export planner;
+}

@@ -1,0 +1,12 @@
+{
+  "name": "frog-model-d1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:model": "node scripts/build-model.mjs",
+    "test": "node --test --no-warnings test/*.test.mjs",
+    "dry-run": "wrangler deploy --dry-run --outdir build/worker",
+    "test:runtime": "node --test --no-warnings integration/runtime.test.mjs"
+  },
+  "devDependencies": { "wrangler": "4.150.0", "miniflare": "5.20261006.2-beta" }
+}
