@@ -1,4 +1,19 @@
 const identifier = /^[A-Za-z0-9._:-]{1,120}$/
+const WRITES = new Set(['register_repo','create_task','claim_task','transition_task','cancel_task','add_dependency','remove_dependency'])
+// SQLite returns these as JSON text; D1 does the same, so decode them here
+// rather than making every consumer know the storage encoding.
+const JSON_LIST_COLUMNS = new Set(['unmet_dependencies','dependencies','blocks'])
+function decodeRow(row) {
+  const decoded = {}
+  for (const [name, value] of Object.entries(row)) {
+    if (!JSON_LIST_COLUMNS.has(name)) { decoded[name] = value; continue }
+    let list
+    try { list = JSON.parse(value) } catch { return null }
+    if (!Array.isArray(list) || list.some(item => typeof item !== 'string')) return null
+    decoded[name] = list
+  }
+  return decoded
+}
 const reply = (status, body) => Response.json(body, { status, headers: {
   'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
   'Cross-Origin-Resource-Policy': 'same-origin', 'Referrer-Policy': 'no-referrer',
@@ -46,7 +61,7 @@ export function createWorker(planOperation) {
     if (origin && origin !== url.origin) return reply(403, { error: 'foreign_origin' })
     const client = await principal(request, env)
     if (!client) return reply(401, { error: 'authentication_required' })
-    const route = /^\/v1\/workspaces\/([A-Za-z0-9._:-]{1,120})\/(board|repositories|events|operations)$/.exec(url.pathname)
+    const route = /^\/v1\/workspaces\/([A-Za-z0-9._:-]{1,120})\/(board|tasks|repositories|events|operations)$/.exec(url.pathname)
     if (!route) return reply(404, { error: 'not_found' })
     const [, workspace, resource] = route
     const role = Object.hasOwn(client.workspaces, workspace) ? client.workspaces[workspace] : null
@@ -58,15 +73,17 @@ export function createWorker(planOperation) {
       try {
         const body = await boundedJson(request)
         if (!body || Array.isArray(body) || typeof body !== 'object' || Object.keys(body).some(key => !['operation_id','command'].includes(key))) throw Error('invalid_request')
-        if (!['register_repo','create_task','claim_task','transition_task'].includes(body.command?.kind)) throw Error('invalid_request')
+        if (!WRITES.has(body.command?.kind)) throw Error('invalid_request')
         input = { workspace_id: workspace, actor: client.actor, operation_id: body.operation_id, command: body.command }
       } catch (error) { return reply(error.message === 'request_too_large' ? 413 : 400, { error: 'invalid_request' }) }
     } else {
       if (request.method !== 'GET') return reply(405, { error: 'method_not_allowed' })
       const limit = Number(url.searchParams.get('limit') || '100')
-      const command = resource === 'board' ? { kind: 'board', repo_id: url.searchParams.get('repo'), limit }
-        : resource === 'events' ? { kind: 'events', after: url.searchParams.get('after') || '0', limit }
-          : { kind: 'repositories', limit }
+      const after = url.searchParams.get('after')
+      const command = resource === 'board' ? { kind: 'board', repo_id: url.searchParams.get('repo'), limit, after: after || null }
+        : resource === 'events' ? { kind: 'events', after: after || '0', limit }
+          : resource === 'tasks' ? { kind: 'describe_task', task_id: url.searchParams.get('task') || '' }
+            : { kind: 'repositories', limit }
       input = { workspace_id: workspace, actor: client.actor, operation_id: 'query', command }
     }
     let plan
@@ -80,7 +97,9 @@ export function createWorker(planOperation) {
       // D1 batch is a transaction, including the operation receipt and event.
       const results = await db.batch(statements)
       if (results.some(result => result.success === false)) throw Error('batch_failed')
-      const items = results.at(-1)?.results || []
+      const rows = results.at(-1)?.results || []
+      const items = rows.map(decodeRow)
+      if (items.some(row => row === null)) throw Error('unreadable_row')
       const conflict = plan.result_kind === 'mutation' && items[0]?.status !== 'applied'
       return reply(conflict ? 409 : 200, { schema: 'frog.model-result.v1', workspace_id: workspace, kind: plan.result_kind, items })
     } catch { return reply(503, { error: 'storage_unavailable' }) }

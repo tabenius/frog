@@ -5,11 +5,15 @@ interface types {
     record create-task { repo-id: string, task-id: string, title: string, priority: u8 }
     record claim-task { task-id: string, expected-revision: u32 }
     record transition-task { task-id: string, expected-revision: u32, status: string }
-    record board-query { repo-id: option<string>, limit: u32 }
+    record cancel-task { task-id: string, expected-revision: u32 }
+    record dependency { task-id: string, depends-on: string }
+    record board-query { repo-id: option<string>, limit: u32, after: option<string> }
     record event-query { after: string, limit: u32 }
     variant command {
         register-repo(register-repo), create-task(create-task), claim-task(claim-task),
-        transition-task(transition-task), board(board-query), repositories(u32), events(event-query)
+        transition-task(transition-task), cancel-task(cancel-task),
+        add-dependency(dependency), remove-dependency(dependency),
+        describe-task(string), board(board-query), repositories(u32), events(event-query)
     }
     record request { workspace-id: string, actor: string, operation-id: string, command: command }
     variant parameter { null, text(string), integer(s64) }

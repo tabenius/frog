@@ -10,6 +10,7 @@ const wasm = readFileSync(new URL('../../../rust/frog-model/target/wasm32-unknow
 const plan = wasmPlanner(new WebAssembly.Instance(new WebAssembly.Module(wasm), {}))
 const worker = createWorker(plan)
 const token = 'local-test-token-never-deployed-123456789'
+const secondToken = 'local-second-token-never-deployed-12345'
 const viewerToken = 'local-viewer-token-never-deployed-123456'
 const hash = async value => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map(v => v.toString(16).padStart(2,'0')).join('')
 let raw, env
@@ -32,6 +33,7 @@ beforeEach(async () => {
   } }
   env = { FROG_CLIENTS: JSON.stringify([
     { actor: 'alice', token_sha256: await hash(token), workspaces: { alpha: 'writer' } },
+    { actor: 'bob', token_sha256: await hash(secondToken), workspaces: { alpha: 'writer' } },
     { actor: 'viewer', token_sha256: await hash(viewerToken), workspaces: { alpha: 'viewer', beta: 'writer' } },
   ]), DB: { withSession(constraint) { assert.equal(constraint, 'first-primary'); return db } } }
 })
@@ -102,4 +104,38 @@ test('review and published are not done; advancing requires matching owner/revis
     assert.equal((await mutate(status,{kind:'transition_task',task_id:'one',expected_revision:revision,status})).status,200)
     const board=await (await call('board')).json();assert.equal(board.items[0].lane,status==='done'?'done':'in_progress')
   }
+})
+
+test('dependencies arrive as real lists, gate claims and unblock when met', async () => {
+  await seed()
+  await mutate('two',{kind:'create_task',repo_id:'frog',task_id:'two',title:'Two',priority:2})
+  assert.equal((await mutate('ghost',{kind:'add_dependency',task_id:'one',depends_on:'absent'})).status,409)
+  assert.equal((await mutate('link',{kind:'add_dependency',task_id:'one',depends_on:'two'})).status,200)
+  const board=await (await call('board')).json()
+  const one=board.items.find(task=>task.id==='one')
+  assert.deepEqual(one.unmet_dependencies,['two']);assert.deepEqual(one.dependencies,['two']);assert.equal(one.lane,'blocked')
+  assert.deepEqual(board.items.find(task=>task.id==='two').blocks,['one'])
+  assert.equal((await mutate('blocked',{kind:'claim_task',task_id:'one',expected_revision:0})).status,409)
+  // Removing the edge twice is applied both times but records one change only.
+  assert.equal((await mutate('unlink',{kind:'remove_dependency',task_id:'one',depends_on:'two'})).status,200)
+  assert.equal((await mutate('unlink-again',{kind:'remove_dependency',task_id:'one',depends_on:'two'})).status,200)
+  const events=await (await call('events')).json()
+  assert.equal(events.items.filter(event=>event.kind==='task.dependency_removed').length,1)
+  assert.equal((await mutate('claim-now',{kind:'claim_task',task_id:'one',expected_revision:0})).status,200)
+})
+
+test('cancellation, single-task reads and board paging', async () => {
+  await seed()
+  assert.equal((await mutate('claim',{kind:'claim_task',task_id:'one',expected_revision:0})).status,200)
+  assert.equal((await mutate('foreign',{kind:'cancel_task',task_id:'one',expected_revision:1},secondToken)).status,409)
+  assert.equal((await mutate('cancel',{kind:'cancel_task',task_id:'one',expected_revision:1})).status,200)
+  const task=await (await call('tasks?task=one')).json()
+  assert.equal(task.items[0].status,'cancelled');assert.deepEqual(task.items[0].dependencies,[])
+  await mutate('b',{kind:'create_task',repo_id:'frog',task_id:'b',title:'B',priority:1})
+  const page=await (await call('board?limit=1')).json()
+  assert.equal(page.items.length,1)
+  const next=await (await call(`board?limit=1&after=${encodeURIComponent(`${page.items[0].priority}:${page.items[0].id}`)}`)).json()
+  assert.equal(next.items.length,1);assert.notEqual(next.items[0].id,page.items[0].id)
+  assert.equal((await call('board?limit=1&after=nonsense')).status,400)
+  assert.equal((await call('tasks')).status,400)
 })

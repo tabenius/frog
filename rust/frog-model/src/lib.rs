@@ -6,6 +6,14 @@ use sha2::{Digest, Sha256};
 
 pub const CONTRACT: &str = "frog.model.v1";
 pub const MIGRATION: &str = include_str!("../sql/0001_model.sql");
+/// Priorities the model accepts; Frog's legacy vocabulary is a host concern.
+const PRIORITIES: [u8; 4] = [0, 1, 2, 3];
+/// Report the next workflow state; never a leap, never out of reported order.
+const TRANSITIONS: [(&str, &str); 3] = [
+    ("review", "in_progress"),
+    ("published", "review"),
+    ("done", "published"),
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +37,15 @@ pub enum Command {
         title: String,
         priority: u8,
     },
+    AddDependency {
+        task_id: String,
+        depends_on: String,
+    },
+    RemoveDependency {
+        task_id: String,
+        depends_on: String,
+    },
+    /// Block the task once. Unblocking is a remove_dependency, not a flag.
     ClaimTask {
         task_id: String,
         expected_revision: u32,
@@ -38,9 +55,17 @@ pub enum Command {
         expected_revision: u32,
         status: String,
     },
+    CancelTask {
+        task_id: String,
+        expected_revision: u32,
+    },
+    DescribeTask {
+        task_id: String,
+    },
     Board {
         repo_id: Option<String>,
         limit: u32,
+        after: Option<String>,
     },
     Repositories {
         limit: u32,
@@ -71,6 +96,15 @@ fn statement(sql: &str, params: Vec<Value>) -> Statement {
         params,
     }
 }
+fn ok(read_only: bool, result_kind: &str, statements: Vec<Statement>) -> Result<Plan, String> {
+    Ok(Plan {
+        schema: CONTRACT.into(),
+        read_only,
+        result_kind: result_kind.into(),
+        statements,
+    })
+}
+
 fn id(value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 120
@@ -78,7 +112,7 @@ fn id(value: &str) -> Result<(), String> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
     {
-        return Err("IDs must be 1–120 ASCII identifier characters".into());
+        return Err("IDs must be 1-120 ASCII identifier characters".into());
     }
     Ok(())
 }
@@ -90,134 +124,343 @@ fn title(value: &str) -> Result<(), String> {
 }
 fn limit(value: u32) -> Result<(), String> {
     if !(1..=200).contains(&value) {
-        return Err("limit must be 1–200".into());
+        return Err("limit must be 1-200".into());
     }
     Ok(())
+}
+fn count(value: &str) -> Result<u64, String> {
+    if value.is_empty() || value.len() > 19 || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("invalid event cursor".into());
+    }
+    value.parse().map_err(|_| "invalid event cursor".into())
+}
+/// Opaque, validated keyset cursor: "<priority>:<task_id>".
+fn board_cursor(value: &str) -> Result<(u8, String), String> {
+    let (priority, task) = value.split_once(':').ok_or("invalid board cursor")?;
+    let priority: u8 = priority.parse().map_err(|_| "invalid board cursor")?;
+    if !PRIORITIES.contains(&priority) {
+        return Err("invalid board cursor".into());
+    }
+    id(task)?;
+    Ok((priority, task.into()))
+}
+
+/// Board rows, including the dependency context the renderer links and explains.
+const BOARD_SELECT: &str = "SELECT t.task_id AS id,t.repo_id AS repository,t.title,t.priority,t.status,t.assignee,\
+t.revision,t.updated_at,t.status_observed_at,\
+CASE WHEN t.status IN ('done','cancelled') THEN 'done' \
+WHEN t.status IN ('in_progress','review','published') THEN 'in_progress' \
+WHEN EXISTS (SELECT 1 FROM frog_model_dependencies d LEFT JOIN frog_model_tasks p \
+  ON p.workspace_id=d.workspace_id AND p.task_id=d.depends_on \
+  WHERE d.workspace_id=t.workspace_id AND d.task_id=t.task_id AND (p.status IS NULL OR p.status!='done')) \
+THEN 'blocked' ELSE 'idea' END AS lane,\
+(SELECT COALESCE(json_group_array(o.id),'[]') FROM (SELECT j.depends_on AS id FROM frog_model_dependencies j \
+  LEFT JOIN frog_model_tasks p ON p.workspace_id=j.workspace_id AND p.task_id=j.depends_on \
+  WHERE j.workspace_id=t.workspace_id AND j.task_id=t.task_id AND (p.status IS NULL OR p.status!='done') \
+  ORDER BY j.depends_on) o) AS unmet_dependencies,\
+(SELECT COALESCE(json_group_array(o.id),'[]') FROM (SELECT j.depends_on AS id FROM frog_model_dependencies j \
+  WHERE j.workspace_id=t.workspace_id AND j.task_id=t.task_id ORDER BY j.depends_on) o) AS dependencies,\
+(SELECT COALESCE(json_group_array(o.id),'[]') FROM (SELECT j.task_id AS id FROM frog_model_dependencies j \
+  WHERE j.workspace_id=t.workspace_id AND j.depends_on=t.task_id ORDER BY j.task_id) o) AS blocks \
+FROM frog_model_tasks t WHERE t.workspace_id=?1";
+
+/// One mutation: idempotency receipt, conditional entity write, event, outcome
+/// and result read, executed as a single host transaction.
+///
+/// Parameter positions are fixed: ?1 workspace, ?2 operation, ?3 request hash,
+/// ?4 actor, ?5 effect identity, ?6 secondary identity, ?7+ command-specific
+/// values, then event kind and entity kind at the end. Hosts bind each statement
+/// with exactly as many values as it declares placeholders. `satisfied` decides
+/// the outcome and whether anything is recorded; it may reference ?1-?6 only.
+struct Mutation<'a> {
+    entity: &'a str,
+    effect: Value,
+    secondary: Value,
+    extras: Vec<Value>,
+    /// Optional statement that marks the receipt `changed` when this operation
+    /// really alters state. Needed where the entity write destroys the very
+    /// evidence of that fact, such as deleting a dependency edge.
+    precheck: Option<&'a str>,
+    satisfied: &'a str,
+    event: &'a str,
+    entity_kind: &'a str,
+}
+const PENDING: &str =
+    "EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?2 \
+AND request_key=?3 AND status='pending')";
+const CHANGED: &str =
+    "EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?2 AND changed=1)";
+const WROTE: &str = "EXISTS(SELECT 1 FROM frog_model_tasks WHERE workspace_id=?1 AND task_id=?5 \
+AND last_operation_id=?2)";
+const EDGE: &str = "EXISTS(SELECT 1 FROM frog_model_dependencies WHERE workspace_id=?1 \
+AND task_id=?5 AND depends_on=?6)";
+
+/// Highest `?N` placeholder in a statement, ignoring quoted text. Hosts must
+/// bind exactly this many values, so the bound vector is sliced per statement
+/// rather than assumed.
+fn placeholders(sql: &str) -> usize {
+    let mut highest = 0;
+    let mut quoted = false;
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => quoted = !quoted,
+            b'?' if !quoted => {
+                let mut digits = String::new();
+                while index + 1 + digits.len() < bytes.len()
+                    && bytes[index + 1 + digits.len()].is_ascii_digit()
+                {
+                    digits.push(bytes[index + 1 + digits.len()] as char);
+                }
+                highest = highest.max(digits.parse().unwrap_or(0));
+                index += digits.len();
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    highest
+}
+fn bound_statement(sql: &str, bound: &[Value]) -> Result<Statement, String> {
+    let needed = placeholders(sql);
+    if needed > bound.len() {
+        return Err("plan binds fewer values than its statements require".into());
+    }
+    Ok(statement(sql, bound[..needed].to_vec()))
+}
+
+fn mutation(request: &Request, spec: Mutation<'_>) -> Result<Plan, String> {
+    let key = json!(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(request).map_err(|_| "request serialization failed")?)
+    ));
+    let mut bound = vec![
+        json!(request.workspace_id),
+        json!(request.operation_id),
+        key.clone(),
+        json!(request.actor),
+        spec.effect.clone(),
+        spec.secondary.clone(),
+    ];
+    bound.extend(spec.extras);
+    let event_at = bound.len() + 1;
+    bound.push(json!(spec.event));
+    bound.push(json!(spec.entity_kind));
+    // Applied means the requested state holds; recorded means this operation is
+    // what made it hold, so the event stream is a delta, not a repeat log.
+    let outcome = format!("{PENDING} AND ({CHANGED} OR {})", spec.satisfied);
+    let recorded = match spec.precheck {
+        // With a precheck, only a recorded change may emit an event.
+        Some(_) => CHANGED.to_string(),
+        None => spec.satisfied.to_string(),
+    };
+    let receipt = "INSERT INTO frog_model_operations(workspace_id,operation_id,request_key,status) VALUES(?1,?2,?3,'pending') \
+ON CONFLICT(workspace_id,operation_id) DO NOTHING";
+    let mut statements = vec![bound_statement(receipt, &bound)?];
+    if let Some(precheck) = spec.precheck {
+        statements.push(bound_statement(precheck, &bound)?);
+    }
+    statements.extend([
+        bound_statement(spec.entity, &bound)?,
+        bound_statement(
+            &format!("INSERT INTO frog_model_events(workspace_id,operation_id,entity_id,kind,entity_kind,sequence) \
+SELECT ?1,?2,?5,?{event_at},?{},COALESCE((SELECT MAX(sequence) FROM frog_model_events WHERE workspace_id=?1),0)+1 \
+WHERE {PENDING} AND {recorded}", event_at + 1),
+            &bound,
+        )?,
+        bound_statement(
+            &format!("UPDATE frog_model_operations SET status=CASE WHEN {outcome} THEN 'applied' ELSE 'conflict' END \
+WHERE workspace_id=?1 AND operation_id=?2 AND request_key=?3 AND status='pending'"),
+            &bound,
+        )?,
+        bound_statement(
+            "SELECT operation_id,CASE WHEN request_key=?3 THEN status ELSE 'idempotency_conflict' END AS status \
+FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?2",
+            &bound,
+        )?,
+    ]);
+    ok(false, "mutation", statements)
 }
 
 pub fn plan(request: Request) -> Result<Plan, String> {
     id(&request.workspace_id)?;
     id(&request.actor)?;
     id(&request.operation_id)?;
-    let ws = json!(request.workspace_id);
-    let actor = json!(request.actor);
-    let op = json!(request.operation_id);
-    let mut statements = Vec::new();
-    let mut read_only = false;
-    let result_kind;
+    let workspace = json!(request.workspace_id);
     match &request.command {
         Command::Board {
             repo_id,
-            limit: count,
+            limit: size,
+            after,
         } => {
-            limit(*count)?;
+            limit(*size)?;
             if let Some(repo) = repo_id {
                 id(repo)?;
             }
-            read_only = true;
-            result_kind = "board";
-            statements.push(statement("SELECT t.task_id AS id,t.repo_id AS repository,t.title,t.priority,t.status,t.assignee,t.revision,t.updated_at,CASE WHEN t.status IN ('done','cancelled') THEN 'done' WHEN t.status IN ('in_progress','review','published') THEN 'in_progress' WHEN EXISTS (SELECT 1 FROM frog_model_dependencies d LEFT JOIN frog_model_tasks p ON p.workspace_id=d.workspace_id AND p.task_id=d.depends_on WHERE d.workspace_id=t.workspace_id AND d.task_id=t.task_id AND (p.status IS NULL OR p.status!='done')) THEN 'blocked' ELSE 'idea' END AS lane FROM frog_model_tasks t WHERE t.workspace_id=?1 AND (?2 IS NULL OR t.repo_id=?2) ORDER BY t.priority,t.task_id LIMIT ?3", vec![ws.clone(), json!(repo_id), json!(count)]));
+            let (priority, task) = match after {
+                Some(cursor) => board_cursor(cursor)?,
+                None => (0, String::new()),
+            };
+            ok(true, "board", vec![statement(
+                &format!("{BOARD_SELECT} AND (?2 IS NULL OR t.repo_id=?2) \
+AND (?5=0 OR t.priority>?6 OR (t.priority=?6 AND t.task_id>?7)) ORDER BY t.priority,t.task_id LIMIT ?3"),
+                vec![workspace, json!(repo_id), json!(size), Value::Null, json!(u8::from(after.is_some())), json!(priority), json!(task)],
+            )])
         }
-        Command::Repositories { limit: count } => {
-            limit(*count)?;
-            read_only = true;
-            result_kind = "repositories";
-            statements.push(statement("SELECT repo_id AS id,title FROM frog_model_repos WHERE workspace_id=? ORDER BY repo_id LIMIT ?", vec![ws.clone(), json!(count)]));
+        Command::DescribeTask { task_id } => {
+            id(task_id)?;
+            ok(
+                true,
+                "task",
+                vec![statement(
+                    &format!("{BOARD_SELECT} AND t.task_id=?2"),
+                    vec![workspace, json!(task_id)],
+                )],
+            )
         }
-        Command::Events {
-            after,
-            limit: count,
+        Command::Repositories { limit: size } => {
+            limit(*size)?;
+            ok(true, "repositories", vec![statement(
+                "SELECT repo_id AS id,title FROM frog_model_repos WHERE workspace_id=?1 ORDER BY repo_id LIMIT ?2",
+                vec![workspace, json!(size)],
+            )])
+        }
+        Command::Events { after, limit: size } => {
+            limit(*size)?;
+            count(after)?;
+            ok(true, "events", vec![statement(
+                "SELECT CAST(sequence AS TEXT) AS cursor,operation_id,entity_kind,entity_id,kind,created_at \
+FROM frog_model_events WHERE workspace_id=?1 AND sequence>CAST(?2 AS INTEGER) ORDER BY sequence LIMIT ?3",
+                vec![workspace, json!(after), json!(size)],
+            )])
+        }
+        Command::RegisterRepo {
+            repo_id,
+            title: label,
         } => {
-            limit(*count)?;
-            if after.is_empty()
-                || after.len() > 19
-                || !after.bytes().all(|b| b.is_ascii_digit())
-                || after.parse::<i64>().is_err()
-            {
-                return Err("invalid event cursor".into());
-            }
-            read_only = true;
-            result_kind = "events";
-            statements.push(statement("SELECT CAST(sequence AS TEXT) AS cursor,operation_id,entity_kind,entity_id,kind,created_at FROM frog_model_events WHERE workspace_id=? AND sequence>CAST(? AS INTEGER) ORDER BY sequence LIMIT ?", vec![ws.clone(), json!(after), json!(count)]));
+            id(repo_id)?;
+            title(label)?;
+            // Register is idempotent and refreshes the title: re-registering an
+            // existing repository is an explicit act, not a silent overwrite.
+            mutation(&request, Mutation {
+                entity: "INSERT INTO frog_model_repos(workspace_id,repo_id,title,last_operation_id) \
+SELECT ?1,?5,?7,?2 WHERE EXISTS(SELECT 1 FROM frog_model_workspaces WHERE workspace_id=?1) \
+ON CONFLICT(workspace_id,repo_id) DO UPDATE SET title=excluded.title, last_operation_id=excluded.last_operation_id",
+                effect: json!(repo_id), secondary: Value::Null, extras: vec![json!(label)],
+                precheck: None,
+                satisfied: "EXISTS(SELECT 1 FROM frog_model_repos WHERE workspace_id=?1 AND repo_id=?5 AND last_operation_id=?2)",
+                event: "repo.registered", entity_kind: "repository",
+            })
         }
-        _ => {
-            result_kind = "mutation";
-            let request_key = format!(
-                "{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&request).map_err(|_| "request serialization failed")?
-                )
-            );
-            let key = json!(request_key);
-            statements.push(statement("INSERT INTO frog_model_operations(workspace_id,operation_id,request_key,status) VALUES(?1,?2,?3,'pending') ON CONFLICT(workspace_id,operation_id) DO NOTHING", vec![ws.clone(),op.clone(),key.clone()]));
-            let (table, target_column, target, event_kind) = match &request.command {
-                Command::RegisterRepo {
-                    repo_id,
-                    title: label,
-                } => {
-                    id(repo_id)?;
-                    title(label)?;
-                    statements.push(statement("INSERT INTO frog_model_repos(workspace_id,repo_id,title,last_operation_id) SELECT ?1,?2,?3,?4 WHERE EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?4 AND request_key=?5 AND status='pending') ON CONFLICT(workspace_id,repo_id) DO NOTHING", vec![ws.clone(),json!(repo_id),json!(label),op.clone(),key.clone()]));
-                    ("frog_model_repos", "repo_id", repo_id, "repo.registered")
-                }
-                Command::CreateTask {
-                    repo_id,
-                    task_id,
-                    title: label,
-                    priority,
-                } => {
-                    id(repo_id)?;
-                    id(task_id)?;
-                    title(label)?;
-                    if *priority > 3 {
-                        return Err("priority must be 0–3".into());
-                    }
-                    statements.push(statement("INSERT INTO frog_model_tasks(workspace_id,task_id,repo_id,title,priority,status,revision,last_operation_id) SELECT ?1,?2,?3,?4,?5,'todo',0,?6 WHERE EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?6 AND request_key=?7 AND status='pending') AND EXISTS(SELECT 1 FROM frog_model_repos WHERE workspace_id=?1 AND repo_id=?3) ON CONFLICT(workspace_id,task_id) DO NOTHING", vec![ws.clone(),json!(task_id),json!(repo_id),json!(label),json!(priority),op.clone(),key.clone()]));
-                    ("frog_model_tasks", "task_id", task_id, "task.created")
-                }
-                Command::ClaimTask {
-                    task_id,
-                    expected_revision,
-                } => {
-                    id(task_id)?;
-                    statements.push(statement("UPDATE frog_model_tasks SET status='in_progress',assignee=?1,revision=revision+1,last_operation_id=?2,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?3 AND task_id=?4 AND revision=?5 AND status='todo' AND assignee IS NULL AND EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?3 AND operation_id=?2 AND request_key=?6 AND status='pending') AND NOT EXISTS(SELECT 1 FROM frog_model_dependencies d LEFT JOIN frog_model_tasks p ON p.workspace_id=d.workspace_id AND p.task_id=d.depends_on WHERE d.workspace_id=?3 AND d.task_id=?4 AND (p.status IS NULL OR p.status!='done'))", vec![actor.clone(),op.clone(),ws.clone(),json!(task_id),json!(expected_revision),key.clone()]));
-                    ("frog_model_tasks", "task_id", task_id, "task.claimed")
-                }
-                Command::TransitionTask {
-                    task_id,
-                    expected_revision,
-                    status,
-                } => {
-                    id(task_id)?;
-                    let previous = match status.as_str() {
-                        "review" => "in_progress",
-                        "published" => "review",
-                        "done" => "published",
-                        _ => return Err("transition requires review, published or done".into()),
-                    };
-                    statements.push(statement("UPDATE frog_model_tasks SET status=?1,revision=revision+1,last_operation_id=?2,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?3 AND task_id=?4 AND revision=?5 AND assignee=?6 AND status=?7 AND EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?3 AND operation_id=?2 AND request_key=?8 AND status='pending')", vec![json!(status),op.clone(),ws.clone(),json!(task_id),json!(expected_revision),actor.clone(),json!(previous),key.clone()]));
-                    ("frog_model_tasks", "task_id", task_id, "task.transitioned")
-                }
-                _ => unreachable!(),
-            };
-            // Only internal identifiers enter SQL construction; all caller data is bound.
-            let success = format!("EXISTS(SELECT 1 FROM {table} WHERE workspace_id=?1 AND {target_column}=?4 AND last_operation_id=?2)");
-            let entity_kind = if target_column == "repo_id" {
-                "repository"
-            } else {
-                "task"
-            };
-            statements.push(statement(&format!("INSERT INTO frog_model_events(workspace_id,operation_id,entity_id,kind,entity_kind,sequence) SELECT ?1,?2,?4,?5,?6,COALESCE((SELECT MAX(sequence) FROM frog_model_events WHERE workspace_id=?1),0)+1 WHERE EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?2 AND request_key=?3 AND status='pending') AND {success}"),vec![ws.clone(),op.clone(),key.clone(),json!(target),json!(event_kind),json!(entity_kind)]));
-            statements.push(statement(&format!("UPDATE frog_model_operations SET status=CASE WHEN {success} THEN 'applied' ELSE 'conflict' END WHERE workspace_id=?1 AND operation_id=?2 AND request_key=?3 AND status='pending'"),vec![ws.clone(),op.clone(),key.clone(),json!(target)]));
-            statements.push(statement("SELECT operation_id,CASE WHEN request_key=?3 THEN status ELSE 'idempotency_conflict' END AS status FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?2",vec![ws,op,key]));
+        Command::CreateTask {
+            repo_id,
+            task_id,
+            title: label,
+            priority,
+        } => {
+            id(repo_id)?;
+            id(task_id)?;
+            title(label)?;
+            if !PRIORITIES.contains(priority) {
+                return Err("priority must be 0-3".into());
+            }
+            mutation(&request, Mutation {
+                entity: "INSERT INTO frog_model_tasks(workspace_id,task_id,repo_id,title,priority,status,revision,last_operation_id,status_observed_at) \
+SELECT ?1,?5,?6,?7,?8,'todo',0,?2,strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+WHERE EXISTS(SELECT 1 FROM frog_model_repos WHERE workspace_id=?1 AND repo_id=?6) \
+ON CONFLICT(workspace_id,task_id) DO NOTHING",
+                effect: json!(task_id), secondary: json!(repo_id), extras: vec![json!(label), json!(priority)],
+                precheck: None, satisfied: WROTE, event: "task.created", entity_kind: "task",
+            })
+        }
+        Command::AddDependency {
+            task_id,
+            depends_on,
+        } => {
+            id(task_id)?;
+            id(depends_on)?;
+            if task_id == depends_on {
+                return Err("a task cannot depend on itself".into());
+            }
+            mutation(&request, Mutation {
+                entity: "INSERT INTO frog_model_dependencies(workspace_id,task_id,depends_on) \
+SELECT ?1,?5,?6 WHERE EXISTS(SELECT 1 FROM frog_model_tasks WHERE workspace_id=?1 AND task_id=?5) \
+AND EXISTS(SELECT 1 FROM frog_model_tasks WHERE workspace_id=?1 AND task_id=?6) \
+ON CONFLICT(workspace_id,task_id,depends_on) DO NOTHING",
+                effect: json!(task_id), secondary: json!(depends_on), extras: Vec::new(),
+                precheck: Some(&format!("UPDATE frog_model_operations SET changed=1 WHERE {PENDING} AND NOT {EDGE} \
+AND EXISTS(SELECT 1 FROM frog_model_tasks WHERE workspace_id=?1 AND task_id=?5) \
+AND EXISTS(SELECT 1 FROM frog_model_tasks WHERE workspace_id=?1 AND task_id=?6)")),
+                satisfied: EDGE, event: "task.dependency_added", entity_kind: "task",
+            })
+        }
+        Command::RemoveDependency {
+            task_id,
+            depends_on,
+        } => {
+            id(task_id)?;
+            id(depends_on)?;
+            if task_id == depends_on {
+                return Err("a task cannot depend on itself".into());
+            }
+            mutation(&request, Mutation {
+                entity: "DELETE FROM frog_model_dependencies WHERE workspace_id=?1 AND task_id=?5 AND depends_on=?6",
+                effect: json!(task_id), secondary: json!(depends_on), extras: Vec::new(),
+                precheck: Some(&format!("UPDATE frog_model_operations SET changed=1 WHERE {PENDING} AND {EDGE}")),
+                satisfied: &format!("NOT {EDGE}"),
+                event: "task.dependency_removed", entity_kind: "task",
+            })
+        }
+        Command::ClaimTask {
+            task_id,
+            expected_revision,
+        } => {
+            id(task_id)?;
+            mutation(&request, Mutation {
+                entity: "UPDATE frog_model_tasks SET status='in_progress',assignee=?4,revision=revision+1,last_operation_id=?2,\
+status_observed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 \
+AND status='todo' AND assignee IS NULL AND NOT EXISTS(SELECT 1 FROM frog_model_dependencies d \
+LEFT JOIN frog_model_tasks p ON p.workspace_id=d.workspace_id AND p.task_id=d.depends_on \
+WHERE d.workspace_id=?1 AND d.task_id=?5 AND (p.status IS NULL OR p.status!='done'))",
+                effect: json!(task_id), secondary: json!(expected_revision), extras: Vec::new(),
+                precheck: None, satisfied: WROTE, event: "task.claimed", entity_kind: "task",
+            })
+        }
+        Command::TransitionTask {
+            task_id,
+            expected_revision,
+            status,
+        } => {
+            id(task_id)?;
+            let previous = TRANSITIONS
+                .iter()
+                .find(|(next, _)| next == status)
+                .map(|(_, previous)| *previous)
+                .ok_or("transition requires review, published or done")?;
+            mutation(&request, Mutation {
+                entity: "UPDATE frog_model_tasks SET status=?7,revision=revision+1,last_operation_id=?2,\
+status_observed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 \
+AND assignee=?4 AND status=?8",
+                effect: json!(task_id), secondary: json!(expected_revision),
+                extras: vec![json!(status), json!(previous)],
+                precheck: None, satisfied: WROTE, event: "task.transitioned", entity_kind: "task",
+            })
+        }
+        Command::CancelTask {
+            task_id,
+            expected_revision,
+        } => {
+            id(task_id)?;
+            mutation(&request, Mutation {
+                entity: "UPDATE frog_model_tasks SET status='cancelled',revision=revision+1,last_operation_id=?2,\
+status_observed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 \
+AND (assignee IS NULL OR assignee=?4) AND status IN ('todo','in_progress','review','published')",
+                effect: json!(task_id), secondary: json!(expected_revision), extras: Vec::new(),
+                precheck: None, satisfied: WROTE, event: "task.cancelled", entity_kind: "task",
+            })
         }
     }
-    Ok(Plan {
-        schema: CONTRACT.into(),
-        read_only,
-        result_kind: result_kind.into(),
-        statements,
-    })
 }
 
 #[cfg(feature = "component")]

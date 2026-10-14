@@ -149,14 +149,104 @@ POST body example (use a new stable operation ID for each intended mutation):
 unavailable/incompatible storage. Retry an uncertain mutation with the **same**
 operation ID and body, never a freshly generated ID.
 
+## Talking to a model service from Frog
+
+`frog model` is the CLI surface for a hosted model. It never opens a local
+SQLite database, so a machine without one can still coordinate.
+
+```sh
+export FROG_MODEL_URL=https://frog-model.example
+export FROG_MODEL_TOKEN_FILE=~/.config/frog/model-dev-token
+frog model --workspace-id development repositories
+frog model --workspace-id development create --repo frog --task-id next --title 'Next work' --priority p1 \
+  --operation-id create-next-v1
+frog model --workspace-id development claim --task-id next --expected-revision 0 --operation-id claim-next-v1
+frog model --workspace-id development depend --task-id next --depends-on other
+frog model --workspace-id development board --repo frog --limit 50
+frog model --workspace-id development events --after 12
+```
+
+`--workspace-id` is deliberately not `--workspace`: a local workspace names a
+host and database on this machine, while this identifies a tenant inside the
+service. `--operation-id` is the idempotency key. Reuse it to retry the *same*
+intent after an uncertain failure; a conflict needs a new key. Invented IDs make
+every retry a new operation, so the CLI generates one only when you omit it.
+
+`frog web serve --model-url ... --model-workspace ... --model-poll 5` serves the
+same packaged renderer, Start view, board and SSE stream against the service.
+The renderer is unchanged: one projection contract, two backends. Repository
+Start stories read local Git, so they are absent for a remote backend. D1 has no
+change feed, so the server polls the service and pushes only when the projection
+actually changes; a failing service is published as unavailable, never as an
+empty successful board.
+
+Transport rules are enforced in `model_client.py`: HTTPS only (plain HTTP to
+loopback), no credentials/query/fragment, no redirects, no ambient proxy,
+one-megabyte response cap, owner-only token files, and refusal codes that
+distinguish `rejected_token`, `forbidden`, `not_found`, `conflict`,
+`wrong_schema` and `unreachable`. Rogue link types in a projection fail closed
+rather than being coerced into fake identifiers.
+
+## Deployment status
+
+**Not deployed.** The Cloudflare account reports:
+
+```
+ERROR  You have reached the maximum number of D1 databases for your account.
+```
+
+Creating the development database therefore needs either a Workers plan upgrade
+(a billing change) or deleting an existing database (destructive). Neither was
+performed unilaterally, and no Worker, route, secret or binding was created.
+Generated development tokens exist only in `~/.config/frog/` (`0600`), outside
+Git. `wrangler.jsonc` still carries a placeholder database ID.
+
+To finish, once a slot exists:
+
+```sh
+cd cloudflare/frog-model
+npx wrangler d1 create frog-model-development        # paste the id into wrangler.jsonc
+npx wrangler d1 migrations apply DB --remote
+npx wrangler d1 execute DB --remote --command \
+  "INSERT INTO frog_model_workspaces VALUES('development','Development')"
+npx wrangler secret put FROG_CLIENTS                # the array documented above
+npx wrangler deploy
+```
+
+Enable `workers_dev` or attach a route deliberately; the configuration keeps
+both off so a deploy cannot silently publish an endpoint.
+
+## What the model now covers
+
+Repository registration and title refresh; task creation with P0–P3; adding and
+removing dependency edges; claiming a dependency-ready task; reporting
+`review → published → done`; cancellation; per-task reads; repository-filtered
+board reads with keyset pagination; repositories; and committed events with a
+per-workspace sequence cursor.
+
+Dependency edges are the only way to block work. There is deliberately no
+`blocked` status that could drift out of step with the graph, and the lane is
+derived from unmet dependencies exactly as the TUI derives it. Claiming requires
+no unmet dependency; completing the dependency unblocks the dependent claim.
+Cross-workspace edges are impossible, and task IDs are unique per workspace,
+not per repository.
+
+An operation is **applied** when the requested state holds and **recorded** when
+this operation is what made it hold. That distinction matters for dependency
+removal, where the write destroys the evidence of its own effect: a first
+removal records `task.dependency_removed`, a repeat is applied but silent. The
+event stream is a delta, not a repeat log.
+
+`done` is still a **reported** state. The model records what an agent says it
+did; it is not evidence of review, approval, deployment or publication, and it
+does not replace Frog's legacy verification.
+
 ## Next integration gates
 
-1. Complete dependency/lease/file-lock semantics and backend conformance tests.
-2. Add shared application operations and native/HTTP client transport selection.
-3. Implement an explicit, validated legacy import with workspace identity mapping.
-4. Reuse the existing kanban projection contract through a named adapter rather
-   than relabeling this model response as `frog.kanban-projection.v0`.
-5. Audit authentication, quotas, secret rotation, database recovery and upgrades
+1. Lease renewal, fencing tokens and file/scope locks for parity with `AGENTS.db`.
+2. An explicit, validated legacy import with workspace identity mapping.
+3. Backend-independent conformance tests run against every adapter.
+4. Audit authentication, quotas, secret rotation, database recovery and upgrades
    before a production authority or appliance is published.
 
 Cloudflare contracts used:

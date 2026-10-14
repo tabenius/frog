@@ -11,6 +11,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from _util import fresh_db
@@ -211,6 +212,105 @@ class WebBoardTests(unittest.TestCase):
                         response.read(); connection.close()
                 finally:
                     server.shutdown(); thread.join(5)
+
+
+class ModelBackedBoard(unittest.TestCase):
+    """The same renderer and stream, over the remote model contract."""
+
+    def setUp(self):
+        self.service = _Service()
+        self.addCleanup(self.service.close)
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        token = Path(self.directory.name) / 'token'
+        token.write_text('model-board-test-token-never-deployed-12345'); token.chmod(0o600)
+        from ragbaz_frog import model_client
+        self.client = model_client.ModelClient(self.service.url, token.read_text().strip())
+        self.source = web_board.ModelSource(self.client, 'alpha', poll=1.0)
+
+    def _frame(self, response):
+        while True:
+            line = response.readline()
+            if line.startswith(b'data: '):
+                return json.loads(line[6:])
+
+    def test_remote_board_streams_model_rows_with_dependency_context(self):
+        with web_board.create_server(None, source=self.source, port=0) as server:
+            thread = threading.Thread(target=server.serve_forever); thread.start()
+            connection = http.client.HTTPConnection('localhost', server.server_port, timeout=5)
+            try:
+                connection.request('GET', '/api/v1/kanban')
+                data = json.loads(connection.getresponse().read())
+                self.assertEqual(data['source'], 'frog-model')
+                self.assertEqual(data['cards'][0]['priority'], 'p0')
+                self.assertEqual(data['cards'][0]['unmet_dependencies'], ['two'])
+                self.assertEqual(data['repositories'][0]['id'], 'frog')
+                self.assertEqual(data['counts']['blocked'], 1)
+                connection.close()
+                # An unreachable service is published as unavailable, not empty.
+                self.service.status = 503
+                stream = http.client.HTTPConnection('localhost', server.server_port, timeout=10)
+                stream.request('GET', '/api/v1/events')
+                response = stream.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(self._frame(response)['error'], 'projection_unavailable')
+                stream.close()
+            finally:
+                server.shutdown(); thread.join(5)
+
+    def test_a_model_backend_has_no_local_repository_story(self):
+        with web_board.create_server(None, source=self.source, port=0) as server:
+            thread = threading.Thread(target=server.serve_forever); thread.start()
+            try:
+                connection = http.client.HTTPConnection('localhost', server.server_port, timeout=5)
+                connection.request('GET', '/api/v1/repository?id=frog')
+                self.assertEqual(connection.getresponse().status, 404)
+                connection.close()
+            finally:
+                server.shutdown(); thread.join(5)
+
+    def test_exactly_one_backend_is_required(self):
+        with self.assertRaises(ValueError):
+            web_board.create_server(port=0)
+        with self.assertRaises(ValueError):
+            web_board.create_server('/dev/null', source=self.source, port=0)
+
+
+class _Service:
+    def __init__(self):
+        self.status = 200
+        self.rows = [{
+            'id': 'one', 'title': 'Remote task', 'repository': 'frog', 'priority': 0,
+            'status': 'todo', 'assignee': None, 'revision': 2, 'lane': 'blocked',
+            'updated_at': '2026-10-14T09:00:00.000Z', 'status_observed_at': '2026-10-14T09:00:00.000Z',
+            'unmet_dependencies': ['two'], 'dependencies': ['two'], 'blocks': [],
+        }]
+        service = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                payload = {'schema': 'frog.model-result.v1',
+                           'items': service.rows if self.path.startswith('/v1/workspaces/alpha/board')
+                           else [{'id': 'frog', 'title': 'Frog'}]}
+                body = json.dumps(payload).encode()
+                self.send_response(service.status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.server.shutdown(); self.server.server_close(); self.thread.join(5)
 
 
 if __name__ == '__main__':

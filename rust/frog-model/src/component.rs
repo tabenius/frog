@@ -25,9 +25,23 @@ impl exports::frog::model::planner::Guest for Component {
                 expected_revision: value.expected_revision,
                 status: value.status,
             },
+            Command::CancelTask(value) => crate::Command::CancelTask {
+                task_id: value.task_id,
+                expected_revision: value.expected_revision,
+            },
+            Command::AddDependency(value) => crate::Command::AddDependency {
+                task_id: value.task_id,
+                depends_on: value.depends_on,
+            },
+            Command::RemoveDependency(value) => crate::Command::RemoveDependency {
+                task_id: value.task_id,
+                depends_on: value.depends_on,
+            },
+            Command::DescribeTask(task_id) => crate::Command::DescribeTask { task_id },
             Command::Board(value) => crate::Command::Board {
                 repo_id: value.repo_id,
                 limit: value.limit,
+                after: value.after,
             },
             Command::Repositories(value) => crate::Command::Repositories { limit: value },
             Command::Events(value) => crate::Command::Events {

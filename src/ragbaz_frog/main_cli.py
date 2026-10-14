@@ -1852,6 +1852,46 @@ def build_parser() -> argparse.ArgumentParser:
     docs_cmd.add_argument("--out", help="Write to FILE instead of stdout")
     tui_cmd.add_argument("--agent")
     board_cmd = sub.add_parser("board", help="Realtime colored task lifecycle board")
+    model_cmd = sub.add_parser("model", help="Coordinate through the Rust model service instead of a local SQLite database")
+    model_cmd.add_argument("--url", help="Model service origin (or FROG_MODEL_URL)")
+    model_cmd.add_argument("--token-file", help="Owner-only file with the model bearer token (or FROG_MODEL_TOKEN)")
+    model_cmd.add_argument("--workspace-id", dest="model_workspace", required=True, help="Workspace identity known to the service (distinct from a local --workspace)")
+    model_sub = model_cmd.add_subparsers(dest="model_command", required=True)
+    model_board = model_sub.add_parser("board", help="Read lanes with dependency context")
+    model_board.add_argument("--repo")
+    model_board.add_argument("--limit", type=int, default=100)
+    model_board.add_argument("--after", help="Opaque keyset cursor from a previous page")
+    model_sub.add_parser("repositories", help="List repositories in the workspace")
+    model_events = model_sub.add_parser("events", help="Read committed events after a cursor")
+    model_events.add_argument("--after", default="0")
+    model_events.add_argument("--limit", type=int, default=50)
+    model_task = model_sub.add_parser("task", help="Read one task")
+    model_task.add_argument("task_id")
+    for name, help_text in (("register", "Register or refresh a repository"),
+                            ("create", "Create a task"),
+                            ("claim", "Claim a dependency-ready task"),
+                            ("transition", "Report the next workflow state"),
+                            ("cancel", "Cancel a task"),
+                            ("depend", "Record a blocker (use --unblock to remove it)")):
+        entry = model_sub.add_parser(name, help=help_text)
+        entry.add_argument("--operation-id", help="Stable idempotency key; reuse it to retry safely")
+        if name == "register":
+            entry.add_argument("--repo-id", required=True)
+            entry.add_argument("--title", required=True)
+        elif name == "create":
+            entry.add_argument("--repo", required=True)
+            entry.add_argument("--task-id", required=True)
+            entry.add_argument("--title", required=True)
+            entry.add_argument("--priority", default="p3")
+        elif name == "depend":
+            entry.add_argument("--task-id", required=True)
+            entry.add_argument("--depends-on", required=True)
+            entry.add_argument("--unblock", action="store_true")
+        else:
+            entry.add_argument("--task-id", required=True)
+            entry.add_argument("--expected-revision", type=int, default=0)
+            if name == "transition":
+                entry.add_argument("--status", required=True, choices=sorted(_MODEL_STATUSES))
     web_cmd = sub.add_parser("web", help="Read-only live kanban JSON and web board")
     web_sub = web_cmd.add_subparsers(dest="web_command", required=True)
     web_sub.add_parser("snapshot", help="Emit a private versioned kanban JSON projection")
@@ -1862,6 +1902,10 @@ def build_parser() -> argparse.ArgumentParser:
     web_serve.add_argument("--tls-cert")
     web_serve.add_argument("--tls-key")
     web_serve.add_argument("--public-origin", help="Allowed HTTPS origin for protected non-loopback access")
+    web_serve.add_argument("--model-url", help="Serve the board from a model service instead of a local database")
+    web_serve.add_argument("--model-token-file", help="Owner-only file with the model bearer token")
+    web_serve.add_argument("--model-workspace", help="Workspace identity to serve from the model")
+    web_serve.add_argument("--model-poll", type=float, default=5.0, help="Seconds between model refreshes (default 5)")
     board_cmd.add_argument("--once", action="store_true", help="Print one frame and exit")
     board_cmd.add_argument("--interval", type=float, default=5.0,
                            help="Max seconds between forced redraws (safety net)")
@@ -2336,6 +2380,8 @@ def _run_repo_action(conn, repo_ref: str | None, action: str, args) -> dict:
 
 
 _GLOBAL_FLAGS_PASSTHROUGH = ("--json", "--no-color", "--no-pager", '--no-hooks', '--allow-shell-hooks')
+# The model service's reporting vocabulary; "done" is reported, never implied.
+_MODEL_STATUSES = ("review", "published", "done")
 _GLOBAL_FLAGS_WITH_VALUE = ("--config", "--db", "--workspace", '--hook', '--webhook-url', '--hook-signing-key-file')
 
 # Workflow statuses that are NOT terminal -- the `--not-done` preset on
@@ -2430,9 +2476,79 @@ def main(argv: list[str] | None = None) -> int:
             return _emit({"ok": True, "markdown": md}, args.json)
         print(md)
         return 0
+    if args.command == "model":
+        # Deliberately before any SQLite connection: this path never reads a
+        # local database, so a machine without one can still coordinate.
+        import uuid
+        from ragbaz_frog import model_client
+        try:
+            client = model_client.ModelClient(
+                args.url or os.environ.get("FROG_MODEL_URL") or None,
+                model_client.read_token(args.token_file or os.environ.get("FROG_MODEL_TOKEN_FILE") or None),
+            )
+            workspace = args.model_workspace
+            operation = getattr(args, "operation_id", None) or f"cli-{uuid.uuid4()}"
+            if args.model_command == "board":
+                result = {"schema": "frog.model-result.v1", "kind": "board",
+                          "items": client.board(workspace, repo=args.repo, limit=args.limit, after=args.after)}
+            elif args.model_command == "repositories":
+                result = {"schema": "frog.model-result.v1", "kind": "repositories",
+                          "items": client.repositories(workspace)}
+            elif args.model_command == "events":
+                result = {"schema": "frog.model-result.v1", "kind": "events",
+                          "items": client.events(workspace, after=args.after, limit=args.limit)}
+            elif args.model_command == "task":
+                found = client.task(workspace, args.task_id)
+                result = {"schema": "frog.model-result.v1", "kind": "task", "items": [found] if found else [],
+                          "ok": found is not None}
+            elif args.model_command == "register":
+                result = client.register_repo(workspace, operation, args.repo_id, args.title)
+            elif args.model_command == "create":
+                result = client.create_task(workspace, operation, repo_id=args.repo, task_id=args.task_id,
+                                            title=args.title, priority=args.priority)
+            elif args.model_command == "claim":
+                result = client.claim_task(workspace, operation, task_id=args.task_id,
+                                           expected_revision=args.expected_revision)
+            elif args.model_command == "transition":
+                result = client.transition_task(workspace, operation, task_id=args.task_id,
+                                                expected_revision=args.expected_revision, status=args.status)
+            elif args.model_command == "cancel":
+                result = client.cancel_task(workspace, operation, task_id=args.task_id,
+                                            expected_revision=args.expected_revision)
+            else:
+                result = client.depend(workspace, operation, task_id=args.task_id,
+                                       depends_on=args.depends_on, block=not args.unblock)
+            result.setdefault("ok", True)
+            result.setdefault("operation_id", operation)
+            if args.json:
+                return _emit(result, True)
+            items = result.get("items") or []
+            if not items:
+                print(f"{args.model_command}: no rows")
+                return 0 if result.get("ok", True) else 1
+            for item in items:
+                print("  ".join(f"{key}={value}" for key, value in item.items() if value not in (None, [], {})))
+            return 0
+        except model_client.ModelError as exc:
+            return _emit({"ok": False, "code": exc.code, "error": str(exc), "status": exc.status}, args.json)
     if args.command == "web":
         import sqlite3
         from ragbaz_frog import web_board
+        source = None
+        if getattr(args, "model_url", None):
+            from ragbaz_frog import model_client
+            if not args.model_workspace:
+                return _emit({"ok": False, "error": "--model-url requires --model-workspace"}, args.json)
+            try:
+                client = model_client.ModelClient(
+                    args.model_url,
+                    model_client.read_token(args.model_token_file or os.environ.get("FROG_MODEL_TOKEN_FILE") or None),
+                )
+                source = web_board.ModelSource(client, args.model_workspace, poll=args.model_poll)
+            except model_client.ModelError as exc:
+                return _emit({"ok": False, "code": exc.code, "error": str(exc)}, args.json)
+            return web_board.serve(None, source=source, host=args.host, port=args.port, token_file=args.token_file,
+                                   tls_cert=args.tls_cert, tls_key=args.tls_key, public_origin=args.public_origin)
         workspace = frog_config.resolve_workspace(args.workspace, args.config)
         if workspace and workspace["host"].get("transport") != "local":
             return _emit({"ok": False, "error": "Frog web reads a local database; expose the peer through its authenticated gateway"}, args.json)

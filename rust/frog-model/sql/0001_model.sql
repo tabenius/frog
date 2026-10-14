@@ -6,6 +6,8 @@ CREATE TABLE frog_model_operations(
   workspace_id TEXT NOT NULL REFERENCES frog_model_workspaces(workspace_id),
   operation_id TEXT NOT NULL, request_key TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('pending','applied','conflict')),
+  -- Whether this operation, rather than an earlier one, established the state.
+  changed INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(workspace_id,operation_id)
 );
 CREATE TABLE frog_model_repos(
@@ -21,6 +23,8 @@ CREATE TABLE frog_model_tasks(
   assignee TEXT, revision INTEGER NOT NULL CHECK(revision BETWEEN 0 AND 4294967295),
   last_operation_id TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  -- Status observation, deliberately distinct from the last write.
+  status_observed_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   PRIMARY KEY(workspace_id,task_id),
   FOREIGN KEY(workspace_id,repo_id) REFERENCES frog_model_repos(workspace_id,repo_id),
   FOREIGN KEY(workspace_id,last_operation_id) REFERENCES frog_model_operations(workspace_id,operation_id)

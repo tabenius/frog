@@ -127,14 +127,81 @@ def repository_story(db_path: str | Path, repo_id: str) -> dict:
         observed_at=dt.datetime.now(dt.timezone.utc).isoformat())
 
 
-def create_server(db_path: str | Path, *, host: str = "localhost", port: int | None = None,
+class SnapshotSource:
+    """A projection plus a cheap change token, so one watcher serves any backend."""
+
+    interval = 0.5
+
+    def version(self):
+        raise NotImplementedError
+
+    def snapshot(self) -> dict:
+        raise NotImplementedError
+
+    def close(self):
+        """Release anything held open for change detection."""
+
+
+class DatabaseSource(SnapshotSource):
+    """The local SQLite authority: watch PRAGMA data_version, not the payload."""
+
+    def __init__(self, db_path: str | Path):
+        self.db_path = db_path
+        self._connection = None
+        self._identity = None
+
+    def version(self):
+        path = Path(self.db_path).expanduser().resolve()
+        identity = path.stat().st_dev, path.stat().st_ino
+        if self._connection is None or identity != self._identity:
+            # data_version is per-connection, so keep one open while the file
+            # stays the same; reconnection alone would hide other writers.
+            if self._connection is not None:
+                self._connection.close()
+            self._connection = sqlite3.connect(path.as_uri() + "?mode=ro", timeout=2)
+            self._connection.execute("PRAGMA query_only=ON")
+            self._identity = identity
+        return identity, self._connection.execute("PRAGMA data_version").fetchone()[0]
+
+    def snapshot(self) -> dict:
+        return projection(self.db_path)
+
+    def close(self):
+        # The watcher owns this connection; closing it from another thread is
+        # not legal in sqlite3, so drop the reference and let it be collected.
+        self._connection = None
+        self._identity = None
+
+
+class ModelSource(SnapshotSource):
+    """A remote model service. D1 has no change feed, so poll a stated interval."""
+
+    def __init__(self, client, workspace: str, *, poll: float = 5.0):
+        from ragbaz_frog import model_client
+        self.projection = model_client.board_projection
+        self.client = client
+        self.workspace = workspace
+        self.interval = max(1.0, poll)
+
+    def version(self):
+        return ()
+
+    def snapshot(self) -> dict:
+        return self.projection(self.client, self.workspace)
+
+
+def create_server(db_path: str | Path | None = None, *, host: str = "localhost", port: int | None = None,
                   token_file: str | None = None, tls_cert: str | None = None,
-                  tls_key: str | None = None, public_origin: str | None = None):
+                  tls_key: str | None = None, public_origin: str | None = None,
+                  source: SnapshotSource | None = None, poll: float = 5.0):
     """Prefer 8788, choose another free port only when no explicit port was given."""
+    if (db_path is None) == (source is None):
+        raise ValueError("serve exactly one backend: a local database or a model source")
     if port is not None and not 0 <= port <= 65535:
         raise ValueError("port must be between 0 and 65535")
     bind_host = "127.0.0.1" if host == "localhost" else host
     address = ipaddress.ip_address(bind_host)
+    provider = source if source is not None else DatabaseSource(db_path)
     token = None
     if token_file:
         token_path = Path(token_file).expanduser()
@@ -161,8 +228,8 @@ def create_server(db_path: str | Path, *, host: str = "localhost", port: int | N
         raise ValueError("--public-origin must be an HTTPS origin with no credentials or path")
     if not address.is_loopback and not (token and tls and public):
         raise ValueError("non-loopback binds require --token-file, --tls-cert, --tls-key and --public-origin; alternatively use authenticated Rebekah")
-    # Fail before binding if the database is absent or incompatible.
-    projection(db_path)
+    # Fail before binding if the backend is absent, unreachable or incompatible.
+    provider.snapshot()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -214,14 +281,17 @@ def create_server(db_path: str | Path, *, host: str = "localhost", port: int | N
                             return self.respond(200, b'', 'text/event-stream; charset=utf-8')
                         return self.stream_events()
                     if path == "/api/v1/repository":
+                        # Repository stories read local Git; only a local backend has them.
+                        if not isinstance(provider, DatabaseSource):
+                            return self.respond(404, {"error": "not_found"})
                         ids = parse_qs(urlsplit(self.path).query).get('id', [])
                         if len(ids) != 1 or len(ids[0]) > 200:
                             return self.respond(400, {"error": "repository_id_required"})
                         try:
-                            return self.respond(200, repository_story(db_path, ids[0]))
+                            return self.respond(200, repository_story(provider.db_path, ids[0]))
                         except KeyError:
                             return self.respond(404, {"error": "repository_not_found"})
-                    return self.respond(200, projection(db_path))
+                    return self.respond(200, provider.snapshot())
                 except (sqlite3.Error, OSError, ValueError):
                     return self.respond(503, {"error": "projection_unavailable"})
             if path in ASSETS:
@@ -280,47 +350,47 @@ def create_server(db_path: str | Path, *, host: str = "localhost", port: int | N
             self.watcher = None
             self.sequence = 0
             self.live_payload = None
+            self.previous_digest = [None]
             super().__init__(*args, **kwargs)
 
         def start_watcher(self):
             with self.condition:
                 if self.watcher is None:
-                    self.watcher = threading.Thread(target=self.watch_database, daemon=True)
+                    self.watcher = threading.Thread(target=self.watch_backend, daemon=True)
                     self.watcher.start()
 
-        def watch_database(self):
-            connection = None
-            previous = None
-            captured = 0
-            try:
-                while not self.stop_watcher.is_set():
-                    try:
-                        path = Path(db_path).expanduser().resolve()
-                        identity = (path.stat().st_dev, path.stat().st_ino)
-                        if connection is None or (previous and identity != previous[0]):
-                            if connection is not None:
-                                connection.close()
-                            connection = sqlite3.connect(path.as_uri() + '?mode=ro', timeout=2)
-                            connection.execute('PRAGMA query_only=ON')
-                        version = (identity, connection.execute('PRAGMA data_version').fetchone()[0])
-                        now = time.monotonic()
-                        if version != previous or now - captured >= 15:
-                            payload = projection(db_path)
-                            previous, captured = version, now
-                            with self.condition:
-                                self.live_payload = payload; self.sequence += 1; self.condition.notify_all()
-                    except (sqlite3.Error, OSError, ValueError):
-                        if connection is not None:
-                            connection.close(); connection = None
-                        previous = None
-                        with self.condition:
-                            if not self.live_payload or 'error' not in self.live_payload:
-                                self.live_payload = {'error': 'projection_unavailable'}
-                                self.sequence += 1; self.condition.notify_all()
-                    self.stop_watcher.wait(.5)
-            finally:
-                if connection is not None:
-                    connection.close()
+        def publish(self, payload):
+            with self.condition:
+                self.live_payload = payload
+                self.sequence += 1
+                self.condition.notify_all()
+
+        def watch_backend(self):
+            """One watcher per server: cheap change detection, then a projection.
+
+            A local database reports its own `data_version`; a remote model is
+            polled on its stated interval and compared by content. Failures are
+            published as unavailable, never as an empty successful board.
+            """
+            previous = object()
+            captured = 0.0
+            while not self.stop_watcher.is_set():
+                try:
+                    version = provider.version()
+                    now = time.monotonic()
+                    if version != previous or now - captured >= 15:
+                        payload = provider.snapshot()
+                        digest = json.dumps(payload, sort_keys=True)
+                        if digest != self.previous_digest[0]:
+                            self.previous_digest[0] = digest
+                            self.publish(payload)
+                        previous, captured = version, now
+                except Exception:
+                    previous = object()
+                    with self.condition:
+                        if not self.live_payload or 'error' not in self.live_payload:
+                            self.publish({'error': 'projection_unavailable'})
+                self.stop_watcher.wait(provider.interval)
 
         def server_close(self):
             self.stop_watcher.set()
@@ -329,6 +399,7 @@ def create_server(db_path: str | Path, *, host: str = "localhost", port: int | N
             super().server_close()
             if self.watcher is not None:
                 self.watcher.join(6)
+            provider.close()
 
         def get_request(self):
             connection, peer = super().get_request()
@@ -349,12 +420,13 @@ def create_server(db_path: str | Path, *, host: str = "localhost", port: int | N
     raise OSError("no available Frog web port")
 
 
-def serve(db_path: str, **options) -> int:
+def serve(db_path: str | None = None, *, source: SnapshotSource | None = None, **options) -> int:
     host = options.get("host", "localhost")
-    with create_server(db_path, **options) as server:
+    with create_server(db_path, source=source, **options) as server:
         authority = f"[{host}]" if ":" in host else host
         scheme = "https" if options.get("tls_cert") else "http"
-        print(f"Frog read-only board: {scheme}://{authority}:{server.server_port}/", flush=True)
+        backend = "model service" if source is not None else "local database"
+        print(f"Frog read-only board ({backend}): {scheme}://{authority}:{server.server_port}/", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
