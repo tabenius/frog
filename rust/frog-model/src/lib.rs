@@ -720,3 +720,5 @@ mod core_wasm;
 pub mod legacy;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "sqlite")]
+pub mod migration;

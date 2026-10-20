@@ -18,7 +18,7 @@ http = ["sqlite", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:http-body-uti
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup", "serialize"], optional = true }
 wit-bindgen = { version = "0.57.1", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
@@ -29,6 +29,7 @@ form_urlencoded = { version = "1", optional = true }
 
 [dev-dependencies]
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+tempfile = "3"
 
 [[bin]]
 name = "frog-model-plan"
@@ -38,6 +39,11 @@ path = "src/bin/plan.rs"
 name = "frog-model-server"
 path = "src/bin/server.rs"
 required-features = ["http"]
+
+[[bin]]
+name = "frog-model-migrate"
+path = "src/bin/migrate.rs"
+required-features = ["sqlite"]
 
 [[test]]
 name = "conformance"

@@ -1,5 +1,36 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Published continuation and inventory milestone — 2026-10-20
+
+- User requested commit/push and continuation. Published to GitHub origin on
+  `handoff/mcp-native-edge-20261020`: `ffb3f34` (validated MCP/model changes)
+  and `daedbf9` (public CI isolation fix). Dash published `fd3a1a4` and
+  `520bd0d` on its same-named branch.
+- GitHub run `39440976962` passed both Frog jobs (fallback/SDK MCP tests,
+  native model tests, HTTP check, both WASM builds). Dash run `39440975724`
+  passed build and pinned public-Frog contract parity. The earlier Frog run
+  failed because public CI could not clone private Dash; fixed by keeping
+  cross-repository integration in private Dash's CI, without adding secrets.
+- New native `frog-model-migrate inventory --source PATH [--snapshot NEW_PATH]`
+  uses read-only source + consistent SQLite online backup (WAL included).
+  Emits `frog.migration-inventory.v1` with data version `20261020-3`, physical
+  snapshot SHA-256, schema/column/storage-class/count inventory and logical
+  typed-content hashes. Optional snapshot creation is exclusive, mode 0600
+  on Unix. No table data is mapped/dropped and no source migrations occur.
+- Inventory always reports `ready_to_apply: false`; full importer/apply/resume
+  remain unimplemented. Every table requires explicit mapping. Virtual/shadow
+  tables are refused; integrity/FK failures are reported as blockers. Current
+  limits: 256 MiB snapshot, one million total rows, 30-second backup deadline.
+- Native checks after inventory: **26 tests passed** (including 8 new tests
+  for full shipped legacy schema, typed values/schema names, deterministic
+  hashing, WAL/standalone backup, preservation, FK damage, virtual tables and
+  CLI). HTTP check and both WASM library builds passed. See migration doc for
+  exact commands and limits. Importer build can be identified by compile-time
+  `FROG_MODEL_BUILD_ID`; otherwise the report explicitly says unidentified.
+- This section is captured before committing the inventory milestone; inspect
+  git log/status for its final publication. No Kali access or production
+  deployments/migrations were performed.
+
 ## Resumed validation — 2026-10-20
 
 Current branch is `handoff/mcp-native-edge-20261020`, checkpoint HEAD

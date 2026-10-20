@@ -18,11 +18,53 @@ Implemented foundations on this branch:
   edits, provider import/outbox, verification and locks.
 - HTTP dependencies are optional behind `http`, leaving the default planner
   suitable for core WASM; `component` builds the typed WIT interface.
+- Native `frog-model-migrate inventory` produces a date-versioned inventory
+  from SQLite's online backup API, with optional exclusive snapshot creation,
+  exact snapshot SHA-256 and typed logical-content fingerprints.
 
 **A comprehensive importer and cutover command are not implemented yet.**
 `legacy.rs` is a limited live adapter, using TEMP views and zero-valued read
 revisions. It supports create/dependency writes, not legacy claim/finish.
 Neither those views nor successful planner builds establish migration parity.
+
+## Available inventory command
+
+```bash
+cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
+  --bin frog-model-migrate -- inventory --source /explicit/path/AGENTS.db
+
+cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
+  --bin frog-model-migrate -- inventory --source /explicit/path/AGENTS.db \
+  --snapshot /explicit/new/path/legacy-snapshot.db
+```
+
+Source selection is mandatory. It opens read-only and takes a consistent
+in-memory backup, including committed WAL data. It does not use the limited
+legacy adapter or execute model mutations. The optional snapshot destination
+must not exist (including symlinks); creation is exclusive and mode 0600 on
+Unix. Source contents are never migrated/checkpointed. An unsuccessful write
+retains its partial artifact and emits no success manifest. The in-memory
+preflight currently limits snapshots to 256 MiB, total rows to one million,
+and backup acquisition to 30 seconds; larger sources need a disk-backed
+bounded implementation before importing.
+
+Successful command execution means inventory completed, **not** import
+approval. Every table is labelled `requires_explicit_mapping`, and
+`ready_to_apply` is always false with `full_import_not_implemented`. Integrity
+and foreign-key findings add blockers. Virtual/shadow tables require an
+explicit adapter and are refused before publishing a snapshot.
+
+JSON includes schema SQL (including defaults), user_version, every table and
+column (including generated-column metadata), counts and observed SQLite
+storage classes. It includes indexes/triggers/views and internal sequence
+tables; it does not print row values. Treat schema defaults as source data.
+SHA-256 fingerprints distinguish null/integer/real/text/blob, preserve blob
+bytes and duplicate rows, and ignore physical row ordering. Logical digests
+include schema and columns; implicit rowids/physical layout remain represented
+by the exact snapshot digest. A future apply must verify the snapshot digest
+as well as operational mapping/parity; logical equality alone is insufficient.
+Set `FROG_MODEL_BUILD_ID` at compile time to record a concrete build revision;
+unidentified developer builds are explicitly labelled `unidentified`.
 
 ## Independent version axes
 
