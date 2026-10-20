@@ -71,8 +71,9 @@ python3 bin/sync-mcp-contract.py --dash ../ragbaz-dash
 python3 bin/sync-mcp-contract.py --dash ../ragbaz-dash --check
 ```
 
-Both repositories' CI compare against a pinned peer commit. Contract changes
-must update generated artifacts, the digest, and both peer pins together;
+Dash CI compares against a pinned public Frog commit; Frog's standalone CI
+tests the authoritative wire schemas without private Dash access. Contract
+changes must update generated artifacts, the digest, and Dash's Frog pin together;
 review against the actual wire schemas, not just source JSON. Catalog/API
 versions are separate from date-based persisted data versions; see
 [the migration plan](MODEL-MIGRATION.md).

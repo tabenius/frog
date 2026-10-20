@@ -9,15 +9,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: frog
-      - uses: actions/checkout@v4
-        with:
-          repository: RAGBAZ/ragbaz-dash
-          ref: 535932ba4e0a73542b34144d597bd816c23e200f
-          path: dash
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python frog/bin/sync-mcp-contract.py --dash dash --check
+      # Dash is private; its CI checks this public authority at a pinned commit.
+      # Public Frog/fork tests must not require access to that private checkout.
       - name: Test fallback transport
         working-directory: frog
         run: |
