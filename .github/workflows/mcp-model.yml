@@ -1,0 +1,40 @@
+name: MCP and portable model
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: frog
+      - uses: actions/checkout@v4
+        with:
+          repository: RAGBAZ/ragbaz-dash
+          ref: 535932ba4e0a73542b34144d597bd816c23e200f
+          path: dash
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python frog/bin/sync-mcp-contract.py --dash dash --check
+      - name: Test fallback transport
+        working-directory: frog
+        run: |
+          python -c 'import json, os; from pathlib import Path; Path(os.environ["RUNNER_TEMP"], "frog-config.json").write_text(json.dumps({}))'
+          FROG_CONFIG="$RUNNER_TEMP/frog-config.json" python -m unittest discover -s tests -p 'test_mcp*.py'
+      - run: python -m pip install mcp==1.30.0
+      - name: Test official SDK transport
+        working-directory: frog
+        run: FROG_CONFIG="$RUNNER_TEMP/frog-config.json" python -m unittest discover -s tests -p 'test_mcp*.py'
+  model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2,wasm32-unknown-unknown
+      - run: cargo test --manifest-path rust/frog-model/Cargo.toml --features sqlite
+      - run: cargo check --manifest-path rust/frog-model/Cargo.toml --features http
+      - run: cargo build --manifest-path rust/frog-model/Cargo.toml --target wasm32-wasip2 --features component --lib
+      - run: cargo build --manifest-path rust/frog-model/Cargo.toml --target wasm32-unknown-unknown --lib

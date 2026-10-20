@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 from . import mcp_server
 
 MAX_BODY = 64 * 1024
-VERSIONS = {'2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'}
+VERSIONS = frozenset(mcp_server.SUPPORTED_PROTOCOL_VERSIONS)
 
 
 def serve_http(*, listen='127.0.0.1:8081', json_log=False, token_env='FROG_MCP_TOKEN',
@@ -38,10 +38,15 @@ def serve_http(*, listen='127.0.0.1:8081', json_log=False, token_env='FROG_MCP_T
     class Server(HTTPServer):
         address_family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
 
+        def get_request(self):
+            connection, peer = super().get_request()
+            connection.settimeout(10)
+            return connection, peer
+
     class Handler(BaseHTTPRequestHandler):
         server_version = 'FrogMCP/1'
 
-        def log_message(self, *_):
+        def log_message(self, format, *args):
             pass  # Never mix BaseHTTPRequestHandler's stderr format with access logs.
 
         def do_GET(self):
@@ -102,6 +107,7 @@ def serve_http(*, listen='127.0.0.1:8081', json_log=False, token_env='FROG_MCP_T
             if urlsplit(self.path).path != '/mcp':
                 return refuse(404, 'not_found')
             origin = self.headers.get('Origin')
+            assert isinstance(self.server, HTTPServer)
             actual_port = self.server.server_port
             authority = f'[{host}]:{actual_port}' if address.version == 6 else f'{host}:{actual_port}'
             allowed = set(allowed_origins) | {f'http://{authority}'}
@@ -140,6 +146,9 @@ def serve_http(*, listen='127.0.0.1:8081', json_log=False, token_env='FROG_MCP_T
                 return 400, mcp_server._error(None, -32700, 'parse error'), None, None
             if not isinstance(message, dict) or message.get('jsonrpc') != '2.0' or not isinstance(message.get('method'), str):
                 return 400, mcp_server._error(None, -32600, 'invalid request'), None, None
+            if ('params' in message and not isinstance(message['params'], dict)) or (
+                'id' in message and (isinstance(message['id'], bool) or not isinstance(message['id'], (str, int)))):
+                return 400, mcp_server._error(None, -32600, 'invalid request'), None, None
             method = message['method']
             tool = ((message.get('params') or {}).get('name') if method == 'tools/call' and isinstance(message.get('params'), dict) else None)
             # Only a known tool name is logged; never arguments, bearer tokens,
@@ -147,11 +156,14 @@ def serve_http(*, listen='127.0.0.1:8081', json_log=False, token_env='FROG_MCP_T
             if tool not in {spec['name'] for spec in mcp_server._tool_specs()}:
                 tool = None
             result = mcp_server._handle_message(message, config_path=config_path)
+            logged_method = method if method in {'initialize', 'ping', 'tools/list', 'tools/call',
+                'resources/list', 'resources/read', 'prompts/list', 'prompts/get',
+                'notifications/initialized', 'exit'} else None
             if result == 'exit':
                 result = None  # A remote client cannot stop the server process.
             if 'id' not in message:
-                return 202, None, method, tool
-            return 200, result, method, tool
+                return 202, None, logged_method, tool
+            return 200, result, logged_method, tool
 
     server = Server((host, port), Handler)
     if json_log:

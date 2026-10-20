@@ -20,6 +20,63 @@ generate the config/hook/MCP wiring for a repo.
 This is frog's intended integration surface: infrastructure an agent
 stands on, invisibly — not another tool it has to drive.
 
+## Foreground HTTP
+
+```bash
+frog serve mcp --http
+frog serve mcp --http --listen 127.0.0.1:8081 --foreground --json
+frog serve mcp --http --listen 0.0.0.0:8081 --fg --clf
+```
+
+Foreground is the default; `--foreground` and `--fg` are equivalent. The
+default binding is `127.0.0.1:8081`, endpoint `/mcp`. `--listen` accepts an
+IP:port, including `[::1]:8081`. Select a backend explicitly with global
+`--db PATH` or the existing model configuration; transport failures never
+silently switch backends. `FROG_CONFIG` selects the config file.
+
+Set `FROG_MCP_TOKEN` before binding outside loopback. Clients send it as
+`Authorization: Bearer …`; `--token-env NAME` selects another environment
+variable. A token set on loopback is enforced there too. Use a trusted TLS
+proxy or tunnel for off-machine access. `--allow-origin ORIGIN` explicitly
+allows an additional client Origin. Loopback Host headers are checked.
+
+Clients POST JSON-RPC with `Content-Type: application/json` and
+`Accept: application/json, text/event-stream`. The stateless server returns
+JSON, not SSE; GET/DELETE are unsupported. Requests require Content-Length,
+are capped at 64 KiB, and chunked transfer encoding is refused. Supported
+protocol headers are checked; initialization negotiates a supported version.
+Notifications return 202 with no body. SIGTERM stops the foreground process.
+
+Stdout is access logs only: `--json` produces JSONL and `--clf` produces
+common logfile format (also the default). The flags are mutually exclusive.
+JSONL includes a startup event, then UTC datetime, remote address, HTTP
+method/path/status/bytes/duration, known MCP method and known tool name.
+CLF startup information goes to stderr. Arguments, results, query strings
+and bearer credentials are omitted from access logs.
+
+## Shared native/hosted catalog
+
+Eight read tools share canonical descriptions and input schemas with Dash:
+`dash_list_instances`, `dash_read_instance`, `dash_read_view`,
+`dash_read_frog`, `dash_read_audit`, `frog_task_list`, `frog_status`, and
+`frog_log_tail`. Native Frog retains its write tools. Its `dash_*` aliases
+describe the selected local workspace with stable local instance identity;
+Rebekah-only views report unavailable. Dash exposes only read tools backed
+by membership-checked snapshots and account/instance audit views.
+
+Authority lives in `src/ragbaz_frog/mcp_contract.json`. Synchronize/check:
+
+```bash
+python3 bin/sync-mcp-contract.py --dash ../ragbaz-dash
+python3 bin/sync-mcp-contract.py --dash ../ragbaz-dash --check
+```
+
+Both repositories' CI compare against a pinned peer commit. Contract changes
+must update generated artifacts, the digest, and both peer pins together;
+review against the actual wire schemas, not just source JSON. Catalog/API
+versions are separate from date-based persisted data versions; see
+[the migration plan](MODEL-MIGRATION.md).
+
 ## Pre-edit hook: refuse silent collisions
 
 `frog lock check-file <path>` answers the question "may THIS agent

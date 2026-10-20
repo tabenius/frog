@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+pub mod data_format;
+
 pub const CONTRACT: &str = "frog.model.v1";
 pub const MIGRATION: &str = include_str!("../sql/0001_model.sql");
 pub const SERVICE_MIGRATION: &str = include_str!("../sql/0002_services.sql");

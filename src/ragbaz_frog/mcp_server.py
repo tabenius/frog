@@ -16,6 +16,8 @@ from ragbaz_frog.mcp_contract import shared_specs, validate_arguments
 
 DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 SUPPORTED_PROTOCOL_VERSIONS = (
+    "2025-11-25",
+    "2025-06-18",
     "2025-03-26",
     "2024-11-05",
 )
@@ -986,8 +988,6 @@ def _negotiate_protocol_version(message: dict) -> str:
     params = message.get("params") or {}
     requested = params.get("protocolVersion")
     if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS:
-        return requested
-    if isinstance(requested, str) and requested:
         return requested
     return DEFAULT_PROTOCOL_VERSION
 

@@ -47,30 +47,35 @@ def _run_mcp(messages, *, db=None, env=None):
     proc = subprocess.Popen(
         [sys.executable, "bin/frog", "--db", db, "mcp", "serve"],
         cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, env=e,
+        stderr=subprocess.PIPE, env=e,
     )
     pending = {m["id"] for m in messages if "id" in m}
     for m in messages:
-        proc.stdin.write(json.dumps(m, separators=(",", ":")) + "\n")
+        proc.stdin.write((json.dumps(m, separators=(",", ":")) + "\n").encode())
     proc.stdin.flush()
     lines = []
+    buffer = b""
     deadline = time.monotonic() + 10
     while pending and time.monotonic() < deadline:
         ready, _, _ = select.select([proc.stdout], [], [], 0.1)
         if not ready:
             continue
-        line = proc.stdout.readline()
-        if not line:
+        chunk = os.read(proc.stdout.fileno(), 65536)
+        if not chunk:
             break
-        lines.append(line)
-        try:
-            pending.discard(json.loads(line).get("id"))
-        except ValueError:
-            pass
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            lines.append(line + b"\n")
+            try:
+                pending.discard(json.loads(line).get("id"))
+            except ValueError:
+                pass
     proc.stdin.close()
     proc.stdin = None  # communicate() must not flush a closed pipe on Python 3.13.
     rest, stderr = proc.communicate(timeout=10)
-    return subprocess.CompletedProcess(proc.args, proc.returncode, "".join(lines) + rest, stderr), db
+    return subprocess.CompletedProcess(proc.args, proc.returncode,
+                                       (b"".join(lines) + buffer + rest).decode(), stderr.decode()), db
 
 
 def _by_id(lines, msg_id):

@@ -9,11 +9,31 @@ interface types {
     record dependency { task-id: string, depends-on: string }
     record board-query { repo-id: option<string>, limit: u32, after: option<string> }
     record event-query { after: string, limit: u32 }
+    record edit-task { task-id: string, expected-revision: u32, title: option<string>, priority: option<u8> }
+    record task-edit-fields {
+        title: option<string>, priority: option<u8>, repo-id: option<string>,
+        why: option<string>, what-text: option<string>, roi-note: option<string>
+    }
+    record edit-task-fields { task-id: string, expected-revision: u32, fields: task-edit-fields }
+    record provider-import {
+        source: string, external-id: string, repo-id: string, task-id: string,
+        title: string, priority: u8, status: string, expected-revision: option<u32>,
+        why: option<string>, what-text: option<string>
+    }
+    record provider-outbox { source: string, limit: u32, after: option<string> }
+    record record-verification { task-id: string, expected-revision: u32, target: string, passed: bool }
+    record acquire-lock { scope: string, lease-id: string, ttl-seconds: u32 }
+    record release-lock { scope: string, lease-id: string }
+    record locks-query { limit: u32, after: option<string> }
     variant command {
         register-repo(register-repo), create-task(create-task), claim-task(claim-task),
         transition-task(transition-task), cancel-task(cancel-task),
         add-dependency(dependency), remove-dependency(dependency),
-        describe-task(string), board(board-query), repositories(u32), events(event-query)
+        describe-task(string), board(board-query), repositories(u32), events(event-query),
+        edit-task(edit-task), edit-task-fields(edit-task-fields), task-details(string),
+        provider-import(provider-import), provider-outbox(provider-outbox),
+        record-verification(record-verification), verifications(string),
+        acquire-lock(acquire-lock), release-lock(release-lock), locks(locks-query)
     }
     record request { workspace-id: string, actor: string, operation-id: string, command: command }
     variant parameter { null, text(string), integer(s64) }

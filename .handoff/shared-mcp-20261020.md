@@ -1,5 +1,42 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Resumed validation — 2026-10-20
+
+Current branch is `handoff/mcp-native-edge-20261020`, checkpoint HEAD
+`3448eb3580b5cd3a51c520f138a32528d3b1b10b`. The historical sections below
+describe the earlier snapshot. This section was captured before the validated
+resume commit; the user has now requested committing/pushing and continuing.
+
+- Fixed stdio test EOF/buffer races using unbuffered reads and shared exchange
+  helper. Added real HTTP CLI integration tests plus official SDK HTTP client.
+- HTTP now bounds accepted socket reads, validates params/IDs, redacts unknown
+  MCP method names in access logs, and negotiates supported versions correctly.
+- Latest full MCP checks: fallback 33 passed + 1 SDK-only skip; official MCP
+  1.30.0/Python 3.12: all 34 passed. CLI rendering: all 21 passed. Final narrow
+  HTTP rerun after signature/type refinements: 4 passed + 1 SDK-only skip.
+- Added Bash/Fish serve completion and HTTP/shared-catalog documentation.
+- Added cross-checkout pinned-contract CI and native/WASM model build CI.
+- Rust: date-format version parser/serde/explicit support check in
+  `src/data_format.rs`, format `20261020-3`; existing persisted stores are not
+  relabelled. Closed WIT command coverage gap and gated HTTP dependencies.
+- Native Rust tests: 18 passed (3 library + 12 conformance + 3 legacy).
+  HTTP cargo check passed; both wasm32-wasip2 component and
+  wasm32-unknown-unknown core library builds passed.
+- `rustfmt --check` on modified component/new format module passed. Whole
+  crate cargo fmt check still finds pre-existing formatting in legacy.rs,
+  sqlite.rs and tests/legacy.rs. Native linking with component+sqlite together
+  fails on WIT export symbols; supported validation uses native sqlite tests
+  and the actual WASI component target separately.
+- Full migration design is `docs/MODEL-MIGRATION.md`. Full importer, generated
+  TS bindings and runtime WASM differential fixtures remain future work.
+- Local contract sync/digest check and git diff --check passed. GitHub CI
+  itself has not run on these unpushed changes. No Kali access or production
+  deployment occurred. Resume publication only after inspecting current diff.
+
+Recreated missing SDK environment with uv at
+`/tmp/opencode/frog-mcp-test` (system Python lacks pip/ensurepip). Isolated
+config remains `/tmp/opencode/frog-test-config.json`.
+
 ## Checkpoint publication and portable resume
 
 User requested commit/push then pause. Checkpoint branch in both repositories:

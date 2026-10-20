@@ -6,23 +6,14 @@ import unittest
 from pathlib import Path
 
 from _util import fresh_db
+from test_mcp_server import _run_mcp as _exchange
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_mcp(messages, *, env=None):
-    body = "".join(json.dumps(message, separators=(",", ":")) + "\n"
-                   for message in messages)
-    return subprocess.run(
-        [sys.executable, "bin/frog", "--db", fresh_db(), "mcp", "serve"],
-        cwd=ROOT,
-        input=body,
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=5,
-    )
+    return _exchange(messages, env=env)[0]
 
 
 class McpTransport(unittest.TestCase):

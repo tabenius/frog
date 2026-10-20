@@ -2,7 +2,7 @@ from __future__ import annotations
 
 TOP_LEVEL = (
     "db new agent box doctor board tui whereis setup provider gh import export hook "
-    "agent-instructions completion ps snapshot status log config mcp repo unit task lock file sync"
+    "agent-instructions completion ps snapshot status log config mcp serve repo unit task lock file sync"
 )
 
 
@@ -56,6 +56,13 @@ def completion_script(
       ;;
     mcp)
       [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "serve tools" -- "$cur") ) ;;
+    serve)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "mcp" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -W "--http --listen --foreground --fg --json --clf --token-env --allow-origin" -- "$cur") )
+      fi
+      ;;
     repo)
       if [[ $COMP_CWORD -eq 2 ]]; then
         COMPREPLY=( $(compgen -W "$repo_subs" -- "$cur") )
@@ -98,6 +105,8 @@ complete -c frog -n '__fish_seen_subcommand_from new agent-instructions' -a '(__
 complete -c frog -n '__fish_seen_subcommand_from config' -a 'info host workspace coordinator path'
 complete -c frog -n '__fish_seen_subcommand_from path' -a 'bash fish'
 complete -c frog -n '__fish_seen_subcommand_from mcp' -a 'serve tools'
+complete -c frog -n '__fish_seen_subcommand_from serve; and not __fish_seen_subcommand_from mcp' -a 'mcp'
+complete -c frog -n '__fish_seen_subcommand_from serve; and __fish_seen_subcommand_from mcp' -a '--http --listen --foreground --fg --json --clf --token-env --allow-origin'
 complete -c frog -n '__fish_seen_subcommand_from host' -a 'add list'
 complete -c frog -n '__fish_seen_subcommand_from workspace' -a 'add list use'
 complete -c frog -n '__fish_seen_subcommand_from coordinator' -a 'show set'
