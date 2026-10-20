@@ -24,8 +24,11 @@ Implemented foundations on this branch:
 - `frog-model-migrate dry-run` assesses per-field coverage, model-valid core
   candidates, repository/provider identities, dependencies and timestamps from
   the same immutable snapshot. Mapping rules live in portable `import_rules.rs`.
+- `frog-model-migrate simulate` imports a typed preservation envelope into a
+  disposable SQLite destination and verifies every row/column/schema record
+  and the exact snapshot against the source inventory. Its codec is portable.
 
-**A comprehensive importer and cutover command are not implemented yet.**
+**A comprehensive operational importer and cutover command are not implemented yet.**
 `legacy.rs` is a limited live adapter, using TEMP views and zero-valued read
 revisions. It supports create/dependency writes, not legacy claim/finish.
 Neither those views nor successful planner builds establish migration parity.
@@ -104,9 +107,63 @@ changing the source; other offsets/unknown instants require an explicit
 conversion adapter. Private row titles/paths and metadata values are omitted
 from findings; source schema/default SQL remains included in the inventory.
 
-Next implement the missing destination schemas and explicit typed preservation,
-then execute reviewed mappings against a disposable target and reconcile full
-content before adding persistent apply/resume or cutover.
+Typed preservation is now exercised by the simulation below. Next implement
+the missing operational destination schemas and execute reviewed model mappings,
+then prove operational parity before persistent apply/resume or cutover.
+
+## Available disposable preservation simulation
+
+```bash
+cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
+  --bin frog-model-migrate -- simulate --source /explicit/path/AGENTS.db \
+  --snapshot /explicit/new/path/reviewed-source.db
+```
+
+The report is `frog.migration-simulation.v1`, data format `20261020-5`, with
+the unchanged dry-run (`20261020-4`) and inventory (`20261020-3`) nested inside.
+`destination_simulated` is true for preservation execution;
+`operational_model_populated`, `preservation.operational_parity` and
+`ready_to_apply` remain false. A verified preservation archive does not make
+unsupported statuses, lease semantics, history or relationship operations work
+in the new runtime. The nested assessment still reports those gaps.
+
+The destination is always new and in memory, limited to 512 MiB of SQLite
+pages. There is no persistent destination option. It initializes only owned
+model schema and imports into the `frog_migration_*` preservation tables
+defined in `sql/0003_migration_preservation.sql`. This file is not automatically
+applied to existing native/D1 stores. Foreign keys and strict storage types
+are enforced. Preservation schema creation and inserts share a transaction;
+in-transaction reconciliation failure rolls back both DDL and rows. Source
+snapshots and legacy row limits still apply, and total process memory also
+includes source, inventory and codec/verifier working buffers.
+
+The envelope retains the exact source snapshot and its fingerprint, schema
+SQL as inert text, full column metadata and an ordered sequence of typed binary
+rows for every table. No source trigger/view/default DDL is executed in the
+destination; a source table named like a model table cannot replace it.
+The snapshot preserves physical layout/implicit rowids while row envelopes
+preserve semantic values, including unknown fields and duplicate rows.
+
+`preserved_row.rs` encodes each row with the already-published inventory hash
+header followed by storage-class name, big-endian u64 byte length and raw
+bytes per cell. Null has zero bytes; integers are signed 64-bit big-endian;
+real values retain their 64-bit representation; text/blob bytes are distinct
+and not UTF-8/JSON-coerced. Column order and count come from retained metadata.
+Changing this encoding requires a new artifact version. Integer values larger
+than JavaScript's exact-number range remain binary, not JSON numbers.
+
+Verification checks the exact snapshot digest, artifact versions, schema and
+column metadata, contiguous archive ordinals, row counts, per-column storage
+classes and sorted typed-content fingerprints, plus destination integrity/FKs.
+Evidence is emitted only after verification succeeds; it contains hashes and
+counts rather than private row contents. The optional `--snapshot` still writes
+the source backup only, exclusively, after successful simulation. The archive
+itself is discarded with the in-memory destination.
+
+Tests cover the complete shipped legacy schema, populated legacy status/history/
+locks/unknown metadata, WAL, large integers, non-UTF-8 text, blobs, generated
+columns, WITHOUT ROWID tables, duplicate rows, inert source SQL, tampering,
+capacity errors, collisions and transactional rollback.
 
 ## Independent version axes
 

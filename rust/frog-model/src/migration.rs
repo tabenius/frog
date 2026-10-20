@@ -3,6 +3,7 @@ use crate::data_format::{DataFormatVersion, CURRENT_DATA_FORMAT};
 use rusqlite::{backup::{Backup, StepResult}, types::ValueRef, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use crate::preserved_row::{self, Cell};
 use std::{collections::BTreeMap, fs::OpenOptions, io::Write, path::Path,
     time::{Duration, Instant}};
 
@@ -189,32 +190,32 @@ fn inventory_table(db: &Connection, name: &str, remaining_rows: &mut usize) -> R
     while let Some(row) = rows.next().map_err(error)? {
         if *remaining_rows == 0 { return Err("source exceeds 1000000 row inventory limit".into()); }
         *remaining_rows -= 1;
-        let mut hash = Sha256::new();
-        hash.update(b"frog.migration.typed-row.v1\0");
         for (i, name) in names.iter().enumerate() {
             let value = row.get_ref(i).map_err(error)?;
-            let (kind, bytes) = match value {
-                ValueRef::Null => ("null", Vec::new()),
-                ValueRef::Integer(v) => ("integer", v.to_be_bytes().to_vec()),
-                ValueRef::Real(v) => ("real", v.to_bits().to_be_bytes().to_vec()),
-                ValueRef::Text(v) => ("text", v.to_vec()),
-                ValueRef::Blob(v) => ("blob", v.to_vec()),
-            };
-            hash.update(kind.as_bytes());
-            hash.update((bytes.len() as u64).to_be_bytes());
-            hash.update(&bytes);
-            *storage_classes.get_mut(name).unwrap().entry(kind.into()).or_default() += 1;
+            *storage_classes.get_mut(name).unwrap().entry(cell(value).storage_class().into()).or_default() += 1;
         }
-        hashes.push(<[u8; 32]>::from(hash.finalize()));
+        hashes.push(preserved_row::row_digest(&encode_sql_row(row, names.len())?));
     }
-    hashes.sort_unstable();
-    let mut hash = Sha256::new();
-    hash.update(b"frog.migration.typed-table.v1\0");
-    hash.update((hashes.len() as u64).to_be_bytes());
-    for row in &hashes { hash.update(row); }
+    let content_sha256 = preserved_row::table_digest(&mut hashes);
     Ok(TableInventory { name: name.into(), columns, rows: hashes.len() as u64,
-        storage_classes, content_sha256: format!("{:x}", hash.finalize()),
+        storage_classes, content_sha256,
         disposition: "requires_explicit_mapping".into() })
+}
+
+pub(crate) fn encode_sql_row(row: &rusqlite::Row<'_>, columns: usize) -> Result<Vec<u8>, String> {
+    let cells = (0..columns).map(|index| row.get_ref(index).map(cell))
+        .collect::<Result<Vec<_>, _>>().map_err(error)?;
+    Ok(preserved_row::encode(&cells))
+}
+
+fn cell(value: ValueRef<'_>) -> Cell<'_> {
+    match value {
+        ValueRef::Null => Cell::Null,
+        ValueRef::Integer(value) => Cell::Integer(value),
+        ValueRef::Real(value) => Cell::RealBits(value.to_bits()),
+        ValueRef::Text(value) => Cell::Text(value),
+        ValueRef::Blob(value) => Cell::Blob(value),
+    }
 }
 
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }

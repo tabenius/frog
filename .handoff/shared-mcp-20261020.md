@@ -1,5 +1,38 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Disposable preservation simulation — 2026-10-20
+
+- Continued from published/green `e62d220` with `frog-model-migrate simulate`.
+  Source inventory, mapping assessment and preservation read the same backup.
+- New owned destination schema `sql/0003_migration_preservation.sql` stores
+  source fingerprint/version/inventory, the exact SQLite snapshot, inert
+  schema SQL/column metadata, and typed binary rows for every source table.
+  It is used only in a disposable in-memory destination; it is not automatically
+  applied to existing SQLite/D1 stores. No persistent destination option exists.
+- Portable `preserved_row.rs` retains null/integer/real-bit/text-byte/blob-byte
+  distinctions, including invalid UTF-8 and large integers. It reuses the
+  already-published inventory hash encoding; inventory version remains `-3`.
+- Simulation artifact `frog.migration-simulation.v1` uses data version
+  `20261020-5`, nesting unchanged dry-run `-4` and inventory `-3` reports.
+  Preservation is verified against trusted source metadata, snapshot SHA-256,
+  per-table typed hashes, ordinals, storage classes, counts and destination
+  integrity/FKs. Verification occurs before commit and again afterward.
+- Source DDL is never executed in the destination. Generic preservation does
+  not claim operational model parity: destination_simulated=true,
+  operational_model_populated=false, ready_to_apply=false. Full runtime mapping,
+  persistent apply/resume and cutover remain future work. Archive preservation
+  schema/rows roll back on reconciliation, collision or capacity failures.
+- Limits remain 256 MiB source/one million rows; destination pages are bounded
+  to 512 MiB (working buffers/source memory are additional). Optional --snapshot
+  writes the source backup exclusively only after simulation succeeds.
+- Latest local checks: **43 Rust tests passed**, HTTP check and both WASM
+  library builds passed. New tests cover typed roundtrips, complete legacy
+  schema with populated history/locks/unknown fields, WAL, generated/WITHOUT
+  ROWID tables, duplicates, inert source schema, tampering, version refusal,
+  rollback/collisions/capacity and real CLI behavior.
+- This note is captured before committing/pushing this milestone; inspect
+  git log and GitHub CI for its final publication. No Kali/production access.
+
 ## Mapping dry-run continuation — 2026-10-20
 
 - Inventory milestone was committed/pushed as `7ed534e`; its GitHub CI

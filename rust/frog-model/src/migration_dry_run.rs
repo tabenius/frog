@@ -37,6 +37,12 @@ fn finding(findings: &mut Findings, code: &str, table: &str, column: Option<&str
 /// Inventory and assessments use the same immutable backup, never two live reads.
 pub fn dry_run(source: &Path, snapshot_path: Option<&Path>) -> Result<DryRun, String> {
     let db = migration::capture(source)?;
+    let report = assess_snapshot(&db)?;
+    if let Some(path) = snapshot_path { migration::write_snapshot(&db, path)?; }
+    Ok(report)
+}
+
+pub(crate) fn assess_snapshot(db: &Connection) -> Result<DryRun, String> {
     let inventory = migration::inventory_snapshot(&db)?;
     let mut findings = Findings::new();
     let mut fields = Vec::new();
@@ -133,7 +139,6 @@ pub fn dry_run(source: &Path, snapshot_path: Option<&Path>) -> Result<DryRun, St
     }
     let candidate_dependency_edges = dependencies(&db, &inventory, &task_ids, &mut findings)?;
     finding(&mut findings, "full_import_not_implemented", "destination", None, 1);
-    if let Some(path) = snapshot_path { migration::write_snapshot(&db, path)?; }
     Ok(DryRun {
         schema: "frog.migration-dry-run.v1".into(),
         data_format_version: import_rules::DRY_RUN_DATA_FORMAT.parse()?, inventory, fields,
