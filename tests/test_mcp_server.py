@@ -29,6 +29,8 @@ EXPECTED_TOOLS = [
     "frog_workspace_list", "__health",
     "frog_task_verify", "frog_provider_import", "frog_provider_outbox",
     "frog_lock_renew",
+    "dash_list_instances", "dash_read_instance", "dash_read_view",
+    "dash_read_frog", "dash_read_audit",
 ]
 
 
@@ -66,6 +68,7 @@ def _run_mcp(messages, *, db=None, env=None):
         except ValueError:
             pass
     proc.stdin.close()
+    proc.stdin = None  # communicate() must not flush a closed pipe on Python 3.13.
     rest, stderr = proc.communicate(timeout=10)
     return subprocess.CompletedProcess(proc.args, proc.returncode, "".join(lines) + rest, stderr), db
 

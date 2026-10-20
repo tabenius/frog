@@ -12,6 +12,7 @@ from ragbaz_frog import DEFAULT_DB_PATH as _COMPILED_DEFAULT_DB_PATH
 DEFAULT_DB_PATH = os.environ.get("FROG_DB_PATH") or _COMPILED_DEFAULT_DB_PATH
 from ragbaz_frog import config as frog_config
 from ragbaz_frog import store
+from ragbaz_frog.mcp_contract import shared_specs, validate_arguments
 
 DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 SUPPORTED_PROTOCOL_VERSIONS = (
@@ -31,7 +32,7 @@ def _log(level: str, message: str, **fields) -> None:
     sys.stderr.flush()
 
 
-def _tool_specs() -> list[dict]:
+def _native_tool_specs() -> list[dict]:
     return [
         {
             'name':'frog_task_verify',
@@ -340,6 +341,20 @@ def _tool_specs() -> list[dict]:
     ]
 
 
+def _tool_specs() -> list[dict]:
+    specs = {spec['name']: spec for spec in _native_tool_specs()}
+    specs.update({spec['name']: spec for spec in shared_specs()})
+    readonly = {'frog_status', 'frog_repo_list', 'frog_repo_info', 'frog_repo_targets',
+                'frog_unit_list', 'frog_task_list', 'frog_lock_list', 'frog_log_tail',
+                'frog_task_next', 'frog_lock_audit', 'frog_repo_affected', '__health',
+                'frog_workspace_list', 'frog_provider_outbox'}
+    for name, spec in specs.items():
+        spec.setdefault('annotations', {'readOnlyHint': name in readonly,
+            'destructiveHint': name not in readonly, 'idempotentHint': name in readonly,
+            'openWorldHint': False})
+    return list(specs.values())
+
+
 def _remote_dispatch(workspace: dict, argv: list[str]) -> dict:
     remote_argv = [workspace["frog_bin"], "--db", workspace["db"], "--json", *argv]
     proc = subprocess.run(
@@ -407,6 +422,12 @@ def _with_conn(db_path: str, fn):
 def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
     from .model_backend import Backend, settings
     options = _MODEL_OPTIONS or settings(config_path=_CONFIG_PATH, legacy_db=_DB_OVERRIDE is not None)
+    if tool_name.startswith('dash_'):
+        from .mcp_local_reads import read_local_instance
+        identity = ('model:' + options.get('url', '') + ':' + str(options.get('workspace', 'default'))
+                    if options['enabled'] else str(Path(_DB_OVERRIDE or (workspace['db'] if workspace else _default_db())).resolve()))
+        return read_local_instance(tool_name, arguments, identity,
+            lambda name, args: _call_local(name, args, workspace))
     if options['enabled']:
         backend = Backend(options)
         if arguments.get('workspace'):
@@ -414,6 +435,26 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
         if tool_name == 'frog_task_list':
             return backend.task_list(repo_ref=arguments.get('repo_ref'), workflow_status=arguments.get('workflow_status'),
                 assigned_agent=arguments.get('assigned_agent'), include_done=True)
+        if tool_name == 'frog_status':
+            tasks = backend.task_list(repo_ref=arguments.get('repo_ref'), include_done=True)['tasks']
+            from collections import Counter
+            return {'ok': True, 'counts': dict(Counter(task['workflow_status'] for task in tasks)),
+                    'task_count': len(tasks), 'source': 'frog-model'}
+        if tool_name == 'frog_log_tail':
+            rows = backend.event_rows()
+            if arguments.get('repo_ref'):
+                return {'ok': False, 'error': 'unsupported_filter', 'message': 'Model events do not expose a repository filter.'}
+            return {'ok': True, 'events': rows[-int(arguments.get('limit', 20)):], 'source': 'frog-model'}
+        if tool_name == 'frog_task_create':
+            from types import SimpleNamespace
+            defaults = dict(slug=arguments['slug'], title=arguments['title'], repo_ref=None,
+                why=None, what=None, roi_note=None, assigned_agent=None, delegation_current=None,
+                delegation_other=None, parent_task_slug=None, file=[], workflow_status='idea',
+                git_status='not_started', priority='p3')
+            defaults.update({key: value for key, value in arguments.items() if key != 'workspace'})
+            if 'files' in defaults:
+                defaults['file'] = defaults.pop('files')
+            return backend.create(SimpleNamespace(**defaults))
         if tool_name == 'frog_repo_list':
             return {'ok':True,'repos':backend.repo_tree_snapshot()['repos']}
         if tool_name == 'frog_task_edit':
@@ -615,7 +656,13 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
 def call_tool(
     tool_name: str, arguments: dict | None, *, config_path: str | None
 ) -> dict:
-    args = arguments or {}
+    args = {} if arguments is None else arguments
+    try:
+        validate_arguments(tool_name, args)
+    except (TypeError, ValueError, AttributeError):
+        return {'ok': False, 'error': 'invalid_arguments'}
+    if not isinstance(args, dict):
+        return {'ok': False, 'error': 'invalid_arguments'}
     workspace = _workspace(args.get("workspace"), config_path)
     if tool_name == "frog_workspace_list":
         return frog_config.list_workspaces(config_path)
@@ -797,6 +844,7 @@ def _tool_result(payload: dict) -> dict:
 
 def _serve_fastmcp(*, config_path: str | None = None) -> int:
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import ToolAnnotations
 
     fmcp = FastMCP("ragbaz-frog")
 
@@ -850,7 +898,13 @@ def _serve_fastmcp(*, config_path: str | None = None) -> int:
             _make_handler(tool_name, _props),
             name=tool_name,
             description=spec["description"],
+            annotations=ToolAnnotations(**spec['annotations']),
         )
+        # FastMCP's dynamic Optional[Any] signatures otherwise replace the wire
+        # schema with permissive nullable fields. Dispatch validates shared
+        # arguments too, so SDK and dependency-free transports stay equivalent.
+        registered = fmcp._tool_manager.get_tool(tool_name)
+        registered.parameters = spec['inputSchema']
 
     # --- resources ---
     @fmcp.resource("frog://board")

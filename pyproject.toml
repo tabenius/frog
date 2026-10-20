@@ -24,4 +24,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-ragbaz_frog = ["migrations/*.sql"]
+ragbaz_frog = ["migrations/*.sql", "mcp_contract.json"]

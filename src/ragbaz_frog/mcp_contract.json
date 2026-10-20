@@ -1,0 +1,47 @@
+{
+  "schema": "ragbaz.mcp-tools.v1",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "dash_list_instances",
+      "description": "List accessible instances. Hosted Dash lists member Rebekah instances; local Frog lists its selected local workspace instance.",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+    },
+    {
+      "name": "dash_read_instance",
+      "description": "Read an accessible instance and its permitted activity. Unknown and inaccessible ids both return not_found.",
+      "inputSchema": {"type": "object", "properties": {"instanceId": {"type": "string", "format": "uuid"}}, "required": ["instanceId"], "additionalProperties": false}
+    },
+    {
+      "name": "dash_read_view",
+      "description": "Read a bounded instance view with source and freshness metadata. Views not supplied by this instance return an explicit unavailable error.",
+      "inputSchema": {"type": "object", "properties": {"instanceId": {"type": "string", "format": "uuid"}, "view": {"type": "string", "enum": ["system", "attention", "change-sets", "change-requests", "oversight", "daily-agenda"]}}, "required": ["instanceId", "view"], "additionalProperties": false}
+    },
+    {
+      "name": "dash_read_frog",
+      "description": "Read a private read-only Frog task snapshot. Unconfigured sources are unavailable, not zero tasks; source metadata identifies live local or hosted snapshot data.",
+      "inputSchema": {"type": "object", "properties": {"instanceId": {"type": "string", "format": "uuid"}}, "required": ["instanceId"], "additionalProperties": false}
+    },
+    {
+      "name": "dash_read_audit",
+      "description": "Read permitted audit events. Hosted Dash uses the account or member instance trail; local Frog uses the selected workspace event log, labelled by source.",
+      "inputSchema": {"type": "object", "properties": {"instanceId": {"type": "string", "format": "uuid"}}, "additionalProperties": false}
+    },
+    {
+      "name": "frog_task_list",
+      "description": "List tasks filtered by repository, workflow status or assignee. Local workspace selects a configured workspace; hosted workspace selects an accessible instance id (optional when exactly one exists).",
+      "inputSchema": {"type": "object", "properties": {"workspace": {"type": "string"}, "repo_ref": {"type": "string"}, "workflow_status": {"type": "string"}, "assigned_agent": {"type": "string"}}, "additionalProperties": false}
+    },
+    {
+      "name": "frog_status",
+      "description": "Read task status counts for the selected coordination source, optionally filtered by repository. Source and snapshot freshness remain explicit.",
+      "inputSchema": {"type": "object", "properties": {"workspace": {"type": "string"}, "repo_ref": {"type": "string"}}, "additionalProperties": false}
+    },
+    {
+      "name": "frog_log_tail",
+      "description": "Read recent permitted coordination audit events. Local workspace uses Frog's event log; hosted workspace uses the instance's permitted Dash trail, not a claimed copy of Frog's native log.",
+      "inputSchema": {"type": "object", "properties": {"workspace": {"type": "string"}, "repo_ref": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "additionalProperties": false}
+    }
+  ],
+  "readAnnotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+}
