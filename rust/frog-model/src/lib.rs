@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub mod data_format;
+pub mod import_rules;
 
 pub const CONTRACT: &str = "frog.model.v1";
 pub const MIGRATION: &str = include_str!("../sql/0001_model.sql");
@@ -722,3 +723,5 @@ pub mod legacy;
 pub mod sqlite;
 #[cfg(feature = "sqlite")]
 pub mod migration;
+#[cfg(feature = "sqlite")]
+pub mod migration_dry_run;

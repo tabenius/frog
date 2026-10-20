@@ -74,6 +74,15 @@ pub struct Inventory {
 /// A consistent backup includes committed WAL pages. The source is opened
 /// read-only, never migrated, checkpointed, or used as the destination.
 pub fn inventory(source_path: &Path, snapshot_path: Option<&Path>) -> Result<Inventory, String> {
+    let snapshot = capture(source_path)?;
+    let report = inventory_snapshot(&snapshot)?;
+    if let Some(path) = snapshot_path {
+        write_snapshot(&snapshot, path)?;
+    }
+    Ok(report)
+}
+
+pub(crate) fn capture(source_path: &Path) -> Result<Connection, String> {
     let source = Connection::open_with_flags(source_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .map_err(|e| format!("cannot open source read-only: {e}"))?;
@@ -101,6 +110,10 @@ pub fn inventory(source_path: &Path, snapshot_path: Option<&Path>) -> Result<Inv
     }
     snapshot.pragma_update(None, "trusted_schema", "OFF").map_err(error)?;
     snapshot.pragma_update(None, "query_only", "ON").map_err(error)?;
+    Ok(snapshot)
+}
+
+pub(crate) fn inventory_snapshot(snapshot: &Connection) -> Result<Inventory, String> {
     let bytes = snapshot.serialize("main").map_err(error)?;
     if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
         return Err("source snapshot exceeds 256 MiB inventory limit".into());
@@ -135,23 +148,6 @@ pub fn inventory(source_path: &Path, snapshot_path: Option<&Path>) -> Result<Inv
     if !foreign_key_violations.is_empty() { blockers.push("source_foreign_key_violations".into()); }
     let logical_sha256 = digest(&serde_json::to_vec(&(source_user_version, &schema_objects, &tables))
         .map_err(|e| e.to_string())?);
-    // Write only after a complete inventory; create_new prevents clobbering any
-    // file/symlink, including a mistaken source path or an earlier backup.
-    if let Some(path) = snapshot_path {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(path).map_err(|e| format!("cannot create new snapshot: {e}"))?;
-        if let Err(e) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
-            // A failed file is deliberately retained, never mistaken for a
-            // completed snapshot: no manifest is emitted on this error path.
-            return Err(format!("snapshot write failed (partial file retained): {e}"));
-        }
-    }
     Ok(Inventory {
         schema: INVENTORY_SCHEMA.into(), data_format_version: CURRENT_DATA_FORMAT.parse()?,
         importer_build: format!("frog-model/{}+{}", env!("CARGO_PKG_VERSION"),
@@ -160,6 +156,22 @@ pub fn inventory(source_path: &Path, snapshot_path: Option<&Path>) -> Result<Inv
         logical_sha256, schema_objects, tables, integrity, foreign_key_violations,
         ready_to_apply: false, blockers,
     })
+}
+
+// Only publish a snapshot after all preflight work has succeeded. Exclusive
+// creation prevents clobbering any file/symlink, including the source itself.
+pub(crate) fn write_snapshot(snapshot: &Connection, path: &Path) -> Result<(), String> {
+    let bytes = snapshot.serialize("main").map_err(error)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| format!("cannot create new snapshot: {e}"))?;
+    file.write_all(&bytes).and_then(|_| file.sync_all())
+        .map_err(|e| format!("snapshot write failed (partial file retained): {e}"))
 }
 
 fn inventory_table(db: &Connection, name: &str, remaining_rows: &mut usize) -> Result<TableInventory, String> {

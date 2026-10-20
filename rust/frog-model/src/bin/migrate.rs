@@ -2,21 +2,26 @@ use std::path::PathBuf;
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() != Some(std::ffi::OsStr::new("inventory")) {
-        return Err("usage: frog-model-migrate inventory --source PATH [--snapshot NEW_PATH]".into());
+    let command = args.next().ok_or("expected inventory or dry-run subcommand")?;
+    if command != "inventory" && command != "dry-run" {
+        return Err("usage: frog-model-migrate {inventory|dry-run} --source PATH [--snapshot NEW_PATH]".into());
     }
     let (mut source, mut snapshot) = (None, None);
     while let Some(flag) = args.next() {
         let target = match flag.to_str() {
             Some("--source") if source.is_none() => &mut source,
             Some("--snapshot") if snapshot.is_none() => &mut snapshot,
-            _ => return Err("unknown or duplicate inventory option".into()),
+            _ => return Err("unknown or duplicate migration option".into()),
         };
         *target = Some(PathBuf::from(args.next().ok_or("missing option value")?));
     }
     let source = source.ok_or("--source is required; no implicit database selection")?;
-    let result = frog_model::migration::inventory(&source, snapshot.as_deref())?;
-    println!("{}", serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?);
+    let result = if command == "inventory" {
+        serde_json::to_string_pretty(&frog_model::migration::inventory(&source, snapshot.as_deref())?)
+    } else {
+        serde_json::to_string_pretty(&frog_model::migration_dry_run::dry_run(&source, snapshot.as_deref())?)
+    };
+    println!("{}", result.map_err(|e| e.to_string())?);
     Ok(())
 }
 

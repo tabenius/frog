@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
-/// First explicitly versioned migration-manifest format (not a DB cutover).
+/// Current inventory artifact format (not a DB cutover or every artifact's version).
 pub const CURRENT_DATA_FORMAT: &str = "20261020-3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ impl fmt::Display for DataFormatVersion {
     }
 }
 
-/// A syntactically valid newer/older version is not evidence of compatibility.
+/// A syntactically valid newer/older version is not inventory compatibility.
 pub fn require_current(value: &str) -> Result<DataFormatVersion, String> {
     let version: DataFormatVersion = value.parse()?;
     if value != CURRENT_DATA_FORMAT {

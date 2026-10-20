@@ -1,5 +1,29 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Mapping dry-run continuation — 2026-10-20
+
+- Inventory milestone was committed/pushed as `7ed534e`; its GitHub CI
+  `39441631495` passed. Both published repositories were clean at that point.
+- Continued on explicit user requests with `frog-model-migrate dry-run`.
+  Inventory and row assessments now share one immutable online backup.
+- New portable `import_rules.rs` defines conservative per-field candidates,
+  exact legacy priority/status rules, stable repo identity requirements, and
+  UTC timestamp normalization. New native `migration_dry_run.rs` reuses the
+  Rust planner for structural repo/task/dependency validation, reports coverage
+  gaps/typed values/identity/provider/graph/timestamp issues without private
+  row values, and never executes destination writes or target commands.
+- New artifact: `frog.migration-dry-run.v1`, data version `20261020-4`;
+  nested inventory remains `20261020-3`. No format relabeling or DB cutover.
+- Full legacy `idea`/`blocked` states and history/locks/relations need explicit
+  destination schemas/preservation; no implicit lossy mapping is accepted.
+  `ready_to_apply` and `destination_simulated` are false. Candidate counts do
+  not establish operational parity. Full apply/resume remain unimplemented.
+- Latest local checks: **34 Rust tests passed**, HTTP check and both WASM
+  library builds passed. Includes six dry-run integration tests and two pure
+  mapping/timestamp tests, with all earlier inventory tests still passing.
+- This snapshot precedes committing/pushing the dry-run milestone; inspect
+  git log for its final SHA and CI. No Kali or production data was accessed.
+
 ## Published continuation and inventory milestone — 2026-10-20
 
 - User requested commit/push and continuation. Published to GitHub origin on

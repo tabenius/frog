@@ -21,6 +21,9 @@ Implemented foundations on this branch:
 - Native `frog-model-migrate inventory` produces a date-versioned inventory
   from SQLite's online backup API, with optional exclusive snapshot creation,
   exact snapshot SHA-256 and typed logical-content fingerprints.
+- `frog-model-migrate dry-run` assesses per-field coverage, model-valid core
+  candidates, repository/provider identities, dependencies and timestamps from
+  the same immutable snapshot. Mapping rules live in portable `import_rules.rs`.
 
 **A comprehensive importer and cutover command are not implemented yet.**
 `legacy.rs` is a limited live adapter, using TEMP views and zero-valued read
@@ -65,6 +68,45 @@ by the exact snapshot digest. A future apply must verify the snapshot digest
 as well as operational mapping/parity; logical equality alone is insufficient.
 Set `FROG_MODEL_BUILD_ID` at compile time to record a concrete build revision;
 unidentified developer builds are explicitly labelled `unidentified`.
+
+## Available mapping dry run
+
+```bash
+cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
+  --bin frog-model-migrate -- dry-run --source /explicit/path/AGENTS.db \
+  --snapshot /explicit/new/path/reviewed-source.db
+```
+
+The report uses schema `frog.migration-dry-run.v1` and date data version
+`20261020-4`; its nested inventory retains `20261020-3`. The original inventory
+format remains unchanged. Version checks are artifact-specific; the existing
+`data_format::require_current` checks inventory compatibility, not the new dry
+run format. This command is a mapping assessment, not destination execution:
+`destination_simulated` and `ready_to_apply` remain false.
+
+Every source column gets a candidate destination/rule or an explicit
+`field_requires_schema_or_preservation` finding, even for empty tables. Thus
+history, file/tag/conflict relations, target/artifact/provider state, aliases,
+box/federation data and lock semantics remain visible schema work. Unknown
+fields are never silently treated as migrated. Counts of candidate repos/tasks
+and dependency edges describe structural candidates, not complete/importable
+records; inspect all findings and the inventory's integrity/FK blockers.
+
+The assessment reuses the current Rust planner's validation for core task,
+repository and dependency candidates. It reports missing/ambiguous repo
+identities, unresolved task repositories, unsupported status/priority, missing
+or incorrectly typed fields, incomplete/duplicate provider identity, invalid
+timestamps, unsupported dependency relations, self/dangling/duplicate edges
+and cycle-or-cycle-blocked nodes. It never invents repo keys from names/paths,
+maps `idea`/`blocked` to `todo`, assigns imported work, renews a lease, or
+executes target commands. UTC `+00:00` normalization to `Z` is counted without
+changing the source; other offsets/unknown instants require an explicit
+conversion adapter. Private row titles/paths and metadata values are omitted
+from findings; source schema/default SQL remains included in the inventory.
+
+Next implement the missing destination schemas and explicit typed preservation,
+then execute reviewed mappings against a disposable target and reconcile full
+content before adding persistent apply/resume or cutover.
 
 ## Independent version axes
 
