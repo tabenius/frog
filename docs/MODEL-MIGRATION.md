@@ -27,6 +27,9 @@ Implemented foundations on this branch:
 - `frog-model-migrate simulate` imports a typed preservation envelope into a
   disposable SQLite destination and verifies every row/column/schema record
   and the exact snapshot against the source inventory. Its codec is portable.
+- `frog-model-migrate project` imports supported repository/task/provider/edge
+  data into operational model tables on a disposable destination, using pure
+  Rust seed plans and field-by-field source reconciliation.
 
 **A comprehensive operational importer and cutover command are not implemented yet.**
 `legacy.rs` is a limited live adapter, using TEMP views and zero-valued read
@@ -164,6 +167,74 @@ Tests cover the complete shipped legacy schema, populated legacy status/history/
 locks/unknown metadata, WAL, large integers, non-UTF-8 text, blobs, generated
 columns, WITHOUT ROWID tables, duplicate rows, inert source SQL, tampering,
 capacity errors, collisions and transactional rollback.
+
+## Available disposable operational projection
+
+```bash
+cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
+  --bin frog-model-migrate -- project --source /explicit/path/AGENTS.db \
+  --workspace chosen-workspace --snapshot /explicit/new/path/reviewed-source.db
+```
+
+Both source and destination workspace identity must be selected explicitly.
+`--workspace` is accepted only by `project`; no command accepts a persistent
+destination. The new report is `frog.migration-projection.v1`, data version
+`20261020-6`. It retains the unchanged assessment/inventory formats and the
+same lossless preservation evidence. The existing `simulate` command retains
+its `20261020-5` behavior and does not populate operational model rows.
+
+`import_plan.rs` owns migration-only typed seed validation and deterministic
+SQL plans. It reuses existing model validation for identifiers, titles,
+priority, task details and provider identities, plus conservative legacy status
+and UTC normalization rules. Plans bind workspace, importer actor, exact source
+digest and original seed values into deterministic receipts. The native host
+anchors the digest to the verified archive before executing plans. This pure
+planner is built for native/WASM but is not exposed as a migration HTTP/MCP/WIT
+mutation endpoint; authenticated host execution remains a separate adapter.
+
+Supported data is actually inserted into `frog_model_repos`,
+`frog_model_tasks`, `frog_model_task_details`, `frog_model_provider_items`
+and `frog_model_dependencies`. Source `todo`, `in_progress`, `review`,
+`published`, `done` and `cancelled` states are preserved directly, without
+replaying workflow transitions. Source assignees are preserved; the importer
+is not assigned their tasks. Updated/status-observed times remain source
+instants rather than the import clock. Empty and null metadata stay distinct.
+Repository/source creation times and source identity are retained in owned
+provenance tables from `sql/0004_migration_projection.sql`; that schema is
+created only for the disposable projection, not applied to existing stores.
+
+Each task receives an explicit **new baseline revision of zero**; provenance
+records `source_revision = NULL`. This does not claim the legacy task had
+revision zero. Sources with a task `revision` column are refused for task
+projection until a revision mapping is defined. No source history is fabricated
+as model events, no locks are renewed/acquired, and no target commands run.
+Import receipts/provenance are distinct from historical domain events.
+
+Ambiguous repository/task/provider identities are not arbitrarily selected.
+Unsupported states (`idea`/`blocked`), invalid or oversize metadata, invalid
+assignee identifiers, bad timestamps and unresolved references produce grouped
+skip findings. Counts show exactly how many source repos/tasks/edges were not
+projected. Their original rows remain in the verified archive. Supported
+dependency edges require both endpoints to be projected, and cyclic dependency
+insertion aborts and rolls back the entire model projection, including its
+provenance schema and receipts. The preservation archive remains intact.
+
+Reconciliation compares every imported field, timestamp, assignee, provider
+identity, dependency and provenance/receipt to the normalized source seeds;
+it checks row counts, FK/integrity and equal source/destination model hashes.
+It runs before and after commit. Tests also read imported data through the
+existing board/details/provider APIs and exercise revision-checked transitions.
+An existing operational destination is never overwritten or replayed into.
+
+`operational_model_populated` reports whether any supported repo/task rows were
+inserted, and `model.fields_verified` covers those projected fields only.
+`ready_to_apply` and whole-source `preservation.operational_parity` remain false:
+history, leases, additional relationships and unsupported vocabulary still need
+runtime contracts. Missing projected dependency edges are explicitly reported;
+the disposable result must not be treated as an authoritative readiness view.
+Persistent apply/resume and real cutover require full parity and a writer pause.
+Source/destination limits remain the same; source seeds and reconciliation
+working buffers require additional process memory.
 
 ## Independent version axes
 

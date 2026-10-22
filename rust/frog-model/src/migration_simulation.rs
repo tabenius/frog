@@ -53,7 +53,7 @@ pub fn simulate(source: &Path, snapshot_path: Option<&Path>) -> Result<Simulatio
     })
 }
 
-fn destination() -> Result<Connection, String> {
+pub(crate) fn destination() -> Result<Connection, String> {
     let db = Connection::open_in_memory().map_err(error)?;
     db.pragma_update(None, "page_size", 4096).map_err(error)?;
     db.pragma_update(None, "max_page_count", MAX_DESTINATION_PAGES).map_err(error)?;
@@ -65,7 +65,7 @@ fn destination() -> Result<Connection, String> {
     Ok(db)
 }
 
-fn preserve(source: &Connection, inventory: &Inventory, destination: &mut Connection) -> Result<(), String> {
+pub(crate) fn preserve(source: &Connection, inventory: &Inventory, destination: &mut Connection) -> Result<(), String> {
     validate_inventory(inventory)?;
     let foreign_keys: bool = destination.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).map_err(error)?;
     if !foreign_keys { return Err("preservation requires foreign-key enforcement".into()); }
@@ -108,7 +108,7 @@ fn validate_inventory(expected: &Inventory) -> Result<(), String> {
     Ok(())
 }
 
-fn verify(destination: &Connection, expected: &Inventory) -> Result<Preservation, String> {
+pub(crate) fn verify(destination: &Connection, expected: &Inventory) -> Result<Preservation, String> {
     validate_inventory(expected)?;
     let (source_id, format, inventory, snapshot_bytes, snapshot_sha256): (String, String, String, u64, String) = {
         let mut statement = destination.prepare(

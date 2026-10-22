@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 
 pub mod data_format;
 pub mod import_rules;
+pub mod import_plan;
 pub mod preserved_row;
 
 pub const CONTRACT: &str = "frog.model.v1";
@@ -728,3 +729,5 @@ pub mod migration;
 pub mod migration_dry_run;
 #[cfg(feature = "sqlite")]
 pub mod migration_simulation;
+#[cfg(feature = "sqlite")]
+pub mod migration_projection;

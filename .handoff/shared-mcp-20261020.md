@@ -1,5 +1,47 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Disposable operational projection continuation
+
+- Continued from green/published `e6374d4` with `frog-model-migrate project
+  --source PATH --workspace ID [--snapshot NEW_PATH]`. Workspace selection is
+  explicit. The target remains fresh/in-memory; there is no persistent target.
+- Portable `import_plan.rs` validates typed repository/task/dependency seeds
+  against existing model rules, binds source/workspace/actor/original values
+  to deterministic import receipts, and emits parameterized seed statements.
+  It is not exposed as an HTTP/MCP/WIT migration mutation endpoint.
+- Native `migration_projection.rs` first verifies full preservation, then
+  seeds supported model repos/tasks/details/providers/dependencies and stores
+  source provenance using owned `sql/0004_migration_projection.sql`. Status,
+  assignee, updated/observed timestamps and null/empty metadata are preserved.
+  Repo/task creation times are retained in provenance. No source event history
+  is fabricated as model events; no locks or target commands are executed.
+- Tasks get an explicit new baseline revision 0, with source_revision NULL.
+  A source task `revision` column requires explicit mapping and is skipped.
+  Unsupported/ambiguous/invalid rows are counted and remain archived. Cyclic
+  dependency insertion rolls back all operational seeds/provenance/receipts.
+- Source-to-model reconciliation checks every projected field, provenance,
+  receipt, counts, FK/integrity and matching canonical model fingerprints,
+  before and after commit. Existing operational data is never overwritten.
+- New projection artifact/seed-plan version is `20261020-6`; existing simulate
+  `-5`, assessment `-4` and inventory `-3` behavior remains unchanged. Supported
+  model rows can now be read/acted on in the disposable model; full parity and
+  ready_to_apply remain false pending vocabulary/history/lease/relationship
+  contracts, persistent apply/resume and real cutover verification.
+- Latest local checks: **54 Rust tests passed**, HTTP check and both WASM
+  library builds passed. Tests cover existing model reads and revisioned
+  transitions, dependency blocking, identity ambiguity, preservation, unknown
+  source revisions, stale source fingerprints, cycles/rollback, tampering,
+  explicit workspace selection, real CLI and no source/snapshot overwrite.
+- User also requested progress/top 10 Frog tasks. Read-only local workspace
+  `/home/xyzzy/src/ragbaz/AGENTS.db` has **0 tasks**. Default configuration is
+  ambiguous (both config.json/config.yaml); explicit reads of both select
+  localhost:9091/workspace local. The model client fails with `missing_token`
+  before any authenticated request. Do not fabricate a top 10 from fixtures or
+  contact offline Kali. Need a populated source path or locally configured
+  model authentication to fulfill this outstanding request. No configs changed.
+- This note precedes committing/pushing the milestone; inspect git log/CI for
+  its publication. No production deployment or authoritative task updates.
+
 ## Disposable preservation simulation — 2026-10-20
 
 - Continued from published/green `e62d220` with `frog-model-migrate simulate`.
