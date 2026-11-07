@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-pub const DATA_FORMAT: &str = "20261020-6";
+pub const DATA_FORMAT: &str = "20261107-6";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,7 +67,7 @@ pub struct Task {
 pub struct Dependency {
     pub task_id: String,
     pub depends_on: String,
-    pub created_at: String,
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,7 +120,7 @@ pub fn plan(context: &Context, mut seed: Seed) -> Result<SeedPlan, String> {
         }
         Seed::Task(task) => {
             validate_command(context, Command::CreateTask { task_id: task.task_id.clone(), repo_id: task.repo_id.clone(),
-                title: task.title.clone(), priority: task.priority })?;
+                title: task.title.clone(), priority: task.priority, initial_status: None })?;
             import_rules::status(&task.status)?;
             if let Some(assignee) = &task.assignee { crate::id(assignee)?; }
             if task.why.is_some() || task.what_text.is_some() || task.roi_note.is_some() {
@@ -152,7 +152,7 @@ pub fn plan(context: &Context, mut seed: Seed) -> Result<SeedPlan, String> {
         }
         Seed::Dependency(edge) => {
             validate_command(context, Command::AddDependency { task_id: edge.task_id.clone(), depends_on: edge.depends_on.clone() })?;
-            edge.created_at = import_rules::utc_timestamp(&edge.created_at)?;
+            edge.created_at = edge.created_at.as_deref().map(import_rules::utc_timestamp).transpose()?;
             statements.push(crate::statement(
                 "WITH RECURSIVE reachable(id) AS (SELECT ?3 UNION SELECT d.depends_on FROM frog_model_dependencies d JOIN reachable r ON d.task_id=r.id WHERE d.workspace_id=?1) INSERT INTO frog_model_dependencies(workspace_id,task_id,depends_on) SELECT ?1,?2,?3 WHERE NOT EXISTS(SELECT 1 FROM reachable WHERE id=?2)",
                 vec![json!(context.workspace_id), json!(edge.task_id), json!(edge.depends_on)]));
@@ -204,7 +204,6 @@ mod tests {
     #[test]
     fn unsupported_values_are_refused_instead_of_truncated_reassigned_or_coerced() {
         for mutate in [
-            |t: &mut Task| t.status = "idea".into(),
             |t: &mut Task| t.status = "blocked".into(),
             |t: &mut Task| t.priority = 4,
             |t: &mut Task| t.assignee = Some("invalid@actor".into()),

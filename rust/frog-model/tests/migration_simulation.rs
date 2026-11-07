@@ -32,15 +32,15 @@ fn full_legacy_schema_is_preserved_without_claiming_operational_parity() {
     let wal_before = std::fs::read(directory.path().join("AGENTS.db-wal")).unwrap();
     let report = simulate(&source_path, Some(&snapshot_path)).unwrap();
     assert_eq!(report.schema, "frog.migration-simulation.v1");
-    assert_eq!(report.data_format_version.to_string(), "20261020-5");
-    assert_eq!(report.assessment.data_format_version.to_string(), "20261020-4");
+    assert_eq!(report.data_format_version.to_string(), "20261107-5");
+    assert_eq!(report.assessment.data_format_version.to_string(), "20261107-2");
     assert_eq!(report.assessment.inventory.data_format_version.to_string(), "20261020-3");
     assert!(report.destination_simulated);
     assert!(report.preservation.verified);
     assert!(!report.operational_model_populated);
     assert!(!report.ready_to_apply);
     assert!(!report.preservation.operational_parity);
-    assert!(report.assessment.findings.iter().any(|finding| finding.code == "status_requires_model_schema_extension"));
+    assert!(!report.assessment.findings.iter().any(|finding| finding.code == "status_requires_model_schema_extension"));
     assert_eq!(report.preservation.tables, report.assessment.inventory.tables.len() as u64);
     assert_eq!(report.preservation.rows, report.assessment.inventory.tables.iter().map(|t| t.rows).sum::<u64>());
     assert_eq!(report.preservation.snapshot_sha256, report.assessment.inventory.snapshot_sha256);

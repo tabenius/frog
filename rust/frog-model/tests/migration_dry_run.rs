@@ -35,7 +35,7 @@ fn dry_run_uses_one_snapshot_and_reports_candidate_mapping_without_writes() {
     let before = std::fs::read(&path).unwrap();
     let report = dry_run(&path, Some(&snapshot)).unwrap();
     assert_eq!(report.schema, "frog.migration-dry-run.v1");
-    assert_eq!(report.data_format_version.to_string(), "20261020-4");
+    assert_eq!(report.data_format_version.to_string(), "20261107-2");
     assert_eq!(report.inventory.data_format_version.to_string(), "20261020-3");
     assert_eq!(report.candidate_repositories, 1);
     assert_eq!(report.candidate_tasks, 2);
@@ -63,12 +63,12 @@ fn schema_gaps_custom_fields_and_invalid_data_are_explicit() {
         UPDATE tasks SET workflow_status='idea', private_extension=x'00ff' WHERE slug='one';
         UPDATE tasks SET priority='p9',workflow_status='blocked',status_confidence_at='unknown',title=x'ff' WHERE slug='two';").unwrap();
     let report = dry_run(&path, None).unwrap();
-    assert_eq!(count(&report, "status_requires_model_schema_extension"), 2);
+    assert_eq!(count(&report, "status_requires_model_schema_extension"), 1);
     assert_eq!(count(&report, "unsupported_priority"), 1);
     assert_eq!(count(&report, "timestamp_requires_explicit_conversion"), 1);
     assert!(count(&report, "mapped_field_storage_class_mismatch") > 0);
     assert!(count(&report, "invalid_storage_class") > 0);
-    assert_eq!(report.candidate_tasks, 0);
+    assert_eq!(report.candidate_tasks, 1);
     assert!(report.findings.iter().any(|f| f.column.as_deref() == Some("private_extension") && f.code == "field_requires_schema_or_preservation"));
 }
 

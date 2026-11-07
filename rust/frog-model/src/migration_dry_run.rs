@@ -117,7 +117,7 @@ pub(crate) fn assess_snapshot(db: &Connection) -> Result<DryRun, String> {
             let repo_id = path.as_ref().and_then(|path| repos.get(path)).cloned();
             if repo_id.is_none() { finding(&mut findings, "task_repository_unresolved", "tasks", Some("repo_path"), 1); }
             if let (Some(task_id), Some(repo_id), Some(title), Some(priority)) = (slug, repo_id, title, priority) {
-                if validates(Command::CreateTask { repo_id, task_id, title, priority }) {
+                if validates(Command::CreateTask { repo_id, task_id, title, priority, initial_status: None }) {
                     if status_valid { candidate_tasks += 1; }
                 } else { finding(&mut findings, "task_rejected_by_model", "tasks", None, 1); }
             } else { finding(&mut findings, "task_required_value_missing", "tasks", None, 1); }

@@ -1,5 +1,124 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Publication checkpoint — 2026-11-07
+
+User requested committing and pushing the accumulated migration work to GitHub
+`origin` on `handoff/mcp-native-edge-20261020`. This checkpoint includes durable
+staging/resume verification, native idea support and nullable dependency-time
+provenance. Earlier sections capture pre-publication milestones. Recovery data
+stays outside Git; operational cutover is still blocked. Do not contact Kali.
+
+## Dependency observation provenance — 2026-11-07
+
+- User requested continuing Pieces, Frog, WeftMark and Dash. After the initial
+  Pieces volume-adapter milestone, made source edge creation times optional in
+  migration seed plans/provenance. NULL or missing timestamps remain NULL;
+  invalid known values are refused. Relationships still require valid projected
+  endpoints and pass existing cycle/transaction checks. Current projection/seed
+  format is `20261107-6`, checkpoint `20261107-7`; prior artifacts are retained.
+- New verified recovery checkpoint:
+  `/home/xyzzy/reports/dash-frog-import-20261107T123347Z/model-checkpoint-dependencies.db`.
+  It projects **227 tasks and 43 of 44 dependencies**. One edge has an endpoint
+  among the seven unprojected tasks and remains archived. All recovered inputs
+  and previous checkpoint file hashes are unchanged. Read
+  `dependencies-summary.json` and the `*-dependencies-report.json` evidence.
+- **73 Rust tests passed**, HTTP check and both WASM library builds passed.
+  This is still a stale Nov 1 observation, not current fleet authority. No Kali,
+  backend switch, commit, push or production mutation occurred.
+
+## Native idea/backlog state — 2026-11-07
+
+- User requested an idea/not-yet-started state. Native model schema v2 now
+  preserves `idea` as backlog, distinct from `todo` (ready to start).
+  `CreateTask.initial_status` is optional (`idea`/`todo` only; omitted retains
+  the old JSON todo behavior/hash). CLI/MCP creation honors idea atomically;
+  provider ideas no longer become todo. WIT create-task adds the optional field
+  and its package advances to `frog:model@0.2.0`.
+- `TransitionTask` / `frog task status` support revision-checked idea <-> todo
+  for unassigned work or its owner. Claims remain todo-only and dependency-gated;
+  no direct idea claim or demotion of active work. Preassigned todo is claimable
+  by its existing owner, never a competitor. Ideas can be cancelled.
+  Legacy storage uses its existing idea representation and is not schema-upgraded.
+- `0005_idea_status.sql` rebuilds the owned task/schema tables through the
+  native `sqlite::upgrade_idea_schema` helper, preserving records/children and
+  checking FKs before commit. FK enforcement is restored after failures.
+  Customized task/schema objects are refused. Existing native server upgrades
+  require explicit `FROG_MODEL_UPGRADE_IDEA=1`; no live backend was switched.
+- Current report versions: dry-run `20261107-2`, projection/seed `20261107-3`,
+  checkpoint `20261107-4`, simulation `20261107-5`. Inventory and preservation
+  encoding are unchanged. Old checkpoints are not relabelled or overwritten;
+  updated resume intentionally rejects older schema/mapping generations.
+- Reprojected the existing local Dash recovery input without any network access:
+  `/home/xyzzy/reports/dash-frog-import-20261107T123347Z/model-checkpoint-idea.db`
+  now contains **227 tasks**, including all **17 ideas**. Verified each idea's
+  state, title, priority, assignee and source timestamps plus baseline revision.
+  Stage/resume pass. Old checkpoint/export/source byte hashes are unchanged.
+  See `idea-summary.json` and the `*-idea-report.json` files.
+- Seven source tasks remain archived (3 blocked, 4 without repositories);
+  dependencies remain archived because original edge timestamps are missing.
+  The snapshot is still stale as of Nov 1; operational cutover is not ready.
+- Checks: **71 Rust SQLite tests**, **3 HTTP server tests**, **13 Python model
+  tests**, both WASM library builds and MCP contract sync check passed.
+  Work remains local/uncommitted; do not contact offline Kali.
+
+## Recovered Dash task observations — 2026-11-07
+
+- User requested populating tasks from Dash while Kali remains unavailable.
+  Existing local Wrangler OAuth allowed SELECT-only access to production Dash
+  D1 `d31867e7-540c-4acc-b011-7e3b7fa9f4ef`; no remote rows were written.
+- Recovered the cached Frog snapshot for instance
+  `934adeda-25ec-49cf-b9e2-9a4c7e83be6c`, revision 9403, source observed
+  `2026-11-01T22:05:17.256114Z`. It is stale, not current fleet authority.
+- Durable artifacts: `/home/xyzzy/reports/dash-frog-import-20261107T123347Z/`.
+  Read its README/summary before using the data. Raw export and legacy-shaped
+  recovery database retain all **234 tasks, 44 dependencies and 98 tag links**,
+  extra raw task fields and source payload. Task/payload round trips, integrity
+  and FKs verified. Existing workspace AGENTS.db/configs remain unchanged.
+- Ran `stage` then `resume`: both verified. Checkpoint projects **210 tasks**
+  across 24 explicitly synthetic Dash-scoped repository-label identities.
+  Twenty idea/blocked tasks and four null-repository tasks remain archived.
+  All dependency edges remain archived, not projected: Dash omitted their
+  creation times, retained as NULL instead of inventing provenance.
+- Original assignees are observations only; no active locks/leases/assignments
+  restored. `ready_to_apply=false`. These real cached observations can inform
+  further work; do not substitute them for fresh authoritative Frog state.
+
+## Durable staging continuation — 2026-11-07
+
+- Resumed from published checkpoint `926a291` on
+  `handoff/mcp-native-edge-20261020`. Current continuation is local/uncommitted;
+  inspect Git status before publication. Dash remains at `520bd0d`.
+- Added native `frog-model-migrate stage` and `resume`, both requiring explicit
+  `--source`, `--workspace` and `--checkpoint`. `stage` reuses the existing
+  preservation/projection builder and exclusively writes a new staging database
+  (0600 on Unix), then reopens and verifies it. Existing files/aliases/symlinks
+  cannot be overwritten. Failed writes retain their artifact and report failure.
+- `resume` means read-only staging verification, not operation replay, partial
+  write recovery or activation. It reconstructs the expected projection from the
+  explicitly supplied immutable source snapshot and compares the entire
+  checkpoint's typed logical schema/content fingerprint plus integrity/FKs.
+  This covers archive bytes, model fields, receipts, provenance and the owned
+  source/workspace/version marker. Committed WAL edits are observed.
+- New checkpoint report `frog.migration-checkpoint.v1` uses date version
+  `20261107-1`. Earlier artifact formats retain their meanings. Stage/resume
+  require the same supported mapping/importer identity; no implicit upgrades.
+  Complete checkpoints are limited to 256 MiB / one million rows including
+  archive and projected rows. Keep the reviewed source snapshot for later resume.
+- **Operational apply/cutover remains blocked**: unsupported vocabulary,
+  historical events, leases and additional relationship semantics still need
+  contracts/parity. Both readiness and whole-source operational parity remain
+  false. No backend switch, HTTP/MCP/WIT mutation endpoint or lease renewal was
+  introduced. Next prioritize those missing runtime contracts before real apply.
+- Checks: **61 Rust tests passed** (7 new checkpoint regressions), HTTP cargo
+  check, wasm32-wasip2 component library and wasm32-unknown-unknown library
+  builds, shared MCP contract sync/digest check, rustfmt checks on new modules/
+  CLI/tests and git diff --check all passed. New tests exercise repeat resume,
+  immutable snapshots after live-source changes, source/WAL preservation, WAL
+  tampering, model/archive/schema/format tampering, aliases and projection failure.
+- User explicitly says Kali is down: **do not contact Kali or fetch fleet-head**.
+  No authoritative Frog database, user configuration or production deployment
+  was changed. No commit/push was requested for this continuation.
+
 ## Disposable operational projection continuation
 
 - Continued from green/published `e6374d4` with `frog-model-migrate project

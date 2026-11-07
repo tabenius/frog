@@ -125,7 +125,7 @@ class Backend:
             raise ModelError('unsupported_operation','model create does not support legacy metadata/status overrides; no fields were discarded')
         if not args.repo_ref:
             raise ModelError('invalid_request','model create requires --repo <repository ID>')
-        result = self.client.create_task(self.workspace,uuid.uuid4().hex,repo_id=args.repo_ref,task_id=args.slug,title=args.title,priority=args.priority)
+        result = self.client.create_task(self.workspace,uuid.uuid4().hex,repo_id=args.repo_ref,task_id=args.slug,title=args.title,priority=args.priority,initial_status=args.workflow_status)
         return self.task_info(slug=args.slug)
 
     def task_edit(self, conn=None, slug=None, *, title=None, priority=None, actor=None,
@@ -140,6 +140,21 @@ class Backend:
         self.client.edit_task(self.workspace,uuid.uuid4().hex,task_id=slug,
             expected_revision=row['revision'],title=title,priority=priority,
             repo_id=repo_ref,why=why,what_text=what,roi_note=roi_note)
+        return self.task_info(slug=slug)
+
+    def task_status(self, slug, *, workflow_status=None, git_status=None, note=None):
+        if git_status is not None or note is not None:
+            raise ModelError('unsupported_operation','model status does not represent legacy git status or notes; no fields were discarded')
+        if workflow_status is None:
+            return self.task_info(slug=slug)
+        row = self.client.task(self.workspace,slug)
+        if not row:
+            return dict(ok=False,error='task not found')
+        if workflow_status == 'cancelled':
+            self.client.cancel_task(self.workspace,uuid.uuid4().hex,task_id=slug,expected_revision=row['revision'])
+        else:
+            self.client.transition_task(self.workspace,uuid.uuid4().hex,task_id=slug,
+                expected_revision=row['revision'],status=workflow_status)
         return self.task_info(slug=slug)
 
     def provider_sync_in(self, conn, source, items):
@@ -168,7 +183,7 @@ class Backend:
             if not repo:
                 raise ModelError('invalid_request','provider items require repo_ref')
             raw_status = str(item.get('status','todo')).lower()
-            statuses = {'open':'todo','idea':'todo','todo':'todo','in_progress':'in_progress','review':'review','published':'published','closed':'done','done':'done','cancelled':'cancelled'}
+            statuses = {'open':'todo','idea':'idea','todo':'todo','in_progress':'in_progress','review':'review','published':'published','closed':'done','done':'done','cancelled':'cancelled'}
             if raw_status not in statuses:
                 raise ModelError('invalid_request','unsupported provider status')
             priority = item.get('priority','p3')
@@ -233,7 +248,7 @@ class Backend:
             if args.task_command == 'list':
                 statuses = [s for value in args.workflow_status for s in value.split(',')]
                 if args.not_done:
-                    statuses = ['todo','in_progress','review','published']
+                    statuses = ['idea','todo','in_progress','review','published']
                 return self.task_list(repo_ref=args.repo_ref, workflow_status=statuses,assigned_agent=args.assigned_agent,include_done=args.json or args.all)
             if args.task_command == 'info':
                 return self.task_info(slug=args.slug)
@@ -242,6 +257,8 @@ class Backend:
             if args.task_command == 'edit':
                 return self.task_edit(slug=args.slug,title=args.title,priority=args.priority,
                     actor=args.actor,repo_ref=args.repo_ref,why=args.why,what=args.what,roi_note=args.roi_note)
+            if args.task_command == 'status':
+                return self.task_status(args.slug,workflow_status=args.workflow_status,git_status=args.git_status,note=args.note)
             if args.task_command == 'verify':
                 return self.verify(args.slug,args.target)
         if args.command == 'repo' and args.repo_command == 'list':

@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, path::Path};
 
 const PRESERVATION_SCHEMA: &str = include_str!("../sql/0003_migration_preservation.sql");
 const MAX_DESTINATION_PAGES: u32 = 131_072; // 512 MiB with fixed 4096-byte pages.
+const SIMULATION_DATA_FORMAT: &str = "20261107-5";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,7 +48,7 @@ pub fn simulate(source: &Path, snapshot_path: Option<&Path>) -> Result<Simulatio
     if let Some(path) = snapshot_path { migration::write_snapshot(&source, path)?; }
     Ok(Simulation {
         schema: "frog.migration-simulation.v1".into(),
-        data_format_version: preserved_row::DATA_FORMAT.parse()?,
+        data_format_version: SIMULATION_DATA_FORMAT.parse()?,
         assessment, preservation, destination_simulated: true,
         operational_model_populated: false, ready_to_apply: false,
     })
@@ -62,6 +63,8 @@ pub(crate) fn destination() -> Result<Connection, String> {
     // Only model-owned DDL runs. Unknown legacy table/trigger names remain data.
     db.execute_batch(crate::MIGRATION).map_err(error)?;
     db.execute_batch(crate::SERVICE_MIGRATION).map_err(error)?;
+    let mut db = db;
+    crate::sqlite::upgrade_idea_schema(&mut db, "frog_model_")?;
     Ok(db)
 }
 

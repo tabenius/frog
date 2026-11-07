@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::{BTreeMap, BTreeSet}, path::Path};
 
 const SCHEMA: &str = include_str!("../sql/0004_migration_projection.sql");
+const DEPENDENCY_TIME_SCHEMA: &str = include_str!("../sql/0006_dependency_observation_time.sql");
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,20 +62,26 @@ fn finding(findings: &mut Findings, code: &str, table: &str, count: u64) {
 }
 
 pub fn project(source_path: &Path, workspace: &str, snapshot_path: Option<&Path>) -> Result<Projection, String> {
-    crate::id(workspace)?;
     let source = migration::capture(source_path)?;
-    let assessment = migration_dry_run::assess_snapshot(&source)?;
+    let (projection, _) = build(&source, workspace)?;
+    if let Some(path) = snapshot_path { migration::write_snapshot(&source, path)?; }
+    Ok(projection)
+}
+
+/// Reuse the same verified projection for disposable and durable staging hosts.
+pub(crate) fn build(source: &Connection, workspace: &str) -> Result<(Projection, Connection), String> {
+    crate::id(workspace)?;
+    let assessment = migration_dry_run::assess_snapshot(source)?;
     let context = Context { workspace_id: workspace.into(), actor: "migration-projection".into(),
         source_sha256: assessment.inventory.snapshot_sha256.clone() };
     let mut destination = migration_simulation::destination()?;
-    migration_simulation::preserve(&source, &assessment.inventory, &mut destination)?;
-    let model = project_into(&source, &assessment.inventory, &context, &mut destination)?;
+    migration_simulation::preserve(source, &assessment.inventory, &mut destination)?;
+    let model = project_into(source, &assessment.inventory, &context, &mut destination)?;
     let preservation = migration_simulation::verify(&destination, &assessment.inventory)?;
-    if let Some(path) = snapshot_path { migration::write_snapshot(&source, path)?; }
     let populated = model.repositories > 0 || model.tasks > 0;
-    Ok(Projection { schema: "frog.migration-projection.v1".into(), data_format_version: import_plan::DATA_FORMAT.parse()?,
+    Ok((Projection { schema: "frog.migration-projection.v1".into(), data_format_version: import_plan::DATA_FORMAT.parse()?,
         workspace_id: workspace.into(), assessment, preservation, model, destination_simulated: true,
-        operational_model_populated: populated, ready_to_apply: false })
+        operational_model_populated: populated, ready_to_apply: false }, destination))
 }
 
 fn has(inventory: &Inventory, table: &str, column: &str) -> bool {
@@ -107,6 +114,7 @@ fn project_into(source: &Connection, inventory: &Inventory, context: &Context, d
     }
     let transaction = destination.transaction().map_err(error)?;
     transaction.execute_batch(SCHEMA).map_err(error)?;
+    transaction.execute_batch(DEPENDENCY_TIME_SCHEMA).map_err(error)?;
     transaction.execute("INSERT INTO frog_model_workspaces VALUES(?1,'Disposable legacy projection')", [&context.workspace_id]).map_err(error)?;
     let mut expected = Vec::new();
     let mut findings = Findings::new();
@@ -163,9 +171,10 @@ fn project_into(source: &Connection, inventory: &Inventory, context: &Context, d
             expected.push(expectation(plan));
         }
     } else { finding(&mut findings, "task_schema_incomplete", "tasks", source_rows(inventory, "tasks")); }
-    if required(inventory, "task_dependencies", &["task_slug", "depends_on_slug", "relation", "created_at"]) {
-        let mut statement = source.prepare("SELECT task_slug,depends_on_slug,relation,created_at,
-            count(*) OVER(PARTITION BY task_slug,depends_on_slug,relation) FROM task_dependencies ORDER BY task_slug,depends_on_slug,relation").map_err(error)?;
+    if required(inventory, "task_dependencies", &["task_slug", "depends_on_slug", "relation"]) {
+        let timestamp = if has(inventory, "task_dependencies", "created_at") { "created_at" } else { "NULL" };
+        let mut statement = source.prepare(&format!("SELECT task_slug,depends_on_slug,relation,{timestamp},
+            count(*) OVER(PARTITION BY task_slug,depends_on_slug,relation) FROM task_dependencies ORDER BY task_slug,depends_on_slug,relation")).map_err(error)?;
         let mut rows = statement.query([]).map_err(error)?;
         while let Some(row) = rows.next().map_err(error)? {
             let edge = match read_dependency(row, &task_ids) {
@@ -176,6 +185,9 @@ fn project_into(source: &Connection, inventory: &Inventory, context: &Context, d
                 Ok(plan) => plan,
                 Err(_) => { finding(&mut findings, "dependency_rejected_by_import_plan", "task_dependencies", 1); continue; }
             };
+            if matches!(&plan.normalized, Seed::Dependency(edge) if edge.created_at.is_none()) {
+                finding(&mut findings, "dependency_creation_time_unknown", "task_dependencies", 1);
+            }
             // A cycle or foreign-key failure aborts the complete model projection.
             execute(&transaction, &plan)?;
             expected.push(expectation(plan));
@@ -219,7 +231,8 @@ fn read_dependency(row: &Row<'_>, tasks: &BTreeSet<String>) -> Result<Dependency
     let value = |index| row.get::<_, String>(index).map_err(|_| "dependency_required_value_invalid");
     if value(2)? != "depends_on" { return Err("dependency_relation_not_supported"); }
     if row.get::<_, i64>(4).map_err(|_| "dependency_required_value_invalid")? > 1 { return Err("dependency_identity_ambiguous"); }
-    let edge = Dependency { task_id: value(0)?, depends_on: value(1)?, created_at: value(3)? };
+    let edge = Dependency { task_id: value(0)?, depends_on: value(1)?,
+        created_at: row.get::<_, Option<String>>(3).map_err(|_| "dependency_required_value_invalid")? };
     if !tasks.contains(&edge.task_id) || !tasks.contains(&edge.depends_on) { return Err("dependency_endpoint_not_projected"); }
     Ok(edge)
 }
@@ -429,9 +442,32 @@ mod tests {
     }
 
     #[test]
+    fn idea_projection_preserves_backlog_state_without_making_it_claimable() {
+        let source = source();
+        source.execute("UPDATE tasks SET workflow_status='idea' WHERE slug='ready'", []).unwrap();
+        let (inventory, context, mut destination) = setup(&source);
+        let result = project_into(&source, &inventory, &context, &mut destination).unwrap();
+        assert_eq!((result.tasks, result.skipped_tasks), (3, 0));
+        let board = crate::sqlite::execute(&mut destination, request(&context, "reader", Command::Board {
+            repo_id: None, limit: 100, after: None,
+        })).unwrap();
+        let idea = board["items"].as_array().unwrap().iter().find(|t| t["id"] == "ready").unwrap();
+        assert_eq!(idea["status"], "idea");
+        assert_eq!(idea["lane"], "idea");
+        assert_eq!(idea["revision"], 0);
+        assert_eq!(idea["assignee"], serde_json::Value::Null);
+        assert_eq!(idea["status_observed_at"], "2026-10-20T00:30:00Z");
+        let claim = crate::sqlite::execute(&mut destination, request(&context, "worker", Command::ClaimTask {
+            task_id: "ready".into(), expected_revision: 0,
+        })).unwrap();
+        assert_eq!(claim["items"][0]["status"], "conflict");
+        assert_eq!(source.query_row("SELECT workflow_status FROM tasks WHERE slug='ready'", [], |r|r.get::<_,String>(0)).unwrap(), "idea");
+    }
+
+    #[test]
     fn unsupported_status_provider_or_metadata_values_are_counted_and_remain_archived() {
         let source = source();
-        source.execute_batch("UPDATE tasks SET workflow_status='idea' WHERE slug='active';
+        source.execute_batch("UPDATE tasks SET workflow_status='blocked' WHERE slug='active';
             UPDATE tasks SET source='github',external_id=NULL WHERE slug='ready';").unwrap();
         let (inventory,context,mut destination) = setup(&source);
         let result = project_into(&source,&inventory,&context,&mut destination).unwrap();

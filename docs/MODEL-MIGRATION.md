@@ -30,6 +30,38 @@ Implemented foundations on this branch:
 - `frog-model-migrate project` imports supported repository/task/provider/edge
   data into operational model tables on a disposable destination, using pure
   Rust seed plans and field-by-field source reconciliation.
+- `frog-model-migrate stage` saves that verified projection as a new durable
+  staging checkpoint; `resume` verifies it against an explicit source snapshot
+  without replaying writes or activating it as a workspace.
+- Native model schema v2 preserves `idea` as backlog/uncommitted work, distinct
+  from `todo` (ready to start). Claims accept only `todo`. Revision-checked
+  promotion/demotion between `idea` and `todo` is explicit and owner-or-unassigned;
+  promotion does not bypass dependency checks. A preassigned todo may be claimed
+  by its existing owner, never by a competitor. Create requests can set
+  `initial_status` to `idea` or `todo`; omission retains the existing `todo`
+  JSON behavior. CLI/MCP `--workflow-status idea` and provider ideas stay ideas.
+
+### Idea schema upgrade and artifact versions
+
+Fresh staging databases use `sql/0005_idea_status.sql`, applied through the
+native `sqlite::upgrade_idea_schema` helper. This explicitly rebuilds the owned
+task table and schema-version marker in one transaction, preserving task rows,
+children, receipts and timestamps. Foreign-key enforcement is restored on both
+success and failure, and all foreign keys are checked before commit. Customized
+task/schema objects are refused rather than dropped. Existing native servers
+upgrade only when explicitly started with `FROG_MODEL_UPGRADE_IDEA=1`; this
+setting never upgrades legacy-storage mode. Back up an existing model database
+before opting in. The rebuild is native SQLite tooling, not a deployed D1 upgrade.
+
+Current artifact versions after adding idea support: dry-run `20261107-2`,
+projection/seed plan `20261107-6`, checkpoint `20261107-7`, simulation report
+`20261107-5`. Inventory remains `20261020-3` and the lossless preservation
+encoding remains `20261020-5`. Historical reports/checkpoints retain their old
+versions; regenerate into a new staging file using the original source rather
+than relabelling an old checkpoint. Resume rejects a checkpoint from another
+mapping/schema generation. The optional create-state field changes the typed
+WIT record, so its package advances to `frog:model@0.2.0`; JSON request defaults
+and the existing `frog.model.v1` identifier remain compatible.
 
 **A comprehensive operational importer and cutover command are not implemented yet.**
 `legacy.rs` is a limited live adapter, using TEMP views and zero-valued read
@@ -84,7 +116,7 @@ cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
 ```
 
 The report uses schema `frog.migration-dry-run.v1` and date data version
-`20261020-4`; its nested inventory retains `20261020-3`. The original inventory
+`20261107-2`; its nested inventory retains `20261020-3`. The original inventory
 format remains unchanged. Version checks are artifact-specific; the existing
 `data_format::require_current` checks inventory compatibility, not the new dry
 run format. This command is a mapping assessment, not destination execution:
@@ -122,8 +154,8 @@ cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
   --snapshot /explicit/new/path/reviewed-source.db
 ```
 
-The report is `frog.migration-simulation.v1`, data format `20261020-5`, with
-the unchanged dry-run (`20261020-4`) and inventory (`20261020-3`) nested inside.
+The report is `frog.migration-simulation.v1`, data format `20261107-5`, with
+dry-run (`20261107-2`) and inventory (`20261020-3`) nested inside.
 `destination_simulated` is true for preservation execution;
 `operational_model_populated`, `preservation.operational_parity` and
 `ready_to_apply` remain false. A verified preservation archive does not make
@@ -177,11 +209,12 @@ cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
 ```
 
 Both source and destination workspace identity must be selected explicitly.
-`--workspace` is accepted only by `project`; no command accepts a persistent
-destination. The new report is `frog.migration-projection.v1`, data version
-`20261020-6`. It retains the unchanged assessment/inventory formats and the
-same lossless preservation evidence. The existing `simulate` command retains
-its `20261020-5` behavior and does not populate operational model rows.
+`--workspace` is required by `project` (and the staging commands below);
+`project` has no persistent destination option. Its report is
+`frog.migration-projection.v1`, data version
+`20261107-6`. It nests the current assessment and unchanged inventory formats
+with the same lossless preservation encoding. The `simulate` command reports
+`20261107-5` and does not populate operational model rows.
 
 `import_plan.rs` owns migration-only typed seed validation and deterministic
 SQL plans. It reuses existing model validation for identifiers, titles,
@@ -192,7 +225,7 @@ anchors the digest to the verified archive before executing plans. This pure
 planner is built for native/WASM but is not exposed as a migration HTTP/MCP/WIT
 mutation endpoint; authenticated host execution remains a separate adapter.
 
-Supported data is actually inserted into `frog_model_repos`,
+Supported data, including the original `idea` state, is actually inserted into `frog_model_repos`,
 `frog_model_tasks`, `frog_model_task_details`, `frog_model_provider_items`
 and `frog_model_dependencies`. Source `todo`, `in_progress`, `review`,
 `published`, `done` and `cancelled` states are preserved directly, without
@@ -211,11 +244,15 @@ as model events, no locks are renewed/acquired, and no target commands run.
 Import receipts/provenance are distinct from historical domain events.
 
 Ambiguous repository/task/provider identities are not arbitrarily selected.
-Unsupported states (`idea`/`blocked`), invalid or oversize metadata, invalid
+Unsupported states (`blocked`), invalid or oversize metadata, invalid
 assignee identifiers, bad timestamps and unresolved references produce grouped
 skip findings. Counts show exactly how many source repos/tasks/edges were not
 projected. Their original rows remain in the verified archive. Supported
-dependency edges require both endpoints to be projected, and cyclic dependency
+dependency edges require both endpoints to be projected. Missing or NULL edge
+creation times remain NULL in provenance (owned schema extension
+`0006_dependency_observation_time.sql`); they are reported as unknown and do not
+prevent restoring the relationship. Invalid non-NULL timestamps are still
+refused rather than replaced with an import clock. Cyclic dependency
 insertion aborts and rolls back the entire model projection, including its
 provenance schema and receipts. The preservation archive remains intact.
 
@@ -232,9 +269,63 @@ inserted, and `model.fields_verified` covers those projected fields only.
 history, leases, additional relationships and unsupported vocabulary still need
 runtime contracts. Missing projected dependency edges are explicitly reported;
 the disposable result must not be treated as an authoritative readiness view.
-Persistent apply/resume and real cutover require full parity and a writer pause.
+Operational apply and resumable cutover require full parity and a writer pause.
 Source/destination limits remain the same; source seeds and reconciliation
 working buffers require additional process memory.
+
+## Durable staging checkpoints and read-only resume
+
+First capture an explicit source snapshot so later live edits do not change the
+input being reviewed. Then stage and resume from that same snapshot:
+
+```bash
+cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
+  --bin frog-model-migrate -- inventory --source /explicit/path/AGENTS.db \
+  --snapshot /explicit/new/path/reviewed-source.db
+
+cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
+  --bin frog-model-migrate -- stage --source /explicit/path/reviewed-source.db \
+  --workspace chosen-workspace --checkpoint /explicit/new/path/staging.db
+
+cargo run --manifest-path rust/frog-model/Cargo.toml --features sqlite \
+  --bin frog-model-migrate -- resume --source /explicit/path/reviewed-source.db \
+  --workspace chosen-workspace --checkpoint /explicit/path/staging.db
+```
+
+The report is `frog.migration-checkpoint.v1`, data version `20261107-7`, nesting
+the projection (`20261107-6`). Both commands require explicit source,
+workspace and checkpoint arguments. Neither accepts `--snapshot` or an implicit
+destination. `stage` runs the existing preservation/projection verification,
+adds an owned version/workspace/source marker and writes the database exclusively
+with mode 0600 on Unix. Existing files, symlinks and hard-link aliases are never
+overwritten. The persisted database is reopened and checked before success is
+reported. Failed writes or post-write verification retain the artifact for
+inspection and emit no success report; use another new path after investigating.
+
+`resume` is read-only **checkpoint verification**, not interrupted-write recovery
+or operational apply. It reconstructs the expected projection from the explicit
+source using the current importer, then compares a typed logical fingerprint of
+the entire checkpoint, including schema, archive, projected data, provenance,
+receipts and version marker. It also checks SQLite integrity and foreign keys.
+Committed WAL changes are included. It never trusts the checkpoint's own stored
+source digest as an external authority, repairs rows, replays receipts, renews
+leases or updates the source/checkpoint. A different source snapshot, workspace,
+unsupported format, changed mapping/importer identity or altered checkpoint is
+refused. Retain the reviewed source snapshot alongside the checkpoint; resume
+does not silently fall back to the embedded snapshot.
+
+`checkpoint_verified` establishes staging fidelity only. `ready_to_apply` and
+whole-source operational parity remain false, including when no supported rows
+were skipped. Legacy vocabulary, historical events, leases and additional
+relationships still need operational contracts before cutover. There is no
+backend switch or HTTP/MCP/WIT migration mutation endpoint.
+
+Staging is bounded to **256 MiB and one million rows for the complete checkpoint**,
+including preservation envelopes and projected rows, as well as the existing
+source limits. These stricter staging limits are checked before writing. Resume
+rebuilds an in-memory expected projection and a consistent checkpoint snapshot;
+memory includes both databases and hashing/verification buffers. Partial staging
+files are not accepted as resumable success artifacts.
 
 ## Independent version axes
 
@@ -242,7 +333,7 @@ working buffers require additional process memory.
 | --- | --- | --- |
 | Data format `20261020-3` | Persisted export/manifest interpretation | Calendar validation, exact support check and explicit upgrade paths |
 | `frog.model.v1` | Request/plan API contract | Retain existing identifier while API-compatible |
-| `frog:model@0.1.0` | WIT package type/ABI contract | Semver as required by WIT; update for published breaking changes |
+| `frog:model@0.2.0` | WIT package type/ABI contract | Optional initial create state changes the typed record; update bindings explicitly |
 | SQL migration numbers | Ordered physical DB changes | Keep existing numbered migration history |
 | MCP catalog `1.0.0` | Tool names and input schema compatibility | Version independently of persisted data |
 

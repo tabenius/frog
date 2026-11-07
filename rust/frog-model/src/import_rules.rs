@@ -1,7 +1,7 @@
 //! Portable, conservative legacy mapping rules shared by native and WASM hosts.
 use serde::{Deserialize, Serialize};
 
-pub const DRY_RUN_DATA_FORMAT: &str = "20261020-4";
+pub const DRY_RUN_DATA_FORMAT: &str = "20261107-2";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -56,8 +56,8 @@ pub fn priority(value: &str) -> Result<u8, &'static str> {
 
 pub fn status(value: &str) -> Result<&str, &'static str> {
     match value {
-        "todo" | "in_progress" | "review" | "published" | "done" | "cancelled" => Ok(value),
-        "idea" | "blocked" => Err("status_requires_model_schema_extension"),
+        "idea" | "todo" | "in_progress" | "review" | "published" | "done" | "cancelled" => Ok(value),
+        "blocked" => Err("status_requires_model_schema_extension"),
         _ => Err("unsupported_status"),
     }
 }
@@ -102,7 +102,7 @@ mod tests {
         assert!(priority("p4").is_err());
         assert!(priority("1").is_err());
         assert_eq!(status("done"), Ok("done"));
-        assert!(status("idea").is_err());
+        assert_eq!(status("idea"), Ok("idea"));
         assert!(status("blocked").is_err());
         assert!(status("finished").is_err());
         assert!(repo_identity(None).is_err());

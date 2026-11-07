@@ -34,8 +34,8 @@ fn projection_executes_and_reconciles_core_rows_while_retaining_full_source() {
     let wal = std::fs::read(directory.path().join("source.db-wal")).unwrap();
     let result = project(&path,"explicit-workspace",Some(&snapshot)).unwrap();
     assert_eq!(result.schema,"frog.migration-projection.v1");
-    assert_eq!(result.data_format_version.to_string(),"20261020-6");
-    assert_eq!(result.assessment.data_format_version.to_string(),"20261020-4");
+    assert_eq!(result.data_format_version.to_string(),"20261107-6");
+    assert_eq!(result.assessment.data_format_version.to_string(),"20261107-2");
     assert_eq!(result.workspace_id,"explicit-workspace");
     assert!(result.preservation.verified);
     assert!(result.model.fields_verified);
@@ -60,7 +60,7 @@ fn rejected_rows_are_explicit_and_never_changed_to_a_supported_status() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("source.db");
     let db = source(&path);
-    db.execute_batch("UPDATE tasks SET workflow_status='idea' WHERE slug='first';
+    db.execute_batch("UPDATE tasks SET workflow_status='blocked' WHERE slug='first';
         UPDATE tasks SET why=zeroblob(8) WHERE slug='second';").unwrap();
     let result = project(&path,"chosen",None).unwrap();
     assert_eq!(result.model.tasks,0);
@@ -69,7 +69,7 @@ fn rejected_rows_are_explicit_and_never_changed_to_a_supported_status() {
     assert_eq!(result.model.findings.iter().filter(|f|f.table=="tasks").map(|f|f.count).sum::<u64>(),2);
     assert_eq!(result.preservation.rows,4);
     assert!(result.preservation.verified);
-    assert_eq!(db.query_row("SELECT workflow_status FROM tasks WHERE slug='first'",[],|r|r.get::<_,String>(0)).unwrap(),"idea");
+    assert_eq!(db.query_row("SELECT workflow_status FROM tasks WHERE slug='first'",[],|r|r.get::<_,String>(0)).unwrap(),"blocked");
 }
 
 #[test]
@@ -94,4 +94,46 @@ fn cli_requires_explicit_workspace_and_only_creates_new_source_snapshots() {
     let before = std::fs::read(&path).unwrap();
     assert!(project(&path,"chosen",Some(&path)).is_err());
     assert_eq!(std::fs::read(&path).unwrap(),before);
+}
+
+#[test]
+fn unknown_dependency_creation_times_are_retained_as_null_and_edges_still_gate_work() {
+    for missing_column in [false, true] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("source.db");
+        let db = source(&path);
+        db.execute_batch("UPDATE tasks SET workflow_status='todo',assigned_agent=NULL;
+            UPDATE task_dependencies SET created_at=NULL;").unwrap();
+        if missing_column { db.execute_batch("ALTER TABLE task_dependencies DROP COLUMN created_at").unwrap(); }
+        let checkpoint = directory.path().join("checkpoint.db");
+        let report = frog_model::migration_checkpoint::stage(&path,"chosen",&checkpoint).unwrap();
+        assert_eq!(report.projection.model.dependencies,1);
+        assert_eq!(report.projection.model.skipped_dependencies,0);
+        assert!(report.projection.model.findings.iter().any(|f| f.code=="dependency_creation_time_unknown" && f.count==1));
+        let mut destination = Connection::open(&checkpoint).unwrap();
+        destination.pragma_update(None,"foreign_keys","ON").unwrap();
+        let timestamp: Option<String> = destination.query_row("SELECT source_created_at FROM frog_migration_dependency_origins",[],|r|r.get(0)).unwrap();
+        assert_eq!(timestamp,None);
+        let board = frog_model::sqlite::execute(&mut destination,frog_model::Request {
+            workspace_id:"chosen".into(),actor:"reader".into(),operation_id:"read".into(),
+            command:frog_model::Command::Board { repo_id:None,limit:100,after:None },
+        }).unwrap();
+        let task = board["items"].as_array().unwrap().iter().find(|t|t["id"]=="first").unwrap();
+        assert_eq!(task["lane"],"blocked");
+        assert_eq!(task["unmet_dependencies"],serde_json::json!(["second"]));
+        assert!(frog_model::migration_checkpoint::resume(&path,"chosen",&checkpoint).unwrap().checkpoint_verified);
+    }
+}
+
+#[test]
+fn invalid_known_dependency_times_are_not_reclassified_as_unknown() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("source.db");
+    let db = source(&path);
+    db.execute_batch("UPDATE task_dependencies SET created_at='not-a-timestamp'").unwrap();
+    let report = project(&path,"chosen",None).unwrap();
+    assert_eq!(report.model.dependencies,0);
+    assert_eq!(report.model.skipped_dependencies,1);
+    assert!(!report.model.findings.iter().any(|f|f.code=="dependency_creation_time_unknown"));
+    assert!(report.preservation.verified);
 }

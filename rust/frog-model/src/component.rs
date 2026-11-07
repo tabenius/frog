@@ -11,6 +11,7 @@ impl exports::frog::model::planner::Guest for Component {
                 title: value.title,
             },
             Command::CreateTask(value) => crate::Command::CreateTask {
+                initial_status: value.initial_status,
                 repo_id: value.repo_id,
                 task_id: value.task_id,
                 title: value.title,

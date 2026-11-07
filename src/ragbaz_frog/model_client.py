@@ -23,7 +23,7 @@ MUTATIONS = {"register_repo", "create_task", "claim_task", "transition_task",
              "cancel_task", "add_dependency", "remove_dependency", "edit_task", "edit_task_fields", "provider_import", "acquire_lock", "release_lock"}
 # Frog's historical priority words, mapped to the model's numeric levels.
 PRIORITIES = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
-STATUSES = {"review": "review", "published": "published", "done": "done"}
+STATUSES = {"idea": "idea", "todo": "todo", "review": "review", "published": "published", "done": "done"}
 
 
 class ModelError(RuntimeError):
@@ -182,12 +182,17 @@ class ModelClient:
         return self.write(workspace, operation_id, {"kind": "register_repo", "repo_id": repo_id, "title": title})
 
     def create_task(self, workspace: str, operation_id: str, *, repo_id: str, task_id: str,
-                    title: str, priority: str = "p3") -> dict:
+                    title: str, priority: str = "p3", initial_status: str = "todo") -> dict:
         if priority.lower() not in PRIORITIES:
             raise ModelError("invalid_request", "priority must be p0, p1, p2 or p3")
-        return self.write(workspace, operation_id, {"kind": "create_task", "repo_id": repo_id,
-                                                    "task_id": task_id, "title": title,
-                                                    "priority": PRIORITIES[priority.lower()]})
+        if initial_status not in ("idea", "todo"):
+            raise ModelError("invalid_request", "initial status must be idea or todo")
+        command = {"kind": "create_task", "repo_id": repo_id,
+                   "task_id": task_id, "title": title,
+                   "priority": PRIORITIES[priority.lower()]}
+        if initial_status != "todo":
+            command["initial_status"] = initial_status
+        return self.write(workspace, operation_id, command)
 
     def claim_task(self, workspace: str, operation_id: str, *, task_id: str, expected_revision: int) -> dict:
         return self.write(workspace, operation_id, {"kind": "claim_task", "task_id": task_id,
@@ -196,7 +201,7 @@ class ModelClient:
     def transition_task(self, workspace: str, operation_id: str, *, task_id: str,
                         expected_revision: int, status: str) -> dict:
         if status not in STATUSES:
-            raise ModelError("invalid_request", "status must be review, published or done")
+            raise ModelError("invalid_request", "status must be idea, todo, review, published or done")
         return self.write(workspace, operation_id, {"kind": "transition_task", "task_id": task_id,
                                                     "expected_revision": expected_revision, "status": status})
 

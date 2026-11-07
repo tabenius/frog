@@ -7,6 +7,35 @@ fallback. Default URL: `http://localhost:9091/`.
 
 ## Task editing
 
+### Backlog and ready-to-start work
+
+`idea` means backlog/uncommitted work; `todo` means ready to start. Native
+model schema v2 preserves both states. CLI/MCP creation with an idea state
+creates it atomically rather than converting it to todo. JSON `create_task`
+can include `initial_status: "idea"` or `"todo"`; omitting it retains the
+existing todo default. The CLI's existing creation default remains idea.
+
+Promote or return unstarted work explicitly:
+
+```sh
+frog task status TASK_ID --workflow-status todo
+frog task status TASK_ID --workflow-status idea
+```
+
+These operations use the current revision and require unassigned work or its
+current owner. Ideas cannot be claimed directly. Promotion preserves unmet
+dependencies, so todo can still appear blocked and cannot be claimed until
+its prerequisites are done. Active work cannot be demoted directly to idea.
+Preassigned todo work can be claimed by its existing owner, not a competitor.
+Ideas may be cancelled under the same owner-or-unassigned rule. Legacy git
+status/notes are not silently accepted by the model status endpoint.
+
+Fresh migration checkpoints use model schema v2. Existing native model stores
+require the explicit `sqlite::upgrade_idea_schema` upgrade, or opt-in native
+server startup with `FROG_MODEL_UPGRADE_IDEA=1` after taking a backup. The
+upgrade is transactional and checks foreign keys; customized task/schema
+objects require a separate adapter. Legacy mode is never upgraded by this flag.
+
 `frog task edit ID --title TEXT --priority p1 --why TEXT --what TEXT --roi-note TEXT`
 and `--repo MODEL_REPOSITORY_ID` use revision-checked atomic edits. Omitted fields
 are preserved; an empty metadata string clears the note. Workflow, assignee and
@@ -20,7 +49,7 @@ Asana/Linear/Jira `sync` use the API. Adapter configs need `repo_ref` naming a m
 repository for new tasks. Original external IDs and why/what notes are retained.
 Pulls update source-owned, unassigned tasks with revision checks; locally assigned
 tasks conflict. Each item is a transaction, not an atomic batch. Outboxes paginate.
-`idea`/`open` map to `todo`; manually `blocked` items are refused because blocking
+`idea` stays `idea`; `open` maps to `todo`. Manually `blocked` items are refused because blocking
 must be represented by dependencies. Explicit adapter status maps can resolve this.
 
 ## Build verification
