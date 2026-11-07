@@ -161,6 +161,8 @@ def _should_page_for_args(args) -> bool:
         return False
     if args.command == "mcp" and getattr(args, "mcp_command", None) == "serve":
         return False
+    if args.command == 'serve':
+        return False
     if args.command == "log" and getattr(args, "follow", False):
         return False
     if args.command == "gh" and getattr(args, "gh_command", None) == "action":
@@ -1701,7 +1703,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="Path to frog config JSON")
+    parser.add_argument("--config", default=os.environ.get('FROG_CONFIG', DEFAULT_CONFIG_PATH), help="Path to frog config JSON or YAML")
     parser.add_argument("--db", default=None, help="Path to AGENTS.db (explicit value overrides the workspace DB)")
     parser.add_argument("--workspace", help="Named workspace to use; may point at another host over SSH")
     parser.add_argument("--json", action="store_true", help="Emit structured JSON output")
@@ -1939,6 +1941,16 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_sub.add_parser("serve", help="Run a stdio MCP server")
     mcp_sub.add_parser("tools", help="List the MCP tools that frog exposes")
+
+    serve = sub.add_parser('serve', help='Run a foreground MCP server')
+    serve_sub = serve.add_subparsers(dest='serve_command', required=True)
+    serve_mcp = serve_sub.add_parser('mcp', help='Serve MCP over stdio or HTTP')
+    serve_mcp.add_argument('--http', action='store_true', help='Use Streamable HTTP at /mcp instead of stdio')
+    serve_mcp.add_argument('--listen', default='127.0.0.1:8081', help='Bind IP:PORT, or [IPv6]:PORT (HTTP only)')
+    serve_mcp.add_argument('--foreground', '--fg', action='store_true', default=True, help='Run in foreground (default)')
+    serve_mcp.add_argument('--clf', action='store_true', help='Write common logfile format access logs to stdout (default); --json selects JSONL')
+    serve_mcp.add_argument('--token-env', default='FROG_MCP_TOKEN', help='Environment variable containing the HTTP bearer secret (required beyond loopback)')
+    serve_mcp.add_argument('--allow-origin', action='append', default=[], help='Additional exact HTTP Origin to permit')
 
     sync_cmd = sub.add_parser(
         "sync",
@@ -2390,6 +2402,24 @@ def main(argv: list[str] | None = None) -> int:
     _PAGER_ENABLED = "--no-pager" not in argv
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == 'serve':
+        if args.json and args.clf:
+            parser.error('--json and --clf are mutually exclusive')
+        if not args.http and (args.json or args.clf):
+            parser.error('stdio carries MCP on stdout; access log formats require --http')
+        from .model_backend import settings
+        try:
+            mcp_server._MODEL_OPTIONS = settings(config_path=args.config, enabled=args.use_model,
+                url=args.model_url, workspace=args.model_workspace or args.workspace,
+                token_file=args.model_token_file, legacy_db=args.db is not None)
+            if args.http:
+                from .mcp_http import serve_http
+                return serve_http(listen=args.listen, json_log=args.json, token_env=args.token_env,
+                    allowed_origins=args.allow_origin, config_path=args.config, db_path=args.db)
+            return mcp_server.serve(config_path=args.config, db_path=args.db)
+        except (ValueError, OSError, RuntimeError) as error:
+            print(str(error), file=sys.stderr)
+            return 1
     if args.command not in ('config', 'docs', 'completion'):
         from .model_backend import Backend, settings
         from .model_client import ModelError

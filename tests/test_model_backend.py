@@ -55,6 +55,47 @@ class ModelBackendTests(unittest.TestCase):
             backend.provider_sync_in(None,'jira',[{'external_id':'valid','repo_ref':'frog'},{'external_id':'bad','unknown':'unsupported'}])
         backend.client.provider_import.assert_not_called()
 
+    def test_backlog_creation_and_provider_import_preserve_idea(self):
+        backend = self.backend()
+        backend.client.task.return_value = {'id':'one','revision':0,'status':'idea','priority':1}
+        args = SimpleNamespace(workflow_status='idea',git_status='not_started',repo_ref='frog',
+            slug='one',title='Backlog idea',priority='p1')
+        self.assertTrue(backend.create(args)['ok'])
+        self.assertEqual(backend.client.create_task.call_args.kwargs['initial_status'],'idea')
+        backend.client.task.return_value = None
+        backend.provider_sync_in(None,'dash',[{'external_id':'one','repo_ref':'frog','status':'idea'}])
+        self.assertEqual(backend.client.provider_import.call_args.kwargs['status'],'idea')
+
+    def test_backlog_promotion_uses_current_revision_and_rejects_unrepresented_notes(self):
+        backend = self.backend()
+        backend.client.task.return_value = {'id':'one','revision':7,'status':'idea','priority':1}
+        backend.task_status('one',workflow_status='todo')
+        self.assertEqual(backend.client.transition_task.call_args.kwargs['expected_revision'],7)
+        self.assertEqual(backend.client.transition_task.call_args.kwargs['status'],'todo')
+        backend.client.transition_task.reset_mock()
+        with self.assertRaises(model_client.ModelError):
+            backend.task_status('one',workflow_status='todo',note='Must not be discarded')
+        backend.client.transition_task.assert_not_called()
+        backend.client.transition_task.side_effect = model_client.ModelError('conflict','stale revision')
+        with self.assertRaises(model_client.ModelError):
+            backend.task_status('one',workflow_status='todo')
+
+    def test_client_backlog_contract_and_default_creation_compatibility(self):
+        client = model_client.ModelClient('http://localhost:9091/')
+        with patch.object(client,'write') as write:
+            client.create_task('alpha','new',repo_id='frog',task_id='one',title='Default')
+            self.assertNotIn('initial_status',write.call_args.args[2])
+            client.create_task('alpha','idea',repo_id='frog',task_id='two',title='Idea',initial_status='idea')
+            self.assertEqual(write.call_args.args[2]['initial_status'],'idea')
+            client.transition_task('alpha','promote',task_id='two',expected_revision=0,status='todo')
+            self.assertEqual(write.call_args.args[2]['status'],'todo')
+            write.reset_mock()
+            with self.assertRaises(model_client.ModelError):
+                client.create_task('alpha','bad',repo_id='frog',task_id='three',title='Bad',initial_status='done')
+            with self.assertRaises(model_client.ModelError):
+                client.transition_task('alpha','skip',task_id='two',expected_revision=0,status='in_progress')
+            write.assert_not_called()
+
     def test_provider_adapters_use_injected_backend_not_sqlite(self):
         backend = self.backend()
         backend.provider_sync_in = Mock(return_value={'ok':True})

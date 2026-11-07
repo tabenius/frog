@@ -4,9 +4,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+pub mod data_format;
+pub mod import_rules;
+pub mod import_plan;
+pub mod preserved_row;
+
 pub const CONTRACT: &str = "frog.model.v1";
 pub const MIGRATION: &str = include_str!("../sql/0001_model.sql");
 pub const SERVICE_MIGRATION: &str = include_str!("../sql/0002_services.sql");
+pub const IDEA_MIGRATION: &str = include_str!("../sql/0005_idea_status.sql");
 /// Priorities the model accepts; Frog's legacy vocabulary is a host concern.
 const PRIORITIES: [u8; 4] = [0, 1, 2, 3];
 /// Report the next workflow state; never a leap, never out of reported order.
@@ -48,6 +54,8 @@ pub enum Command {
         task_id: String,
         title: String,
         priority: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial_status: Option<String>,
     },
     AddDependency {
         task_id: String,
@@ -215,6 +223,7 @@ const BOARD_SELECT: &str = "SELECT t.task_id AS id,t.repo_id AS repository,t.tit
 t.revision,t.updated_at,t.status_observed_at,\
 CASE WHEN t.status IN ('done','cancelled') THEN 'done' \
 WHEN t.status IN ('in_progress','review','published') THEN 'in_progress' \
+WHEN t.status='idea' THEN 'idea' \
 WHEN EXISTS (SELECT 1 FROM frog_model_dependencies d LEFT JOIN frog_model_tasks p \
   ON p.workspace_id=d.workspace_id AND p.task_id=d.depends_on \
   WHERE d.workspace_id=t.workspace_id AND d.task_id=t.task_id AND (p.status IS NULL OR p.status!='done')) \
@@ -422,6 +431,7 @@ pub fn plan(request: Request) -> Result<Plan, String> {
             }
             if !PRIORITIES.contains(priority)
                 || ![
+                    "idea",
                     "todo",
                     "in_progress",
                     "review",
@@ -582,6 +592,7 @@ ON CONFLICT(workspace_id,repo_id) DO UPDATE SET title=excluded.title, last_opera
             task_id,
             title: label,
             priority,
+            initial_status,
         } => {
             id(repo_id)?;
             id(task_id)?;
@@ -589,11 +600,15 @@ ON CONFLICT(workspace_id,repo_id) DO UPDATE SET title=excluded.title, last_opera
             if !PRIORITIES.contains(priority) {
                 return Err("priority must be 0-3".into());
             }
+            let status = initial_status.as_deref().unwrap_or("todo");
+            if !["idea", "todo"].contains(&status) {
+                return Err("initial status must be idea or todo".into());
+            }
             mutation(&request, Mutation {
-                entity: "INSERT INTO frog_model_tasks(workspace_id,task_id,repo_id,title,priority,status,revision,last_operation_id,status_observed_at) \
-SELECT ?1,?5,?6,?7,?8,'todo',0,?2,strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+                entity: &format!("INSERT INTO frog_model_tasks(workspace_id,task_id,repo_id,title,priority,status,revision,last_operation_id,status_observed_at) \
+SELECT ?1,?5,?6,?7,?8,'{status}',0,?2,strftime('%Y-%m-%dT%H:%M:%fZ','now') \
 WHERE EXISTS(SELECT 1 FROM frog_model_repos WHERE workspace_id=?1 AND repo_id=?6) \
-ON CONFLICT(workspace_id,task_id) DO NOTHING",
+ON CONFLICT(workspace_id,task_id) DO NOTHING"),
                 effect: json!(task_id), secondary: json!(repo_id), extras: vec![json!(label), json!(priority)],
                 precheck: None, satisfied: WROTE, event: "task.created", entity_kind: "task",
             })
@@ -644,7 +659,7 @@ AND EXISTS(SELECT 1 FROM frog_model_tasks WHERE workspace_id=?1 AND task_id=?6)"
             mutation(&request, Mutation {
                 entity: "UPDATE frog_model_tasks SET status='in_progress',assignee=?4,revision=revision+1,last_operation_id=?2,\
 status_observed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 \
-AND status='todo' AND assignee IS NULL AND NOT EXISTS(SELECT 1 FROM frog_model_dependencies d \
+AND status='todo' AND (assignee IS NULL OR assignee=?4) AND NOT EXISTS(SELECT 1 FROM frog_model_dependencies d \
 LEFT JOIN frog_model_tasks p ON p.workspace_id=d.workspace_id AND p.task_id=d.depends_on \
 WHERE d.workspace_id=?1 AND d.task_id=?5 AND (p.status IS NULL OR p.status!='done'))",
                 effect: json!(task_id), secondary: json!(expected_revision), extras: Vec::new(),
@@ -657,11 +672,22 @@ WHERE d.workspace_id=?1 AND d.task_id=?5 AND (p.status IS NULL OR p.status!='don
             status,
         } => {
             id(task_id)?;
+            if status == "idea" || status == "todo" {
+                let previous = if status == "idea" { "todo" } else { "idea" };
+                return mutation(&request, Mutation {
+                    entity: "UPDATE frog_model_tasks SET status=?7,revision=revision+1,last_operation_id=?2,\
+status_observed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 \
+AND (assignee IS NULL OR assignee=?4) AND status=?8",
+                    effect: json!(task_id), secondary: json!(expected_revision),
+                    extras: vec![json!(status), json!(previous)],
+                    precheck: None, satisfied: WROTE, event: "task.transitioned", entity_kind: "task",
+                });
+            }
             let previous = TRANSITIONS
                 .iter()
                 .find(|(next, _)| next == status)
                 .map(|(_, previous)| *previous)
-                .ok_or("transition requires review, published or done")?;
+                .ok_or("transition requires idea, todo, review, published or done")?;
             mutation(&request, Mutation {
                 entity: "UPDATE frog_model_tasks SET status=?7,revision=revision+1,last_operation_id=?2,\
 status_observed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 \
@@ -702,7 +728,7 @@ AND assignee=?4 AND status=?8",
             mutation(&request, Mutation {
                 entity: "UPDATE frog_model_tasks SET status='cancelled',revision=revision+1,last_operation_id=?2,\
 status_observed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 \
-AND (assignee IS NULL OR assignee=?4) AND status IN ('todo','in_progress','review','published')",
+AND (assignee IS NULL OR assignee=?4) AND status IN ('idea','todo','in_progress','review','published')",
                 effect: json!(task_id), secondary: json!(expected_revision), extras: Vec::new(),
                 precheck: None, satisfied: WROTE, event: "task.cancelled", entity_kind: "task",
             })
@@ -718,3 +744,13 @@ mod core_wasm;
 pub mod legacy;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "sqlite")]
+pub mod migration;
+#[cfg(feature = "sqlite")]
+pub mod migration_dry_run;
+#[cfg(feature = "sqlite")]
+pub mod migration_simulation;
+#[cfg(feature = "sqlite")]
+pub mod migration_projection;
+#[cfg(feature = "sqlite")]
+pub mod migration_checkpoint;

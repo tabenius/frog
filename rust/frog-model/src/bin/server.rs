@@ -354,6 +354,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "BEGIN IMMEDIATE; {} COMMIT;",
             frog_model::SERVICE_MIGRATION.replace("frog_model_", &prefix)
         ))?;
+        // Table rebuilds are opt-in; never upgrade a legacy workspace here.
+        if std::env::var("FROG_MODEL_UPGRADE_IDEA").as_deref() == Ok("1") {
+            frog_model::sqlite::upgrade_idea_schema(&mut conn, &prefix)?;
+        }
     }
     let legacy = if std::env::var("FROG_MODEL_STORAGE").as_deref() == Ok("legacy") {
         let workspace = std::env::var("FROG_MODEL_WORKSPACE")?;
@@ -412,6 +416,7 @@ mod tests {
             (
                 "task",
                 frog_model::Command::CreateTask {
+                    initial_status: None,
                     repo_id: "frog".into(),
                     task_id: "one".into(),
                     title: "One".into(),

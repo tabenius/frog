@@ -53,6 +53,15 @@ fn writes_are_idempotent_preserve_legacy_fields_and_rollback_failures() {
     assert_eq!(count,0);
 }
 #[test]
+fn explicit_idea_creation_is_preserved_by_the_legacy_adapter() {
+    let mut conn = fixture();
+    let command = json!({"kind":"create_task","repo_id":"repo:frog","task_id":"new-idea","title":"New idea","priority":2,"initial_status":"idea"});
+    assert_eq!(run(&mut conn,"idea",command.clone())["items"][0]["status"],"applied");
+    assert_eq!(run(&mut conn,"idea",command)["items"][0]["status"],"applied");
+    assert_eq!(conn.query_row("SELECT workflow_status FROM tasks WHERE slug='new-idea'",[],|r|r.get::<_,String>(0)).unwrap(),"idea");
+}
+
+#[test]
 fn tenancy_and_unsafe_mutations_are_refused() {
     let mut conn = fixture();
     let mut req = request("read",json!({"kind":"repositories","limit":10}));

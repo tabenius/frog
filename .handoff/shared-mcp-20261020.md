@@ -1,0 +1,390 @@
+# Frog shared MCP / HTTP / migration handoff — 2026-10-20
+
+## Publication checkpoint — 2026-11-07
+
+User requested committing and pushing the accumulated migration work to GitHub
+`origin` on `handoff/mcp-native-edge-20261020`. This checkpoint includes durable
+staging/resume verification, native idea support and nullable dependency-time
+provenance. Earlier sections capture pre-publication milestones. Recovery data
+stays outside Git; operational cutover is still blocked. Do not contact Kali.
+
+## Dependency observation provenance — 2026-11-07
+
+- User requested continuing Pieces, Frog, WeftMark and Dash. After the initial
+  Pieces volume-adapter milestone, made source edge creation times optional in
+  migration seed plans/provenance. NULL or missing timestamps remain NULL;
+  invalid known values are refused. Relationships still require valid projected
+  endpoints and pass existing cycle/transaction checks. Current projection/seed
+  format is `20261107-6`, checkpoint `20261107-7`; prior artifacts are retained.
+- New verified recovery checkpoint:
+  `/home/xyzzy/reports/dash-frog-import-20261107T123347Z/model-checkpoint-dependencies.db`.
+  It projects **227 tasks and 43 of 44 dependencies**. One edge has an endpoint
+  among the seven unprojected tasks and remains archived. All recovered inputs
+  and previous checkpoint file hashes are unchanged. Read
+  `dependencies-summary.json` and the `*-dependencies-report.json` evidence.
+- **73 Rust tests passed**, HTTP check and both WASM library builds passed.
+  This is still a stale Nov 1 observation, not current fleet authority. No Kali,
+  backend switch, commit, push or production mutation occurred.
+
+## Native idea/backlog state — 2026-11-07
+
+- User requested an idea/not-yet-started state. Native model schema v2 now
+  preserves `idea` as backlog, distinct from `todo` (ready to start).
+  `CreateTask.initial_status` is optional (`idea`/`todo` only; omitted retains
+  the old JSON todo behavior/hash). CLI/MCP creation honors idea atomically;
+  provider ideas no longer become todo. WIT create-task adds the optional field
+  and its package advances to `frog:model@0.2.0`.
+- `TransitionTask` / `frog task status` support revision-checked idea <-> todo
+  for unassigned work or its owner. Claims remain todo-only and dependency-gated;
+  no direct idea claim or demotion of active work. Preassigned todo is claimable
+  by its existing owner, never a competitor. Ideas can be cancelled.
+  Legacy storage uses its existing idea representation and is not schema-upgraded.
+- `0005_idea_status.sql` rebuilds the owned task/schema tables through the
+  native `sqlite::upgrade_idea_schema` helper, preserving records/children and
+  checking FKs before commit. FK enforcement is restored after failures.
+  Customized task/schema objects are refused. Existing native server upgrades
+  require explicit `FROG_MODEL_UPGRADE_IDEA=1`; no live backend was switched.
+- Current report versions: dry-run `20261107-2`, projection/seed `20261107-3`,
+  checkpoint `20261107-4`, simulation `20261107-5`. Inventory and preservation
+  encoding are unchanged. Old checkpoints are not relabelled or overwritten;
+  updated resume intentionally rejects older schema/mapping generations.
+- Reprojected the existing local Dash recovery input without any network access:
+  `/home/xyzzy/reports/dash-frog-import-20261107T123347Z/model-checkpoint-idea.db`
+  now contains **227 tasks**, including all **17 ideas**. Verified each idea's
+  state, title, priority, assignee and source timestamps plus baseline revision.
+  Stage/resume pass. Old checkpoint/export/source byte hashes are unchanged.
+  See `idea-summary.json` and the `*-idea-report.json` files.
+- Seven source tasks remain archived (3 blocked, 4 without repositories);
+  dependencies remain archived because original edge timestamps are missing.
+  The snapshot is still stale as of Nov 1; operational cutover is not ready.
+- Checks: **71 Rust SQLite tests**, **3 HTTP server tests**, **13 Python model
+  tests**, both WASM library builds and MCP contract sync check passed.
+  Work remains local/uncommitted; do not contact offline Kali.
+
+## Recovered Dash task observations — 2026-11-07
+
+- User requested populating tasks from Dash while Kali remains unavailable.
+  Existing local Wrangler OAuth allowed SELECT-only access to production Dash
+  D1 `d31867e7-540c-4acc-b011-7e3b7fa9f4ef`; no remote rows were written.
+- Recovered the cached Frog snapshot for instance
+  `934adeda-25ec-49cf-b9e2-9a4c7e83be6c`, revision 9403, source observed
+  `2026-11-01T22:05:17.256114Z`. It is stale, not current fleet authority.
+- Durable artifacts: `/home/xyzzy/reports/dash-frog-import-20261107T123347Z/`.
+  Read its README/summary before using the data. Raw export and legacy-shaped
+  recovery database retain all **234 tasks, 44 dependencies and 98 tag links**,
+  extra raw task fields and source payload. Task/payload round trips, integrity
+  and FKs verified. Existing workspace AGENTS.db/configs remain unchanged.
+- Ran `stage` then `resume`: both verified. Checkpoint projects **210 tasks**
+  across 24 explicitly synthetic Dash-scoped repository-label identities.
+  Twenty idea/blocked tasks and four null-repository tasks remain archived.
+  All dependency edges remain archived, not projected: Dash omitted their
+  creation times, retained as NULL instead of inventing provenance.
+- Original assignees are observations only; no active locks/leases/assignments
+  restored. `ready_to_apply=false`. These real cached observations can inform
+  further work; do not substitute them for fresh authoritative Frog state.
+
+## Durable staging continuation — 2026-11-07
+
+- Resumed from published checkpoint `926a291` on
+  `handoff/mcp-native-edge-20261020`. Current continuation is local/uncommitted;
+  inspect Git status before publication. Dash remains at `520bd0d`.
+- Added native `frog-model-migrate stage` and `resume`, both requiring explicit
+  `--source`, `--workspace` and `--checkpoint`. `stage` reuses the existing
+  preservation/projection builder and exclusively writes a new staging database
+  (0600 on Unix), then reopens and verifies it. Existing files/aliases/symlinks
+  cannot be overwritten. Failed writes retain their artifact and report failure.
+- `resume` means read-only staging verification, not operation replay, partial
+  write recovery or activation. It reconstructs the expected projection from the
+  explicitly supplied immutable source snapshot and compares the entire
+  checkpoint's typed logical schema/content fingerprint plus integrity/FKs.
+  This covers archive bytes, model fields, receipts, provenance and the owned
+  source/workspace/version marker. Committed WAL edits are observed.
+- New checkpoint report `frog.migration-checkpoint.v1` uses date version
+  `20261107-1`. Earlier artifact formats retain their meanings. Stage/resume
+  require the same supported mapping/importer identity; no implicit upgrades.
+  Complete checkpoints are limited to 256 MiB / one million rows including
+  archive and projected rows. Keep the reviewed source snapshot for later resume.
+- **Operational apply/cutover remains blocked**: unsupported vocabulary,
+  historical events, leases and additional relationship semantics still need
+  contracts/parity. Both readiness and whole-source operational parity remain
+  false. No backend switch, HTTP/MCP/WIT mutation endpoint or lease renewal was
+  introduced. Next prioritize those missing runtime contracts before real apply.
+- Checks: **61 Rust tests passed** (7 new checkpoint regressions), HTTP cargo
+  check, wasm32-wasip2 component library and wasm32-unknown-unknown library
+  builds, shared MCP contract sync/digest check, rustfmt checks on new modules/
+  CLI/tests and git diff --check all passed. New tests exercise repeat resume,
+  immutable snapshots after live-source changes, source/WAL preservation, WAL
+  tampering, model/archive/schema/format tampering, aliases and projection failure.
+- User explicitly says Kali is down: **do not contact Kali or fetch fleet-head**.
+  No authoritative Frog database, user configuration or production deployment
+  was changed. No commit/push was requested for this continuation.
+
+## Disposable operational projection continuation
+
+- Continued from green/published `e6374d4` with `frog-model-migrate project
+  --source PATH --workspace ID [--snapshot NEW_PATH]`. Workspace selection is
+  explicit. The target remains fresh/in-memory; there is no persistent target.
+- Portable `import_plan.rs` validates typed repository/task/dependency seeds
+  against existing model rules, binds source/workspace/actor/original values
+  to deterministic import receipts, and emits parameterized seed statements.
+  It is not exposed as an HTTP/MCP/WIT migration mutation endpoint.
+- Native `migration_projection.rs` first verifies full preservation, then
+  seeds supported model repos/tasks/details/providers/dependencies and stores
+  source provenance using owned `sql/0004_migration_projection.sql`. Status,
+  assignee, updated/observed timestamps and null/empty metadata are preserved.
+  Repo/task creation times are retained in provenance. No source event history
+  is fabricated as model events; no locks or target commands are executed.
+- Tasks get an explicit new baseline revision 0, with source_revision NULL.
+  A source task `revision` column requires explicit mapping and is skipped.
+  Unsupported/ambiguous/invalid rows are counted and remain archived. Cyclic
+  dependency insertion rolls back all operational seeds/provenance/receipts.
+- Source-to-model reconciliation checks every projected field, provenance,
+  receipt, counts, FK/integrity and matching canonical model fingerprints,
+  before and after commit. Existing operational data is never overwritten.
+- New projection artifact/seed-plan version is `20261020-6`; existing simulate
+  `-5`, assessment `-4` and inventory `-3` behavior remains unchanged. Supported
+  model rows can now be read/acted on in the disposable model; full parity and
+  ready_to_apply remain false pending vocabulary/history/lease/relationship
+  contracts, persistent apply/resume and real cutover verification.
+- Latest local checks: **54 Rust tests passed**, HTTP check and both WASM
+  library builds passed. Tests cover existing model reads and revisioned
+  transitions, dependency blocking, identity ambiguity, preservation, unknown
+  source revisions, stale source fingerprints, cycles/rollback, tampering,
+  explicit workspace selection, real CLI and no source/snapshot overwrite.
+- User also requested progress/top 10 Frog tasks. Read-only local workspace
+  `/home/xyzzy/src/ragbaz/AGENTS.db` has **0 tasks**. Default configuration is
+  ambiguous (both config.json/config.yaml); explicit reads of both select
+  localhost:9091/workspace local. The model client fails with `missing_token`
+  before any authenticated request. Do not fabricate a top 10 from fixtures or
+  contact offline Kali. Need a populated source path or locally configured
+  model authentication to fulfill this outstanding request. No configs changed.
+- This note precedes committing/pushing the milestone; inspect git log/CI for
+  its publication. No production deployment or authoritative task updates.
+
+## Disposable preservation simulation — 2026-10-20
+
+- Continued from published/green `e62d220` with `frog-model-migrate simulate`.
+  Source inventory, mapping assessment and preservation read the same backup.
+- New owned destination schema `sql/0003_migration_preservation.sql` stores
+  source fingerprint/version/inventory, the exact SQLite snapshot, inert
+  schema SQL/column metadata, and typed binary rows for every source table.
+  It is used only in a disposable in-memory destination; it is not automatically
+  applied to existing SQLite/D1 stores. No persistent destination option exists.
+- Portable `preserved_row.rs` retains null/integer/real-bit/text-byte/blob-byte
+  distinctions, including invalid UTF-8 and large integers. It reuses the
+  already-published inventory hash encoding; inventory version remains `-3`.
+- Simulation artifact `frog.migration-simulation.v1` uses data version
+  `20261020-5`, nesting unchanged dry-run `-4` and inventory `-3` reports.
+  Preservation is verified against trusted source metadata, snapshot SHA-256,
+  per-table typed hashes, ordinals, storage classes, counts and destination
+  integrity/FKs. Verification occurs before commit and again afterward.
+- Source DDL is never executed in the destination. Generic preservation does
+  not claim operational model parity: destination_simulated=true,
+  operational_model_populated=false, ready_to_apply=false. Full runtime mapping,
+  persistent apply/resume and cutover remain future work. Archive preservation
+  schema/rows roll back on reconciliation, collision or capacity failures.
+- Limits remain 256 MiB source/one million rows; destination pages are bounded
+  to 512 MiB (working buffers/source memory are additional). Optional --snapshot
+  writes the source backup exclusively only after simulation succeeds.
+- Latest local checks: **43 Rust tests passed**, HTTP check and both WASM
+  library builds passed. New tests cover typed roundtrips, complete legacy
+  schema with populated history/locks/unknown fields, WAL, generated/WITHOUT
+  ROWID tables, duplicates, inert source schema, tampering, version refusal,
+  rollback/collisions/capacity and real CLI behavior.
+- This note is captured before committing/pushing this milestone; inspect
+  git log and GitHub CI for its final publication. No Kali/production access.
+
+## Mapping dry-run continuation — 2026-10-20
+
+- Inventory milestone was committed/pushed as `7ed534e`; its GitHub CI
+  `39441631495` passed. Both published repositories were clean at that point.
+- Continued on explicit user requests with `frog-model-migrate dry-run`.
+  Inventory and row assessments now share one immutable online backup.
+- New portable `import_rules.rs` defines conservative per-field candidates,
+  exact legacy priority/status rules, stable repo identity requirements, and
+  UTC timestamp normalization. New native `migration_dry_run.rs` reuses the
+  Rust planner for structural repo/task/dependency validation, reports coverage
+  gaps/typed values/identity/provider/graph/timestamp issues without private
+  row values, and never executes destination writes or target commands.
+- New artifact: `frog.migration-dry-run.v1`, data version `20261020-4`;
+  nested inventory remains `20261020-3`. No format relabeling or DB cutover.
+- Full legacy `idea`/`blocked` states and history/locks/relations need explicit
+  destination schemas/preservation; no implicit lossy mapping is accepted.
+  `ready_to_apply` and `destination_simulated` are false. Candidate counts do
+  not establish operational parity. Full apply/resume remain unimplemented.
+- Latest local checks: **34 Rust tests passed**, HTTP check and both WASM
+  library builds passed. Includes six dry-run integration tests and two pure
+  mapping/timestamp tests, with all earlier inventory tests still passing.
+- This snapshot precedes committing/pushing the dry-run milestone; inspect
+  git log for its final SHA and CI. No Kali or production data was accessed.
+
+## Published continuation and inventory milestone — 2026-10-20
+
+- User requested commit/push and continuation. Published to GitHub origin on
+  `handoff/mcp-native-edge-20261020`: `ffb3f34` (validated MCP/model changes)
+  and `daedbf9` (public CI isolation fix). Dash published `fd3a1a4` and
+  `520bd0d` on its same-named branch.
+- GitHub run `39440976962` passed both Frog jobs (fallback/SDK MCP tests,
+  native model tests, HTTP check, both WASM builds). Dash run `39440975724`
+  passed build and pinned public-Frog contract parity. The earlier Frog run
+  failed because public CI could not clone private Dash; fixed by keeping
+  cross-repository integration in private Dash's CI, without adding secrets.
+- New native `frog-model-migrate inventory --source PATH [--snapshot NEW_PATH]`
+  uses read-only source + consistent SQLite online backup (WAL included).
+  Emits `frog.migration-inventory.v1` with data version `20261020-3`, physical
+  snapshot SHA-256, schema/column/storage-class/count inventory and logical
+  typed-content hashes. Optional snapshot creation is exclusive, mode 0600
+  on Unix. No table data is mapped/dropped and no source migrations occur.
+- Inventory always reports `ready_to_apply: false`; full importer/apply/resume
+  remain unimplemented. Every table requires explicit mapping. Virtual/shadow
+  tables are refused; integrity/FK failures are reported as blockers. Current
+  limits: 256 MiB snapshot, one million total rows, 30-second backup deadline.
+- Native checks after inventory: **26 tests passed** (including 8 new tests
+  for full shipped legacy schema, typed values/schema names, deterministic
+  hashing, WAL/standalone backup, preservation, FK damage, virtual tables and
+  CLI). HTTP check and both WASM library builds passed. See migration doc for
+  exact commands and limits. Importer build can be identified by compile-time
+  `FROG_MODEL_BUILD_ID`; otherwise the report explicitly says unidentified.
+- This section is captured before committing the inventory milestone; inspect
+  git log/status for its final publication. No Kali access or production
+  deployments/migrations were performed.
+
+## Resumed validation — 2026-10-20
+
+Current branch is `handoff/mcp-native-edge-20261020`, checkpoint HEAD
+`3448eb3580b5cd3a51c520f138a32528d3b1b10b`. The historical sections below
+describe the earlier snapshot. This section was captured before the validated
+resume commit; the user has now requested committing/pushing and continuing.
+
+- Fixed stdio test EOF/buffer races using unbuffered reads and shared exchange
+  helper. Added real HTTP CLI integration tests plus official SDK HTTP client.
+- HTTP now bounds accepted socket reads, validates params/IDs, redacts unknown
+  MCP method names in access logs, and negotiates supported versions correctly.
+- Latest full MCP checks: fallback 33 passed + 1 SDK-only skip; official MCP
+  1.30.0/Python 3.12: all 34 passed. CLI rendering: all 21 passed. Final narrow
+  HTTP rerun after signature/type refinements: 4 passed + 1 SDK-only skip.
+- Added Bash/Fish serve completion and HTTP/shared-catalog documentation.
+- Added cross-checkout pinned-contract CI and native/WASM model build CI.
+- Rust: date-format version parser/serde/explicit support check in
+  `src/data_format.rs`, format `20261020-3`; existing persisted stores are not
+  relabelled. Closed WIT command coverage gap and gated HTTP dependencies.
+- Native Rust tests: 18 passed (3 library + 12 conformance + 3 legacy).
+  HTTP cargo check passed; both wasm32-wasip2 component and
+  wasm32-unknown-unknown core library builds passed.
+- `rustfmt --check` on modified component/new format module passed. Whole
+  crate cargo fmt check still finds pre-existing formatting in legacy.rs,
+  sqlite.rs and tests/legacy.rs. Native linking with component+sqlite together
+  fails on WIT export symbols; supported validation uses native sqlite tests
+  and the actual WASI component target separately.
+- Full migration design is `docs/MODEL-MIGRATION.md`. Full importer, generated
+  TS bindings and runtime WASM differential fixtures remain future work.
+- Local contract sync/digest check and git diff --check passed. GitHub CI
+  itself has not run on these unpushed changes. No Kali access or production
+  deployment occurred. Resume publication only after inspecting current diff.
+
+Recreated missing SDK environment with uv at
+`/tmp/opencode/frog-mcp-test` (system Python lacks pip/ensurepip). Isolated
+config remains `/tmp/opencode/frog-test-config.json`.
+
+## Checkpoint publication and portable resume
+
+User requested commit/push then pause. Checkpoint branch in both repositories:
+`handoff/mcp-native-edge-20261020`. State descriptions below are the pre-commit
+snapshot, not a statement that the checkpoint is on main or deployed.
+
+If resuming from GitHub without the workspace wrapper, read this document and
+the same branch's `ragbaz-dash/.handoff/shared-mcp-audit-20261020.md`. The root
+`HANDOFF-BIG-PICKLE.md` exists locally at `/home/xyzzy/src/ragbaz/`; the wrapper
+has no GitHub origin. Never contact offline Kali. Latest user priority is a
+fuller legacy-to-new data migration and date versions such as `20261020-3`;
+that migration/version change is NOT implemented yet. Extend the existing
+Rust planner/WIT instead of inventing a second domain model. Its current WIT
+commands lag the Rust enum, and legacy.rs is only a limited live adapter.
+Keep auth/storage/transport in host adapters and deterministic rules in Rust.
+
+Read `../../HANDOFF-BIG-PICKLE.md` for full user intent and deployment baseline.
+
+## Repository state
+
+- Path `/home/xyzzy/src/ragbaz/ragbaz-frog`, branch `main`.
+- HEAD `854d16e` (`Merge model-first coordination services into main`).
+- All latest work is **uncommitted**. `git diff --check` passed at handoff.
+- Read `AGENTS.md`. Do NOT access offline Kali or mutate its task state.
+
+## Changes on disk
+
+Modified:
+- `pyproject.toml`: packages canonical `mcp_contract.json`.
+- `src/ragbaz_frog/mcp_server.py`: original specs renamed `_native_tool_specs`;
+  shared specs overlaid; native write tools retained and annotated; local
+  `dash_*` read adapters; shared argument validation; model backend gains status,
+  log-tail, create dispatch. FastMCP tool `parameters` replaced with exact
+  catalog schema to prevent Optional[Any] signature regeneration drift.
+- `main_cli.py`: new `serve mcp --http --listen --foreground/--fg --clf`
+  parser + foreground HTTP dispatch; honors FROG_CONFIG for default --config
+  (old hard-coded YAML default bypassed it). Existing `frog mcp serve` remains.
+- `tests/test_mcp_server.py`: five shared aliases added to expected tool list;
+  sets `proc.stdin = None` after closing to fix Python 3.13 communicate flush.
+
+New:
+- `src/ragbaz_frog/mcp_contract.json`: canonical 8 read tools, version currently
+  **1.0.0** (date-based version request arrived afterward; still to decide).
+  Shared names: five existing `dash_*` tools plus `frog_task_list`,
+  `frog_status`, `frog_log_tail`. Native Frog has 31 tools total including writes.
+- `mcp_contract.py`: package-resource loader + stdlib validator for schema subset.
+- `mcp_local_reads.py`: selected workspace represented as a stable uuid5 local
+  Frog instance; adapters read actual chosen backend, label local source, refuse
+  Rebekah-only views. UUID derives from selected DB path or model identity.
+- `bin/sync-mcp-contract.py`: generates/checks Dash JSON + SHA256 lock offline:
+  `python3 bin/sync-mcp-contract.py --dash ../ragbaz-dash --check`.
+- `tests/test_mcp_contract.py`: actual stdio read-write roundtrip, exact advertised
+  schemas, local source correctness, subset vocabulary + artifact parity.
+- `mcp_http.py`: NEW UNTESTED HTTP transport, stdlib HTTPServer; `/mcp` JSON-RPC,
+  explicit bind, foreground, JSONL/CLF stdout, token-env auth (mandatory outside
+  loopback), Origin/loopback Host checks, request cap, version checks, SIGTERM stop.
+  Uses same dispatcher as stdio. Does not let remote `exit` stop process.
+
+## Tests / known issues
+
+System Python without SDK:
+```
+FROG_CONFIG=/tmp/opencode/frog-test-config.json python3 -m unittest discover -s tests -p 'test_mcp*.py'
+```
+**29 passed** before HTTP file was added. Repeat after adding HTTP tests.
+
+Official SDK:
+```
+FROG_CONFIG=/tmp/opencode/frog-test-config.json /tmp/opencode/frog-mcp-test/bin/python -m unittest discover -s tests -p 'test_mcp*.py'
+```
+**28 passed, 1 failed**. Remaining failure:
+`test_mcp_transport.McpTransport.test_stdio_uses_newline_delimited_json`.
+Existing helper uses `subprocess.run(input=...)`, closing stdin immediately;
+SDK sometimes cancels tools/list before writing id=2 response. Reuse the
+keep-stdin-open helper in `test_mcp_server.py` instead. That helper now fixes
+closed-pipe flushing. This is an actual observed failure, not a production claim.
+
+The user machine has both ~/.config/frog/config.yaml and config.json, so tests
+must use isolated FROG_CONFIG. Do not delete/overwrite user configs. SDK venv
+doesn't have PyYAML; explicit isolated JSON avoids that dependency.
+
+HTTP needs integration tests NOW: spawn exact CLI with temp --db + isolated
+--config, bind 127.0.0.1:0, read ready event or stderr CLF startup, call initialize,
+tools/list, write/create/edit + shared reads; test errors, Host/Origin/auth,
+max body, JSONL/CLF stdout, no args/secrets in logs, SIGTERM. Nonloopback auth
+test with FROG_MCP_TOKEN and `--listen 0.0.0.0:0`. --json/--clf conflict test.
+Inspect HTTP standards gaps: currently requires Content-Length, refuses chunked;
+validate protocol negotiation and errors. No HTTP tests have run yet.
+
+## Still to do
+
+- Document exact user commands, JSONL/CLF examples and read/write authority.
+- Update CLI completion/help command lists for `serve` as appropriate.
+- Shared protocol schemas pass real stdio SDK tests; improve registration to
+  avoid private FastMCP internals if practical, without weakening schemas.
+- Add cross-checkout CI parity job; current artifact checks are local + pinned
+  digest, not a full remote cross-repo CI workflow.
+- Full Rust/WIT + date-versioned legacy migration PLAN is not written yet.
+  Existing Rust findings and priorities are in root handoff. User asked to
+  prioritize fuller migration and date versions e.g. `20261020-3`.
+- Test model-backend local instance identity and new dispatch branches more.
+- No commit/push/install of current Frog changes yet.

@@ -8,6 +8,8 @@ fn database() -> Connection {
     connection
         .execute_batch(frog_model::SERVICE_MIGRATION)
         .unwrap();
+    let mut connection = connection;
+    frog_model::sqlite::upgrade_idea_schema(&mut connection, "frog_model_").unwrap();
     connection
         .execute_batch("INSERT INTO frog_model_workspaces VALUES('alpha','Alpha'),('beta','Beta');")
         .unwrap();
@@ -47,6 +49,7 @@ fn seed(db: &mut Connection, ws: &str) {
         "owner",
         "create",
         Command::CreateTask {
+            initial_status: None,
             repo_id: "frog".into(),
             task_id: "one".into(),
             title: "Task one".into(),
@@ -535,6 +538,7 @@ fn dependencies_gate_claims_and_are_reported_on_the_board() {
         "alice",
         "second",
         Command::CreateTask {
+            initial_status: None,
             repo_id: "frog".into(),
             task_id: "two".into(),
             title: "Task two".into(),
@@ -781,6 +785,7 @@ fn board_pagination_is_keyset_stable_and_filtered() {
             "owner",
             &format!("create-{id}"),
             Command::CreateTask {
+                initial_status: None,
                 repo_id: repo.into(),
                 task_id: id.into(),
                 title: id.into(),
@@ -897,6 +902,7 @@ fn validation_rejects_unknown_fields_bad_priority_and_unbounded_queries() {
             limit: 10,
         },
         Command::CreateTask {
+            initial_status: None,
             repo_id: "frog".into(),
             task_id: "one".into(),
             title: "x".into(),
