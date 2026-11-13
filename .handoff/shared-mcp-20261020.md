@@ -1,5 +1,31 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Outside-root agent-instructions writes — 2026-11-13
+
+The LocalVFS path-routing slice below is committed/pushed to GitHub main as
+`8f12041`; hosted `model` and `mcp` jobs pass on that commit. Continue with local
+P1 `frog-local-agent-instructions-outside-root`. `write_agent_instructions`
+converted an absolute target outside the selected LocalVFS root into an
+outside-looking VFS path. Existing outside files happened to work through the
+read fallback, but new files were silently written beneath the workspace root
+while the result reported the requested absolute path.
+
+New outside-root targets now use host pathlib I/O and report the resolved path
+actually written. In-root targets and the omitted-path default remain VFS-backed.
+Overwrite refusal and `--force` apply to outside paths too. Five real-filesystem
+tests cover an outside directory, an outside `.md` name, refusal then forced
+replacement, an in-root nested directory, and the omitted-path workspace default;
+the new-write cases failed before the fix. This matches the documented “write a
+local AGENTS.md” at the requested path; it is not a new general sandbox policy.
+
+Full fallback passes 424 tests with three expected optional-dependency skips.
+The first locked-SDK run had one transient `LockReap.test_reap_reports_expired_lease`
+failure after a backdated lease was not reported as newly reaped; that test passed
+in isolation, in its full module, and in a complete locked-SDK rerun (424 tests,
+zero skips). Logs are under
+`/home/xyzzy/.cache/frog-agent-instructions-verification-20261113/`, including
+the failed attempt and successful rerun checkpoint. No Kali access or deployment.
+
 ## LocalVFS rooted path routing — 2026-11-13
 
 The optional-MCP security slice below is committed/pushed to GitHub main as

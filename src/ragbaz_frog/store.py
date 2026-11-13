@@ -1182,13 +1182,29 @@ def write_agent_instructions(
         target_dir_local = _vfs_to_local_path(target_dir_local, vfs)
         target_file_local = os.path.join(target_dir_local, "AGENTS.md")
 
-    # Convert target file to VFS path for VFS operations
-    target_vfs = vfs_from_local_path(target_file_local, vfs)
-    target_dir_vfs = vfs_from_local_path(target_dir_local, vfs)
+    # New absolute paths outside the root cannot be represented as VFS paths:
+    # LocalVFS would treat a nonexistent absolute target as workspace-relative.
+    # Use host pathlib for them so a successful result names the file actually written.
+    from pathlib import Path
 
-    target_local = target_file_local
+    target_path = Path(target_file_local).expanduser()
+    outside_root = isinstance(vfs, LocalVFS) and not _is_path_under_vfs_root(
+        str(target_path), vfs
+    )
+    if outside_root:
+        target_path = target_path.resolve()
+        target_local = str(target_path)
+        target_vfs = None
+        target_dir_vfs = None
+    else:
+        target_local = target_file_local
+        target_vfs = vfs_from_local_path(target_file_local, vfs)
+        target_dir_vfs = vfs_from_local_path(target_dir_local, vfs)
 
-    if vfs_exists(target_vfs, vfs) and not force:
+    exists = (
+        target_path.exists() if outside_root else vfs_exists(target_vfs, vfs)
+    )
+    if exists and not force:
         return {
             "ok": False,
             "error": f"refusing to overwrite existing file: {target_local}",
@@ -1199,8 +1215,14 @@ def write_agent_instructions(
         summary=f"requested agent-instruction write to {target_local}",
         payload={"agents_path": target_local, "force": bool(force)},
     )
-    vfs_mkdir(target_dir_vfs, parents=True, exist_ok=True, vfs=vfs)
-    vfs_write_text(target_vfs, agent_instructions_text(), encoding="utf-8", vfs=vfs)
+    if outside_root:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(agent_instructions_text(), encoding="utf-8")
+    else:
+        vfs_mkdir(target_dir_vfs, parents=True, exist_ok=True, vfs=vfs)
+        vfs_write_text(
+            target_vfs, agent_instructions_text(), encoding="utf-8", vfs=vfs
+        )
     parent_local = target_dir_local
     repo = resolve_repo(conn, parent_local)
     # Only use repo_path if it exactly matches parent_local (FK constraint)
