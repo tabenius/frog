@@ -198,13 +198,17 @@ class VFS(abc.ABC):
         return joined
 
     def relative_to(self, path: str, base: str) -> str:
-        """Relative path from base to path."""
-        path = self.resolve(path).rstrip("/")
-        base = self.resolve(base).rstrip("/")
-        if not path.startswith(base):
+        """Relative path from base to path, on whole component boundaries."""
+        path = self.resolve(path).rstrip("/") or "/"
+        base = self.resolve(base).rstrip("/") or "/"
+        if path == base:
+            return ""
+        if base == "/":
+            return path.lstrip("/")
+        prefix = base + "/"
+        if not path.startswith(prefix):
             raise ValueError(f"{path} not under {base}")
-        rel = path[len(base) :].lstrip("/")
-        return rel
+        return path[len(prefix) :]
 
 
 class LocalVFS(VFS):
@@ -248,7 +252,8 @@ class LocalVFS(VFS):
     def _from_path(self, path: Path) -> str:
         try:
             rel = path.relative_to(self._root)
-            return "/" + rel.as_posix()
+            rel_str = rel.as_posix()
+            return "/" if rel_str == "." else "/" + rel_str
         except ValueError:
             return path.as_posix()
 

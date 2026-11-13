@@ -1,5 +1,25 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## VFS root and relative-path boundary — 2026-11-13
+
+The outside-root agent-instructions slice below is committed/pushed to GitHub main
+as `dc460d8`; hosted `mcp` passes and GitHub reports zero open dependency alerts.
+Continue with local P1 `frog-local-vfs-root-relative-boundary`. LocalVFS rendered
+the selected root as `/.`, so a fresh `cwd()` and root-level `walk()` exposed an
+invalid root instead of `/`. The shared `VFS.relative_to` also used a raw
+`startswith`, so `/foo/bar` was treated as under `/foo/b` and yielded `ar`.
+
+Root rendering now returns `/`. `relative_to` compares whole path components,
+returns an empty string for equality, and raises `ValueError` for sibling-prefix
+collisions. Eight real-filesystem regressions cover initial/chdir cwd, root and
+nested walk output, root/nested descendants, exact-base equality, sibling-prefix
+rejection, and a legitimate component-prefix match; four failed before the fix.
+This retains the existing VFS path convention and does not change remote
+backends, the Rust model, deployment, or Kali state. Full fallback and locked-SDK
+suites both pass: 432 tests each, with only the three expected fallback optional
+skips. Logs/checkpoints are under
+`/home/xyzzy/.cache/frog-vfs-normalization-verification-20261113/`.
+
 ## Outside-root agent-instructions writes — 2026-11-13
 
 The LocalVFS path-routing slice below is committed/pushed to GitHub main as
