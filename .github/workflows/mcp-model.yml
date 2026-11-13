@@ -5,15 +5,27 @@ permissions:
 jobs:
   mcp:
     runs-on: ubuntu-latest
+    env:
+      FROG_NOSTOI_PYTHON: ${{ github.workspace }}/nostoi/contrib/python/nostoi.py
     steps:
       - uses: actions/checkout@v4
         with:
           path: frog
+      - name: Checkout canonical public audit reference
+        uses: actions/checkout@v4
+        with:
+          repository: tabenius/nostoi
+          ref: e6174eca25b7f2a251bdef32cf34dd5e9b467fc5
+          path: nostoi
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       # Dash is private; its CI checks this public authority at a pinned commit.
       # Public Frog/fork tests must not require access to that private checkout.
+      - name: Install CLI without optional runtime dependencies
+        working-directory: frog
+        run: python -m pip install --no-deps -e .
       - name: Test zero-dependency fallback suite
         working-directory: frog
         run: |
