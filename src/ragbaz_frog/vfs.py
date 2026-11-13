@@ -226,6 +226,12 @@ class LocalVFS(VFS):
         path = self.resolve(path)
         if path == "/":
             return self._root
+        # Relative paths resolve against the physical cwd, and callers may pass
+        # explicit host paths beneath the root. Neither should be rooted twice.
+        # Check ancestry before existence so new write/rename targets work too.
+        path_obj = Path(path)
+        if path_obj.is_absolute() and path_obj.is_relative_to(self._root):
+            return path_obj
         # Try VFS-relative path first (join with root)
         vfs_relative = path.lstrip("/")
         candidate = self._root / vfs_relative
@@ -233,15 +239,9 @@ class LocalVFS(VFS):
             return candidate
         # If VFS-relative path doesn't exist, check if it's an absolute local path
         # that exists outside the VFS root
-        path_obj = Path(path)
         if path_obj.is_absolute() and path_obj.exists():
-            try:
-                path_obj.relative_to(self._root)
-                # Under VFS root but doesn't exist - return VFS-relative anyway
-                return candidate
-            except ValueError:
-                # Outside VFS root, use absolute path directly
-                return path_obj
+            # Preserve the existing compatibility fallback for outside paths.
+            return path_obj
         # Default: VFS-relative path
         return candidate
 

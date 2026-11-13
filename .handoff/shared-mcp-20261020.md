@@ -1,5 +1,48 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## LocalVFS rooted path routing — 2026-11-13
+
+The optional-MCP security slice below is committed/pushed to GitHub main as
+`a762d39`. Continue with local P1 `frog-local-vfs-rooted-paths`. The selected
+LocalVFS resolves relative names against a physical cwd; `_to_path` then
+incorrectly prefixed its root again. Explicit host paths already beneath the
+root had the same defect, including new write and rename destinations.
+
+Recognize normalized host paths already beneath the selected root before
+applying virtual-root and existing-outside-path fallbacks. Recognition does not
+depend on file existence. Preserve the outside-path compatibility behavior; this
+is not a new sandbox or confinement boundary, and does not change remote VFS or
+the Rust model. No actual workspace data is moved or repaired automatically.
+
+Eight real-filesystem tests cover host-absolute existing/new files, relative
+reads/writes, virtual-root paths, chdir/parent navigation, rename/unlink, relative
+names resembling a host root, and existing outside reads. Six cases failed before
+the fix; all eight pass after it. Full fallback and locked SDK suites both pass:
+419 tests each, three expected optional skips in fallback and none with the SDK.
+Checkpoints/logs are in
+`/home/xyzzy/.cache/frog-local-paths-verification-20261113/`. Changes in this
+slice remain local/uncommitted; Kali remains offline and no cutover is attempted.
+
+## Hosted full-suite prerequisites — 2026-11-13
+
+GitHub now reports zero open dependency alerts after `a762d39`. Its model CI job
+passed, but the expanded MCP full-suite job exposed missing hosted-runner
+prerequisites that were already available locally: the canonical Nostoi stdlib
+reference and an installed `frog` CLI. Do not bypass audit admission, mock its
+implementation or require private Dash credentials to make this pass.
+
+Commit `f246322`, pushed to main, checks out public `tabenius/nostoi` at
+`e6174eca25b7f2a251bdef32cf34dd5e9b467fc5` and explicitly sets
+`FROG_NOSTOI_PYTHON`. That commit contains the unchanged reference file used by
+the successful local suites. CI installs Frog with `--no-deps` before testing the
+fallback environment, then uses the locked extra for the SDK suite. The next
+hosted run narrowed failures to two pre-existing tests hardcoding `/tmp/opencode`.
+Commit `c663798`, also pushed, uses standard portable temporary directories in
+those tests; all 13 model-backend/service-upgrade regressions pass locally.
+The hosted `model` and `mcp` jobs both passed on `c663798`, exercising the full
+fallback and locked-SDK suites on a clean runner. That closes the CI prerequisite
+gate; it is not independent review or a fleet cutover.
+
 ## Optional MCP dependency security — 2026-11-13
 
 The VFS routing follow-up below is committed/pushed to GitHub main as `9c66bc8`.
