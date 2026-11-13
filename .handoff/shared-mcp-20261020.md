@@ -1,5 +1,33 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Local VFS compatibility routing — 2026-11-13
+
+Continue on clean starting main `b19e086`, with local Frog follow-up
+`frog-local-vfs-context-routing` (P1). Kali remains offline; this is not a fleet
+claim, migration apply/cutover or backend configuration change.
+
+`vfs_store.workspace_vfs_context` previously selected a VFS in a separate private
+thread-local, while its filesystem helpers and `store.current_vfs` read the
+canonical context in `vfs.py`. Remove both duplicate context definitions and
+re-export the canonical context manager for compatibility. The separate
+`vfs_context` module could not import because `contextlib.ContextVar` does not
+exist; preserve its public `workspace_vfs`, `current_vfs`, `set_vfs` and database
+path helper using the same canonical thread-local owner. This does not introduce
+async-task isolation or change VFS path/remote-storage policy.
+
+Five initial regressions failed before the fix (wrong context and module import).
+Seven final tests cover real local read/write routing without touching the
+default workspace, URI precedence, unsupported-backend refusal, mixed nested
+contexts, exception restoration, no leftover explicit selection and overlapping
+threads. The full Python fallback suite ran 407 tests with zero failures and one
+skip: the optional official MCP SDK HTTP client test requires the uninstalled
+SDK. Tests used an explicit empty config and disposable filesystem fixtures.
+No Rust/model/WASM contract changed, so their checks were not repeated.
+
+Work is local/uncommitted. The full test log is outside Git at
+`/home/xyzzy/.cache/frog-vfs-routing-tests.log`. Server restarts interrupted tool
+reporting, not the completed test run. No commit, push or deployment in this slice.
+
 ## Publication checkpoint — 2026-11-07
 
 User requested committing and pushing the accumulated migration work to GitHub
