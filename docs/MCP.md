@@ -20,6 +20,25 @@ generate the config/hook/MCP wiring for a repo.
 This is frog's intended integration surface: infrastructure an agent
 stands on, invisibly — not another tool it has to drive.
 
+## Optional SDK and dependency verification
+
+The core install remains dependency-free and supports the fallback transport.
+For the official Python SDK, use the `mcp` extra. It enforces security floors of
+certifi 2026.10.18 and PyJWT 2.15.0; the lock records the exact tested versions.
+From the checkout, install and audit that environment with:
+
+```bash
+uv sync --locked --extra mcp --no-dev
+uv audit --locked
+uv run --locked --extra mcp frog mcp tools
+```
+
+CI separately tests the zero-dependency environment and the locked SDK
+environment, including regression checks for JWT options reuse and malformed
+signature encodings. The audit checks known dependency advisories; it is not
+proof that every dependency is vulnerability-free or that a reported upstream
+issue was reachable through Frog's own authorization paths.
+
 ## Foreground HTTP
 
 ```bash

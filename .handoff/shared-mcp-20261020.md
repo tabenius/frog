@@ -1,5 +1,37 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Optional MCP dependency security — 2026-11-13
+
+The VFS routing follow-up below is committed/pushed to GitHub main as `9c66bc8`.
+The push reported 16 open `uv.lock` dependency advisories (two critical) covering
+certifi and PyJWT. Local Frog tracks the next P0 as
+`frog-local-mcp-dependency-security`; Kali remains offline.
+
+Targeted lock updates change only certifi 2026.5.20 -> 2026.10.23 and PyJWT
+2.13.0 -> 2.15.1. MCP stays at locked 1.30.0; core dependencies remain empty.
+The optional MCP extra enforces certifi >=2026.10.18 and PyJWT >=2.15.0 so ordinary
+extra installations cannot retain vulnerable older versions. CI now audits the
+lock with pinned uv 0.12.23 and tests the full suite in both fallback and locked
+SDK environments, instead of installing the SDK independently of the lock.
+
+`uv lock --check`, `git diff --check` and `uv audit --locked` pass; the audit
+reports no known vulnerabilities/adverse project statuses across 31 packages.
+The new security-floor test failed before the change. Four added regressions
+cover core optionality, declared/locked security floors, JWT options-dict reuse
+and noncanonical signatures. The two runtime JWT regressions intentionally skip
+in the dependency-free environment and must pass in the SDK environment.
+
+Full fallback and official-SDK suites both pass: 411 tests each, three expected
+optional-dependency skips in fallback mode and no skips in the SDK environment.
+That includes the real official MCP HTTP client and both JWT runtime regressions.
+Durable checkpoints/logs are under
+`/home/xyzzy/.cache/frog-security-verification-20261113/`. The runner is
+`/home/xyzzy/.cache/frog-security-verify.py`; it skips successful completed steps
+and writes output directly to disk across server restarts. The user requested
+commit/push after verification. An audit is not proof of application exploitability
+or a guarantee against unknown vulnerabilities; GitHub alert closure has not been
+claimed. No Rust/model contract or deployment changed.
+
 ## Local VFS compatibility routing — 2026-11-13
 
 Continue on clean starting main `b19e086`, with local Frog follow-up

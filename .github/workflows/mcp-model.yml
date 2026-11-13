@@ -14,15 +14,20 @@ jobs:
           python-version: '3.12'
       # Dash is private; its CI checks this public authority at a pinned commit.
       # Public Frog/fork tests must not require access to that private checkout.
-      - name: Test fallback transport
+      - name: Test zero-dependency fallback suite
         working-directory: frog
         run: |
           python -c 'import json, os; from pathlib import Path; Path(os.environ["RUNNER_TEMP"], "frog-config.json").write_text(json.dumps({}))'
-          FROG_CONFIG="$RUNNER_TEMP/frog-config.json" python -m unittest discover -s tests -p 'test_mcp*.py'
-      - run: python -m pip install mcp==1.30.0
-      - name: Test official SDK transport
+          FROG_CONFIG="$RUNNER_TEMP/frog-config.json" python -m unittest discover -s tests
+      - run: python -m pip install uv==0.12.23
+      - name: Audit locked optional dependencies
         working-directory: frog
-        run: FROG_CONFIG="$RUNNER_TEMP/frog-config.json" python -m unittest discover -s tests -p 'test_mcp*.py'
+        run: uv audit --locked
+      - name: Test locked official SDK suite
+        working-directory: frog
+        run: |
+          uv sync --locked --extra mcp --no-dev
+          FROG_CONFIG="$RUNNER_TEMP/frog-config.json" uv run --locked --extra mcp python -m unittest discover -s tests
   model:
     runs-on: ubuntu-latest
     steps:
