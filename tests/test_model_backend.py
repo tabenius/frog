@@ -142,7 +142,7 @@ class ModelBackendTests(unittest.TestCase):
         from ragbaz_frog import main_cli
         backend = self.backend()
         backend.dispatch = Mock(side_effect=model_client.ModelError('unreachable','model unavailable'))
-        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory, patch.dict(os.environ,{},clear=True), patch.object(Path,'home',return_value=Path(directory)), patch.object(model_backend,'Backend',return_value=backend), patch.object(main_cli.store,'connect',side_effect=AssertionError('legacy fallback')):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,{},clear=True), patch.object(Path,'home',return_value=Path(directory)), patch.object(model_backend,'Backend',return_value=backend), patch.object(main_cli.store,'connect',side_effect=AssertionError('legacy fallback')):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 code = main_cli.main(['--config',str(Path(directory)/'config.json'),'task','info','one','--json'])
