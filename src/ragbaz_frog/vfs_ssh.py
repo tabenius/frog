@@ -330,13 +330,18 @@ class SSHVFS(VFS):
 
         sftp = self._ensure_connected()
         remote = self._to_remote(path)
-        if "b" in mode:
-            f = sftp.open(remote, mode)
-            yield f
-        else:
-            f = sftp.open(remote, mode.replace("t", "").replace("b", ""))
-            wrapper = io.TextIOWrapper(f, encoding=encoding or "utf-8")
-            yield wrapper
+        handle = sftp.open(remote, mode.replace("t", ""))
+        try:
+            if "b" in mode:
+                yield handle
+            else:
+                wrapper = io.TextIOWrapper(handle, encoding=encoding or "utf-8")
+                try:
+                    yield wrapper
+                finally:
+                    wrapper.close()
+        finally:
+            handle.close()
 
     def resolve(self, path: str) -> str:
         if not path.startswith("/"):

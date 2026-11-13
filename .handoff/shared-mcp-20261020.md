@@ -1,5 +1,28 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## SSH VFS stream lifecycle — 2026-11-13
+
+The VFS root/relative-path slice below is committed/pushed to GitHub main as
+`0a690ab`; hosted `model` and `mcp` jobs pass on that commit. Continue with local
+P1 `frog-local-ssh-vfs-open-lifecycle`. `SSHVFS.open` yielded an SFTP handle or a
+`TextIOWrapper` without ever closing either, so buffered text writes could be
+lost at context exit and repeated reads leaked remote handles until the
+connection closed.
+
+Both binary and text streams now close on normal and exceptional exits, with the
+text wrapper flushed before its underlying handle closes. Five fake-SFTP
+regressions cover text read, text write persistence after close, binary read,
+binary write persistence, and exception propagation with a closed stream; all
+five failed before the fix. No live SSH connection, credentials, remote backend
+contract change, Rust/model change, deployment, or Kali access. Full fallback and
+locked-SDK suites both pass: 437 tests each, with only the three expected
+fallback optional skips. Logs/checkpoints are under
+`/home/xyzzy/.cache/frog-ssh-open-verification-20261113/`.
+
+A related but separate follow-up was observed and not changed here: `S3VFS.open`
+read mode yields the raw S3 `Body` stream without closing it, which can leak
+HTTP connections. It needs its own bounded task and tests.
+
 ## VFS root and relative-path boundary — 2026-11-13
 
 The outside-root agent-instructions slice below is committed/pushed to GitHub main
