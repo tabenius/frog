@@ -1,5 +1,45 @@
 # Frog shared MCP / HTTP / migration handoff — 2026-10-20
 
+## Lock acquisition self-reap race — 2026-11-13
+
+Continue with local P1 `frog-local-lock-acquisition-lazy-reap`, fixed in this
+slice. `lock_acquire` returned via `lock_info`, which lazily marks stale locks. On
+a loaded host, a short-lease lock could exceed its lease between INSERT and that
+read, so acquisition returned an already-stale lock and a later `lock_reap`
+reported nothing newly reaped. This matched the recurring full-suite
+`test_reap_reports_expired_lease` failure seen twice under load. A stray duplicate
+`lock_info` definition also shadowed an unfinished fragment.
+
+`lock_info` now takes an explicit `reap` flag (default true), and acquisition
+returns with `reap=False`; ordinary reads and explicit `lock_reap` still reap
+lazily. The duplicate definition is removed. A fake-clock regression advances ten
+seconds per clock read, proving acquisition returns an active 1-second lease and
+that explicit reaping still marks it stale; it failed before the fix. No schema,
+remote contract, Rust/model change, deployment, or Kali access.
+
+The S3 slice below is still local/uncommitted in this commit; both changes were
+verified together. Full fallback and locked-SDK suites both pass: 443 tests each,
+with only the three expected fallback optional skips. Logs/checkpoints are under
+`/home/xyzzy/.cache/frog-s3-lock-verification-20261113/`.
+
+## S3 VFS read-body lifecycle — 2026-11-13
+
+The SSH slice below is committed/pushed to GitHub main as `091d743`; hosted
+`model` and `mcp` jobs pass on that commit. Continue with local P1
+`frog-local-s3-vfs-read-body-lifecycle`. `S3VFS.open` read mode yielded the raw
+S3 response `Body` or a `TextIOWrapper` around it without closing either, so
+repeated reads could leak HTTP connections after the caller left the with-block.
+
+Read bodies now close on normal and exceptional exits, with the text wrapper
+flushed/closed before the underlying body. The write path is unchanged, including
+`write_through` text behavior and upload after the block. Five fake-S3
+regressions cover text and binary reads, exception propagation with a closed
+body, and binary/text write uploads; the three read cases failed before the fix.
+No live AWS calls, credentials, remote contract change, Rust/model change,
+deployment, or Kali access. Full fallback and locked-SDK suites are running with
+logs under `/home/xyzzy/.cache/frog-s3-open-verification-20261113/`. Changes in
+this slice are local/uncommitted.
+
 ## SSH VFS stream lifecycle — 2026-11-13
 
 The VFS root/relative-path slice below is committed/pushed to GitHub main as

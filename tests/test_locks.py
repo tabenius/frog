@@ -2,7 +2,9 @@ import subprocess
 import tempfile
 import unittest
 import socket
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from _util import fresh_db
 from ragbaz_frog import store
@@ -178,6 +180,41 @@ class LockReap(unittest.TestCase):
             self.assertEqual(res["reaped"], [])
             row = conn.execute("SELECT status FROM locks").fetchone()
             self.assertEqual(row["status"], "active")
+        finally:
+            conn.close()
+
+
+class LockAcquisitionLease(unittest.TestCase):
+    def test_acquisition_does_not_reap_its_own_elapsed_lease(self):
+        db = fresh_db()
+        conn = store.connect(db)
+        try:
+            class AdvancingClock:
+                def __init__(self):
+                    self.now = datetime(2020, 1, 1, tzinfo=UTC)
+
+                def __call__(self):
+                    self.now += timedelta(seconds=10)
+                    return self.now
+
+            # Every clock read advances 10s, so the 1s lease has elapsed by
+            # the time acquisition would otherwise lazily reap its own lock.
+            with mock.patch.object(store, "utc_now", AdvancingClock()):
+                acquired = store.lock_acquire(
+                    conn, scope_key="short", repo_ref=None, lock_kind="x",
+                    files=[], agent="a", pid=None, reason=None,
+                    lease_seconds=1, eta_minutes=None, force=False,
+                )
+            self.assertTrue(acquired["ok"], acquired)
+            self.assertEqual(acquired["lock"]["status"], "active")
+            row = conn.execute("SELECT status FROM locks").fetchone()
+            self.assertEqual(row["status"], "active")
+
+            # Explicit reaping still works once the lease has really elapsed.
+            res = store.lock_reap(conn)
+            self.assertEqual(len(res["reaped"]), 1)
+            row = conn.execute("SELECT status FROM locks").fetchone()
+            self.assertEqual(row["status"], "stale")
         finally:
             conn.close()
 

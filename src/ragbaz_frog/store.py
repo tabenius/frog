@@ -5161,7 +5161,9 @@ def lock_acquire(
     except sqlite3.Error:
         conn.rollback()
         raise
-    return lock_info(conn, lock_id)
+    # The just-acquired lock must not be reaped by its own return path: a
+    # short lease can elapse while a loaded host finishes the transaction.
+    return lock_info(conn, lock_id, reap=False)
 
 
 def lock_renew(conn, lock_id: int, eta_minutes: int | None) -> dict:
@@ -5622,12 +5624,9 @@ def lock_audit(conn, *, repo_ref: str | None, agent: str) -> dict:
     }
 
 
-def lock_info(conn, lock_id: int) -> dict:
-    _mark_stale_locks(conn)
-
-
-def lock_info(conn, lock_id: int) -> dict:
-    _mark_stale_locks(conn)
+def lock_info(conn, lock_id: int, *, reap: bool = True) -> dict:
+    if reap:
+        _mark_stale_locks(conn)
     row = conn.execute("SELECT * FROM locks WHERE id = ?", (lock_id,)).fetchone()
     if not row:
         return {"ok": False, "error": f"lock not found: {lock_id}"}
