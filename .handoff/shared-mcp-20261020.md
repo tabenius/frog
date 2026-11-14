@@ -20,7 +20,8 @@ remote contract, Rust/model change, deployment, or Kali access.
 The S3 slice below is still local/uncommitted in this commit; both changes were
 verified together. Full fallback and locked-SDK suites both pass: 443 tests each,
 with only the three expected fallback optional skips. Logs/checkpoints are under
-`/home/xyzzy/.cache/frog-s3-lock-verification-20261113/`.
+`/home/xyzzy/.cache/frog-s3-lock-verification-20261113/`. Hosted `model` and `mcp`
+jobs pass on both `2507b2a` and `6345a2a`.
 
 ## S3 VFS read-body lifecycle — 2026-11-13
 
