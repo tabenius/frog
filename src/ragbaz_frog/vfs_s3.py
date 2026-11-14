@@ -266,11 +266,17 @@ class S3VFS(VFS):
         if "r" in mode:
             resp = self._s3.get_object(Bucket=self._bucket, Key=key)
             body = resp["Body"]
-            if "b" in mode:
-                yield body
-            else:
-                wrapper = io.TextIOWrapper(body, encoding=encoding or "utf-8")
-                yield wrapper
+            try:
+                if "b" in mode:
+                    yield body
+                else:
+                    wrapper = io.TextIOWrapper(body, encoding=encoding or "utf-8")
+                    try:
+                        yield wrapper
+                    finally:
+                        wrapper.close()
+            finally:
+                body.close()
         else:
             buffer = io.BytesIO()
             if "b" in mode:

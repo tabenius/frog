@@ -36,9 +36,11 @@ flushed/closed before the underlying body. The write path is unchanged, includin
 regressions cover text and binary reads, exception propagation with a closed
 body, and binary/text write uploads; the three read cases failed before the fix.
 No live AWS calls, credentials, remote contract change, Rust/model change,
-deployment, or Kali access. Full fallback and locked-SDK suites are running with
-logs under `/home/xyzzy/.cache/frog-s3-open-verification-20261113/`. Changes in
-this slice are local/uncommitted.
+deployment, or Kali access. The lock self-reap slice above is committed/pushed as
+`2507b2a`. Full fallback and locked-SDK suites, run across both slices, both pass:
+443 tests each, with only the three expected fallback optional skips.
+Logs/checkpoints are under
+`/home/xyzzy/.cache/frog-s3-lock-verification-20261113/`.
 
 ## SSH VFS stream lifecycle — 2026-11-13
 
