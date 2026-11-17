@@ -2046,6 +2046,9 @@ def build_parser() -> argparse.ArgumentParser:
     rd_add.add_argument("dependent")
     rd_add.add_argument("dependency")
     rd_add.add_argument("--note")
+    rd_add.add_argument("--kind", choices=("install", "runtime", "build", "debug"),
+                        default="runtime",
+                        help="Dependency phase (default: runtime)")
     rd_list = repo_dep_sub.add_parser("list", help="List dependency edges")
     rd_list.add_argument("repo_ref", nargs="?", help="Filter to one repo")
 
@@ -2860,7 +2863,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _emit(store.repo_key_backfill(conn), args.json)
             if args.repo_command == "dep":
                 if args.repo_dep_command == "add":
-                    return _emit(store.repo_dep_add(conn, args.dependent, args.dependency, args.note), args.json)
+                    return _emit(store.repo_dep_add(conn, args.dependent, args.dependency,
+                                                    args.note, kind=args.kind), args.json)
                 if args.repo_dep_command == "list":
                     return _emit(store.repo_dep_list(conn, args.repo_ref), args.json)
             if args.repo_command == "affected":

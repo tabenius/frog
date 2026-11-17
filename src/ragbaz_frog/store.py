@@ -7090,9 +7090,21 @@ def _targets_for_files(conn, repo_path: str, files: list[str]) -> list[dict]:
     return affected
 
 
+REPO_DEP_KINDS = ("install", "runtime", "build", "debug")
+
+
 def repo_dep_add(
-    conn, dependent_ref: str, dependency_ref: str, note: str | None = None
+    conn,
+    dependent_ref: str,
+    dependency_ref: str,
+    note: str | None = None,
+    kind: str = "runtime",
 ) -> dict:
+    if kind not in REPO_DEP_KINDS:
+        return {
+            "ok": False,
+            "error": f"unknown dependency kind: {kind}; expected one of {', '.join(REPO_DEP_KINDS)}",
+        }
     dep = _repo_required(conn, dependent_ref)
     on = _repo_required(conn, dependency_ref)
     if not dep:
@@ -7103,22 +7115,23 @@ def repo_dep_add(
         return {"ok": False, "error": "a repo cannot depend on itself"}
     conn.execute(
         """INSERT OR REPLACE INTO repo_deps(dependent_repo_path,
-           dependency_repo_path, note, created_at) VALUES(?,?,?,?)""",
-        (dep["repo_path"], on["repo_path"], note, utc_now_iso()),
+           dependency_repo_path, note, kind, created_at) VALUES(?,?,?,?,?)""",
+        (dep["repo_path"], on["repo_path"], note, kind, utc_now_iso()),
     )
     record_event(
         conn,
         kind="repo.dep.added",
-        summary=f"{dep['name']} depends on {on['name']}",
+        summary=f"{dep['name']} depends on {on['name']} ({kind})",
         repo_path=dep["repo_path"],
-        payload={"dependency": on["repo_path"], "note": note},
+        payload={"dependency": on["repo_path"], "note": note, "kind": kind},
     )
     conn.commit()
     return {
         "ok": True,
-        "message": f"{dep['name']} -> {on['name']}",
+        "message": f"{dep['name']} -> {on['name']} ({kind})",
         "dependent": dep["repo_path"],
         "dependency": on["repo_path"],
+        "kind": kind,
     }
 
 
