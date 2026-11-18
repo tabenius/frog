@@ -1771,6 +1771,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dest", metavar="DIR",
         help="Backup directory (default: /data/backups)",
     )
+    snap_p.add_argument("--verify", metavar="FILE", help="Validate a detached snapshot read-only, without opening the live workspace")
     doctor = sub.add_parser("doctor", help="Self-diagnostic over locks/tasks/events/DB")
     doctor.add_argument(
         "--no-fix",
@@ -2405,6 +2406,10 @@ def main(argv: list[str] | None = None) -> int:
     _PAGER_ENABLED = "--no-pager" not in argv
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "snapshot" and args.verify:
+        if args.dest:
+            parser.error("snapshot --verify and --dest are mutually exclusive")
+        return _emit(store.validate_snapshot(args.verify), args.json)
     if args.command == 'serve':
         if args.json and args.clf:
             parser.error('--json and --clf are mutually exclusive')

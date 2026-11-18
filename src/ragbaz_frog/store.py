@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -1315,6 +1316,44 @@ def auto_snapshot(conn, *, label: str) -> dict:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def validate_snapshot(path: str) -> dict:
+    """Owner-owned read-only export contract for rbq and other consumers.
+
+    Never opens the live workspace connection or applies migrations. Only
+    detached snapshots should be passed here; nonempty adjacent WAL is refused.
+    """
+    result = {"schema": "frog.snapshot.validation.v1", "ok": False}
+    try:
+        source = Path(path).absolute()
+        if source.is_symlink() or not source.is_file():
+            return dict(result, error="snapshot must be a regular non-symlink file")
+        wal = Path(str(source) + "-wal")
+        if wal.exists() and wal.stat().st_size:
+            return dict(result, error="nonempty WAL: export a detached consistent snapshot first")
+        with source.open("rb") as stream:
+            if stream.read(16) != b"SQLite format 3\x00":
+                return dict(result, error="not an SQLite database")
+        with contextlib.closing(sqlite3.connect(source.as_uri() + "?mode=ro&immutable=1", uri=True)) as copy:
+            copy.row_factory = sqlite3.Row
+            copy.execute("PRAGMA trusted_schema=OFF")
+            problems = [row[0] for row in copy.execute("PRAGMA integrity_check(20)") if row[0] != "ok"]
+            required = ("schema_migrations", "repos", "agents", "locks", "tasks", "event_log")
+            missing = [table for table in required if not table_exists(copy, table)]
+            result.update(integrity=problems or "ok", missing_tables=missing)
+            if problems or missing:
+                return result
+            drift = schema_drift(copy)
+            status = "unavailable" if drift["ahead"] else "required" if drift["behind"] else "current"
+            result.update(migration={"status": status}, behind=drift["behind"], ahead=drift["ahead"],
+                          migrations=sorted(row[0] for row in copy.execute("SELECT name FROM schema_migrations")),
+                          counts={table: copy.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                                  for table in required if table != "schema_migrations"})
+            result["ok"] = status == "current"
+        return result
+    except (OSError, sqlite3.Error):
+        return dict(result, error="snapshot unreadable or invalid")
 
 
 def snapshot_workspace(conn, *, dest: str | None = None) -> dict:

@@ -82,6 +82,44 @@ class Snapshot(unittest.TestCase):
         ]
         self.assertIn("workspace.snapshot", kinds)
 
+    def test_owner_validation_is_read_only_and_versioned(self):
+        result = store.snapshot_workspace(self.conn, dest=self.dest)
+        path = Path(result["last"])
+        before = path.read_bytes()
+        report = store.validate_snapshot(str(path))
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["schema"], "frog.snapshot.validation.v1")
+        self.assertEqual(report["migration"]["status"], "current")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse(Path(str(path) + "-wal").exists())
+
+    def test_validation_refuses_missing_files_and_schema_drift(self):
+        missing = Path(self.dest) / "absent.db"
+        self.assertFalse(store.validate_snapshot(str(missing))["ok"])
+        self.assertFalse(missing.exists())
+        result = store.snapshot_workspace(self.conn, dest=self.dest)
+        from contextlib import closing
+        with closing(sqlite3.connect(result["last"])) as copy:
+            copy.execute("DELETE FROM schema_migrations WHERE name = '016_repo_dep_kind.sql'")
+            copy.commit()
+        report = store.validate_snapshot(result["last"])
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["migration"]["status"], "required")
+
+    def test_cli_verify_does_not_open_live_workspace(self):
+        import contextlib
+        import io
+        import json
+        from ragbaz_frog import main_cli
+        result = store.snapshot_workspace(self.conn, dest=self.dest)
+        missing_live = str(Path(self.dest) / "never-created.db")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = main_cli.main(["--db", missing_live, "--json", "snapshot", "--verify", result["last"]])
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(stdout.getvalue())["ok"])
+        self.assertFalse(Path(missing_live).exists())
+
     def test_absolute_destination_is_not_prefixed_with_workspace(self):
         previous = current_vfs()
         self.addCleanup(set_vfs, previous)
