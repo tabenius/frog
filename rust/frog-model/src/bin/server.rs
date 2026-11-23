@@ -10,7 +10,21 @@ use std::{
     time::Duration,
 };
 
-type State = Arc<(Mutex<Connection>, String, String, Option<String>)>;
+type State = Arc<(Mutex<Connection>, String, String, Option<String>, bool)>;
+
+fn operation_request(workspace: &str, value: Value, allow_takeover: bool) -> Result<frog_model::Request, String> {
+    if value["command"]["kind"] == "record_verification" {
+        return Err("verification receipts may only be written by the server runner".into());
+    }
+    if value["command"]["kind"] == "take_over_task" && !allow_takeover {
+        return Err("administrative takeover is disabled on this host".into());
+    }
+    // The existing standalone token is a shared local operator credential, not
+    // multi-principal identity. Never accept an actor supplied by the caller.
+    serde_json::from_value(json!({"workspace_id":workspace,"actor":"local-client",
+        "operation_id":value["operation_id"],"command":value["command"]}))
+        .map_err(|e| e.to_string())
+}
 
 fn verify_build(state: &State, workspace: &str, body: &Value) -> Result<Value, String> {
     let config_path = std::env::var("FROG_MODEL_BUILD_CONFIG")
@@ -248,16 +262,7 @@ async fn handle(req: Request<Incoming>, state: State) -> Result<Response<Full<By
     {
         serde_json::from_slice::<Value>(&body)
             .map_err(|e| e.to_string())
-            .and_then(|v| {
-                if v["command"]["kind"] == "record_verification" {
-                    return Err(
-                        "verification receipts may only be written by the server runner".into(),
-                    );
-                }
-                serde_json::from_value(json!({"workspace_id":workspace,"actor":"local-client",
-                "operation_id":v["operation_id"],"command":v["command"]}))
-                .map_err(|e| e.to_string())
-            })
+            .and_then(|v| operation_request(&workspace, v, state.4 && state.3.is_none()))
     } else if method == hyper::Method::GET {
         let limit = query.get("limit").map(|v| v.parse::<u32>()).transpose();
         let limit = match limit {
@@ -275,6 +280,7 @@ async fn handle(req: Request<Incoming>, state: State) -> Result<Response<Full<By
             "events" => Some(json!({"kind":"events","after":query.get("after").map(String::as_str).unwrap_or("0"),"limit":limit})),
             "tasks" => query.get("task").map(|task| json!({"kind":"describe_task","task_id":task})),
             "task-details" => query.get("task").map(|task|json!({"kind":"task_details","task_id":task})),
+            "task-takeovers" => query.get("task").map(|task|json!({"kind":"task_takeovers","task_id":task,"limit":limit,"after":query.get("after")})),
             "provider-outbox" => query.get("source").map(|source|json!({"kind":"provider_outbox","source":source,"limit":limit,"after":query.get("after")})),
             "verifications" => query.get("task").map(|task|json!({"kind":"verifications","task_id":task})),
             "locks" => Some(json!({"kind":"locks","limit":limit,"after":query.get("after")})),
@@ -367,7 +373,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         conn.prepare(&format!("SELECT version FROM {prefix}schema"))?;
         None
     };
-    let state = Arc::new((Mutex::new(conn), prefix, format!("Bearer {token}"), legacy));
+    let allow_takeover = std::env::var("FROG_MODEL_ALLOW_TAKEOVER").as_deref() == Ok("1");
+    let state = Arc::new((Mutex::new(conn), prefix, format!("Bearer {token}"), legacy, allow_takeover));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:9091").await?;
     eprintln!("Frog model HTTP listening on 127.0.0.1:9091");
     loop {
@@ -435,7 +442,20 @@ mod tests {
             "frog_model_".into(),
             "unused".into(),
             None,
+            false,
         ))
+    }
+
+    #[test]
+    fn takeover_requires_host_opt_in_and_never_accepts_actor_override() {
+        let value = json!({"actor":"another-agent","operation_id":"takeover",
+            "command":{"kind":"take_over_task","task_id":"one","expected_revision":1,
+                "expected_assignee":"old-agent","lease_id":"lease","reason":"Approved recovery"}});
+        assert!(operation_request("alpha", value.clone(), false).is_err());
+        let request = operation_request("alpha", value, true).unwrap();
+        assert_eq!(request.actor, "local-client");
+        assert!(operation_request("alpha", json!({"operation_id":"forge",
+            "command":{"kind":"record_verification"}}), true).is_err());
     }
 
     #[test]

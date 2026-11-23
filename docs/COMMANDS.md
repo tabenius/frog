@@ -35,7 +35,7 @@ Scaffold a new repo/draft path
 
 ## `frog agent-instructions`
 
-Write a local AGENTS.md that tells agents to read /data/src/AGENTS.md
+Write a local AGENTS.md that tells agents to read the workspace AGENTS.md
 
 - `path` — Repo directory or AGENTS.md path; defaults to cwd
 - `--force` — Overwrite an existing AGENTS.md
@@ -374,6 +374,42 @@ Show mirrored events
 - `workspace`
 - `--limit`
 
+## `frog gateway`
+
+Manage the inter-box gateway daemon (proxy + file watcher)
+
+
+### `frog gateway start`
+
+Start the gateway daemon
+
+- `--bind` — Proxy bind address
+- `--port` — Proxy bind port
+- `--target` — Proxy target host
+- `--target-port` — Proxy target port
+- `--proxy-only` — Run only the proxy (no file watcher)
+- `--watch-only` — Run only the file watcher (no proxy)
+- `--no-watch` — Disable file watcher
+
+### `frog gateway stop`
+
+Stop the gateway daemon
+
+
+### `frog gateway status`
+
+Show gateway daemon status
+
+- `-v, --verbose` — Show full config
+
+### `frog gateway config`
+
+View or set gateway configuration
+
+- `key` — Config key to set
+- `value` — Config value (JSON for objects/arrays)
+- `--show` — Show full config
+
 ## `frog agent`
 
 Acting-agent identity
@@ -498,6 +534,8 @@ Repo-scoped task commands
 List tasks for one repo
 
 - `--repo`
+- `--workflow-status`
+- `--all` — Include done/archived task history
 
 ### `frog repo key`
 
@@ -703,6 +741,13 @@ List units in one repo or across all repos
 Create and manage task slices in AGENTS.db
 
 
+### `frog task verify`
+
+Run an allowlisted server build target for this task revision
+
+- `slug`
+- `--target`
+
 ### `frog task create`
 
 Create a task slice
@@ -722,13 +767,28 @@ Create a task slice
 - `--parent-task-slug`
 - `--file` — File this task intends to touch; repeatable
 
+### `frog task edit`
+
+Edit task title, priority, repo, and notes
+
+- `slug`
+- `--repo`
+- `--title`
+- `--why`
+- `--what`
+- `--roi-note`
+- `--priority`
+- `--actor` — Acting agent recorded in the task.edited event
+
 ### `frog task list`
 
 List tasks
 
 - `--repo`
-- `--workflow-status`
+- `--workflow-status, --status` — Filter by workflow status. Repeatable or comma-separated (e.g. --status todo,in_progress).
+- `--not-done` — Preset: show all non-terminal statuses (idea, todo, in_progress, blocked).
 - `--assigned-agent`
+- `--all` — Include done/archived task history
 
 ### `frog task next`
 
@@ -756,6 +816,22 @@ Verify (affected build/test) -> done + release + report unblocks
 - `slug`
 - `--agent`
 - `--no-verify`
+- `--lease-id` — Exact model lease returned by claim/acquire
+
+### `frog task takeover`
+
+Explicit audited recovery of an inactive model assignment
+
+- `slug`
+- `--lease-id`
+- `--reason`
+- `--agent`
+
+### `frog task takeovers`
+
+Read model task takeover audit history
+
+- `slug`
 
 ### `frog task info`
 
@@ -835,14 +911,18 @@ Acquire a coordination lock
 
 Renew a lock lease or ETA
 
-- `lock_id`
+- `lock_id` — Legacy numeric lock ID or model lease ID
+- `--lease-seconds` — Model lease renewal TTL
 - `--eta-minutes`
 
 ### `frog lock release`
 
 Release a coordination lock
 
-- `lock_id`
+- `lock_id` — Legacy numeric lock ID or model lease ID
+- `--agent` — Acting agent recording the release
+- `--reason` — Audit note explaining why the lock is released
+- `--force` — Release even if the lock is already stale or released
 
 ### `frog lock list`
 
@@ -862,6 +942,15 @@ Mark lease-expired active locks as stale and report them
 Flag working-tree changes not covered by your active lock
 
 - `--repo` — Repo to audit (defaults to the cwd repo)
+- `--agent` — Acting agent name (defaults to $USER)
+- `--warn` — Advisory mode: report findings but exit 0 (suitable for PreToolUse hooks that should not block tool execution)
+
+### `frog lock check-file`
+
+Is a given file path covered by an active lock held by the current agent? Hook-friendly: exit 0 if covered, exit 1 with holder identity if held by another agent, exit 2 if uncovered
+
+- `file_path`
+- `--repo` — Repo containing the file (defaults to the cwd repo)
 - `--agent` — Acting agent name (defaults to $USER)
 
 ### `frog lock info`

@@ -22,10 +22,11 @@ from ragbaz_frog import mcp_server, store  # noqa: E402
 EXPECTED_TOOLS = [
     "frog_status", "frog_repo_list", "frog_repo_info", "frog_repo_discover",
     "frog_repo_targets", "frog_unit_discover", "frog_unit_list", "frog_task_list",
-    "frog_task_claim", "frog_task_finish", "frog_task_create", "frog_task_edit",
-    "frog_task_dependency", "frog_task_next", "frog_lock_list", "frog_lock_acquire",
-    "frog_lock_release", "frog_lock_audit", "frog_log_tail", "frog_repo_affected",
-    "frog_workspace_list", "__health",
+    "frog_task_claim", "frog_task_finish", "frog_task_takeover", "frog_task_takeovers",
+    "frog_task_create", "frog_task_edit", "frog_task_dependency", "frog_task_next",
+    "frog_lock_list", "frog_lock_acquire", "frog_lock_release", "frog_lock_audit",
+    "frog_lock_renew", "frog_log_tail", "frog_repo_affected", "frog_task_verify",
+    "frog_provider_import", "frog_provider_outbox", "frog_workspace_list", "__health",
 ]
 
 
@@ -103,7 +104,7 @@ class TestGatewaySmoke(unittest.TestCase):
         init = _by_id(lines, 1)
         self.assertEqual(init["result"]["serverInfo"]["name"], "ragbaz-frog")
         tool_names = [t["name"] for t in _by_id(lines, 2)["result"]["tools"]]
-        self.assertEqual(len(tool_names), 22)
+        self.assertEqual(len(tool_names), 28)
         for name in EXPECTED_TOOLS:
             self.assertIn(name, tool_names, f"Missing tool: {name}")
 

@@ -6,7 +6,11 @@ use sha2::{Digest, Sha256};
 
 pub const CONTRACT: &str = "frog.model.v1";
 pub const MIGRATION: &str = include_str!("../sql/0001_model.sql");
-pub const SERVICE_MIGRATION: &str = include_str!("../sql/0002_services.sql");
+pub const SERVICE_MIGRATION: &str = concat!(
+    include_str!("../sql/0002_services.sql"),
+    "\n",
+    include_str!("../sql/0003_takeovers.sql")
+);
 /// Priorities the model accepts; Frog's legacy vocabulary is a host concern.
 const PRIORITIES: [u8; 4] = [0, 1, 2, 3];
 /// Report the next workflow state; never a leap, never out of reported order.
@@ -61,6 +65,19 @@ pub enum Command {
     ClaimTask {
         task_id: String,
         expected_revision: u32,
+    },
+    /// Administrative recovery, authorized by the host, never implicit claim.
+    TakeOverTask {
+        task_id: String,
+        expected_revision: u32,
+        expected_assignee: Option<String>,
+        lease_id: String,
+        reason: String,
+    },
+    TaskTakeovers {
+        task_id: String,
+        limit: u32,
+        after: Option<String>,
     },
     TransitionTask {
         task_id: String,
@@ -636,6 +653,49 @@ AND EXISTS(SELECT 1 FROM frog_model_tasks WHERE workspace_id=?1 AND task_id=?6)"
                 event: "task.dependency_removed", entity_kind: "task",
             })
         }
+        Command::TaskTakeovers { task_id, limit: size, after } => {
+            id(task_id)?;
+            limit(*size)?;
+            if let Some(value) = after { count(value)?; }
+            ok(true, "task_takeovers", vec![statement(
+                "SELECT operation_id,task_id,previous_assignee,assignee,actor,reason,revision,changed_at \
+FROM frog_model_task_takeovers WHERE workspace_id=?1 AND task_id=?2 \
+AND (?3 IS NULL OR revision>CAST(?3 AS INTEGER)) ORDER BY revision LIMIT ?4",
+                vec![workspace, json!(task_id), json!(after), json!(size)])])
+        }
+        Command::TakeOverTask { task_id, expected_revision, expected_assignee, lease_id, reason } => {
+            id(task_id)?;
+            id(lease_id)?;
+            title(reason)?;
+            if let Some(previous) = expected_assignee { id(previous)?; }
+            let mut plan = mutation(&request, Mutation {
+                entity: "UPDATE frog_model_tasks SET assignee=?4,revision=revision+1,last_operation_id=?2,\
+updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),\
+status_observed_at=CASE WHEN status='todo' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE status_observed_at END,\
+status=CASE WHEN status='todo' THEN 'in_progress' ELSE status END \
+WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 AND assignee IS ?7 AND assignee IS NOT ?4 \
+AND status IN ('todo','in_progress','review','published') \
+AND EXISTS(SELECT 1 FROM frog_model_locks l WHERE l.workspace_id=?1 AND l.scope=frog_model_tasks.repo_id \
+AND l.owner=?4 AND l.lease_id=?8 AND l.expires_at>unixepoch()) \
+AND NOT EXISTS(SELECT 1 FROM frog_model_locks l WHERE l.workspace_id=?1 AND l.expires_at>unixepoch() AND l.lease_id!=?8) \
+AND NOT EXISTS(SELECT 1 FROM frog_model_dependencies d LEFT JOIN frog_model_tasks p \
+ON p.workspace_id=d.workspace_id AND p.task_id=d.depends_on WHERE d.workspace_id=?1 AND d.task_id=?5 \
+AND (p.status IS NULL OR p.status!='done')) \
+AND EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?2 AND request_key=?3 AND status='pending')",
+                effect: json!(task_id), secondary: json!(expected_revision),
+                extras: vec![json!(expected_assignee), json!(lease_id), json!(reason)],
+                precheck: None, satisfied: WROTE, event: "task.taken_over", entity_kind: "task",
+            })?;
+            // The event's parameter vector includes all operation-specific
+            // values. Audit publication is in the same atomic plan as ownership.
+            let values = plan.statements[2].params.clone();
+            let audit = bound_statement(&format!(
+                "INSERT INTO frog_model_task_takeovers(workspace_id,operation_id,task_id,previous_assignee,assignee,actor,reason,revision) \
+SELECT ?1,?2,?5,?7,?4,?4,?9,revision FROM frog_model_tasks \
+WHERE workspace_id=?1 AND task_id=?5 AND {PENDING} AND {WROTE}"), &values)?;
+            plan.statements.insert(2, audit);
+            Ok(plan)
+        }
         Command::ClaimTask {
             task_id,
             expected_revision,
@@ -646,7 +706,8 @@ AND EXISTS(SELECT 1 FROM frog_model_tasks WHERE workspace_id=?1 AND task_id=?6)"
 status_observed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 \
 AND status='todo' AND assignee IS NULL AND NOT EXISTS(SELECT 1 FROM frog_model_dependencies d \
 LEFT JOIN frog_model_tasks p ON p.workspace_id=d.workspace_id AND p.task_id=d.depends_on \
-WHERE d.workspace_id=?1 AND d.task_id=?5 AND (p.status IS NULL OR p.status!='done'))",
+ WHERE d.workspace_id=?1 AND d.task_id=?5 AND (p.status IS NULL OR p.status!='done')) \
+AND EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?2 AND request_key=?3 AND status='pending')",
                 effect: json!(task_id), secondary: json!(expected_revision), extras: Vec::new(),
                 precheck: None, satisfied: WROTE, event: "task.claimed", entity_kind: "task",
             })
@@ -665,7 +726,10 @@ WHERE d.workspace_id=?1 AND d.task_id=?5 AND (p.status IS NULL OR p.status!='don
             mutation(&request, Mutation {
                 entity: "UPDATE frog_model_tasks SET status=?7,revision=revision+1,last_operation_id=?2,\
 status_observed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE workspace_id=?1 AND task_id=?5 AND revision=?6 \
-AND assignee=?4 AND status=?8",
+AND assignee=?4 AND status=?8 \
+AND EXISTS(SELECT 1 FROM frog_model_operations WHERE workspace_id=?1 AND operation_id=?2 AND request_key=?3 AND status='pending') \
+AND (?7!='done' OR EXISTS(SELECT 1 FROM frog_model_verifications v \
+WHERE v.workspace_id=?1 AND v.task_id=?5 AND v.revision=?6 AND v.target='verify' AND v.passed=1))",
                 effect: json!(task_id), secondary: json!(expected_revision),
                 extras: vec![json!(status), json!(previous)],
                 precheck: None, satisfied: WROTE, event: "task.transitioned", entity_kind: "task",

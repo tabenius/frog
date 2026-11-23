@@ -13,6 +13,28 @@ are preserved; an empty metadata string clears the note. Workflow, assignee and
 status-observation time are unchanged. Receipts/events are replay-safe. The token
 currently authenticates as `local-client`; other actor overrides are refused.
 
+## Task lifecycle and recovery
+
+`frog task claim ID --agent local-client` creates an exclusive repository lease
+and returns its exact `lease_id`; keep it for finish or takeover. Workflow may
+then advance with `frog task status ID --workflow-status published`.
+`frog task finish ID --agent local-client --lease-id LEASE_ID` requires the
+authenticated assignee, `published` status, the matching active lease, and a
+current successful server-side verification receipt for the revision being
+finished. It refuses `--no-verify`; failed verification leaves the task and
+lease unchanged. `task status --workflow-status done` is refused. Verification
+is still a build gate, not source-commit attestation.
+
+`frog task takeover ID --lease-id LEASE_ID --reason TEXT [--agent local-client]`
+is deliberate recovery of an inactive assignment, not implicit claiming. The
+server must be started with `FROG_MODEL_ALLOW_TAKEOVER=1`. The caller supplies a
+host-created active lease owned by `local-client` with no competing lease; the
+model checks the observed assignee and revision, refuses terminal tasks and
+unsatisfied dependencies, records the change in `frog_model_task_takeovers`, and
+never invents review, publication or status-observation time.
+`frog task takeovers ID` reads that audit trail. Check for active work before
+using takeover: the model enforces coordination, not human inactivity.
+
 ## Providers
 
 `frog provider pull --source jira --file normalized.json`, `outbox`, and configured
@@ -43,8 +65,8 @@ the build causes receipt publication to conflict. Clients cannot forge receipts.
 Durable reservations prevent concurrent/interrupted runs from being repeated;
 completed results replay. Targets must be trusted bounded foreground commands:
 timeout stops the direct child, not detached descendants. Set the client timeout
-above the target timeout. Verification is separate from workflow transitions,
-not yet an automatic finish gate or source-commit attestation.
+above the target timeout. Verification is a finish gate but is not source-commit
+attestation.
 
 ## Exclusive leases
 
@@ -63,6 +85,8 @@ enforcement. File/PID/shared-kind/force/reason/ETA metadata and inactive history
 remain unsupported with explicit errors. All tokens currently share `local-client`;
 this is not multi-principal authorization.
 
-MCP exposes task edit/verify, provider import/outbox and lock acquire/list/renew/
-release through the same backend. Other unavailable legacy operations still fail
-explicitly; this is not complete CLI/TUI/MCP parity.
+MCP exposes task edit/verify/claim/finish/takeover/takeover history, provider
+import/outbox and lock acquire/list/renew/release through the same backend.
+`frog_task_finish` carries the exact `lease_id`; `frog_task_takeover` carries the
+lease and reason. Other unavailable legacy operations still fail explicitly;
+this is not complete CLI/TUI/MCP parity.

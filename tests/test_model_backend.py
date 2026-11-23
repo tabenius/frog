@@ -107,3 +107,107 @@ class ModelBackendTests(unittest.TestCase):
                 code = main_cli.main(['--config',str(Path(directory)/'config.json'),'task','info','one','--json'])
         self.assertNotEqual(code,0)
         self.assertFalse(json.loads(output.getvalue())['ok'])
+
+    def test_model_claim_returns_exact_repo_lease_and_rejects_file_metadata(self):
+        backend = self.backend()
+        row = {'id':'one','revision':3,'repository':'frog','status':'todo','priority':1,'assignee':None}
+        backend.client.task.return_value = row
+        backend.rows = Mock(return_value=[row])
+        args = SimpleNamespace(slug='one',agent='local-client',file=[],force=False,
+                               allow_parallel=False,lock_kind='exclusive')
+        result = backend.claim(args)
+        self.assertEqual(result['scope'],'frog')
+        self.assertEqual(backend.client.acquire_lock.call_args.kwargs['lease_id'],result['lease_id'])
+        self.assertEqual(backend.client.claim_task.call_args.kwargs['expected_revision'],3)
+        backend.client.claim_task.reset_mock()
+        args.file = ['not silently discarded']
+        with self.assertRaises(model_client.ModelError):
+            backend.claim(args)
+        backend.client.claim_task.assert_not_called()
+
+    def test_takeover_passes_observed_owner_revision_and_fenced_lease(self):
+        backend = self.backend()
+        backend.client.task.return_value = {'id':'one','revision':7,'repository':'frog',
+            'status':'review','priority':1,'assignee':'previous-agent'}
+        backend.client.locks.return_value = [{'scope':'frog','lease_id':'lease','owner':'local-client'}]
+        backend.takeover(SimpleNamespace(slug='one',agent=None,lease_id='lease',reason='Approved recovery'))
+        fields = backend.client.take_over_task.call_args.kwargs
+        self.assertEqual((fields['expected_revision'],fields['expected_assignee'],fields['lease_id']),
+                         (7,'previous-agent','lease'))
+        backend.client.take_over_task.reset_mock()
+        with self.assertRaises(model_client.ModelError):
+            backend.takeover(SimpleNamespace(slug='one',agent=None,lease_id='wrong',reason='Recovery'))
+        backend.client.take_over_task.assert_not_called()
+
+    def test_finish_verifies_published_revision_and_releases_only_exact_lease(self):
+        backend = self.backend()
+        backend.client.task.return_value = {'id':'one','revision':9,'repository':'frog',
+            'status':'published','priority':1,'assignee':'local-client'}
+        backend.client.locks.return_value = [{'scope':'frog','lease_id':'lease','owner':'local-client'}]
+        backend.client.verify.return_value = {'items':[{'passed':True,'receipt':{'items':[{'status':'applied'}]}}]}
+        args = SimpleNamespace(slug='one',agent=None,no_verify=False,lease_id='lease')
+        self.assertTrue(backend.finish(args)['ok'])
+        self.assertEqual(backend.client.verify.call_args.args[2],'verify')
+        self.assertEqual(backend.client.transition_task.call_args.kwargs,
+                         {'task_id':'one','expected_revision':9,'status':'done'})
+        self.assertEqual(backend.client.release_lock.call_args.kwargs['lease_id'],'lease')
+
+    def test_finish_cannot_skip_gates_or_complete_a_failed_build(self):
+        backend = self.backend()
+        row = {'id':'one','revision':9,'repository':'frog','status':'published','priority':1,'assignee':'local-client'}
+        backend.client.task.return_value = row
+        backend.client.locks.return_value = [{'scope':'frog','lease_id':'lease','owner':'local-client'}]
+        args = SimpleNamespace(slug='one',agent=None,no_verify=True,lease_id='lease')
+        with self.assertRaises(model_client.ModelError):
+            backend.finish(args)
+        args.no_verify = False
+        backend.client.verify.return_value = {'items':[{'passed':False,'receipt':{'items':[{'status':'applied'}]}}]}
+        self.assertFalse(backend.finish(args)['ok'])
+        backend.client.transition_task.assert_not_called()
+        backend.client.release_lock.assert_not_called()
+        row['status'] = 'review'
+        with self.assertRaises(model_client.ModelError):
+            backend.finish(args)
+
+    def test_status_done_cannot_bypass_finish(self):
+        backend = self.backend()
+        with self.assertRaises(model_client.ModelError):
+            backend.status(SimpleNamespace(slug='one',git_status=None,note=None,workflow_status='done'))
+        backend.client.transition_task.assert_not_called()
+
+    def test_takeover_history_pages_by_revision(self):
+        client = model_client.ModelClient('http://localhost:9091/')
+        first = [{'revision':i+1} for i in range(200)]
+        with patch.object(client,'read',side_effect=[{'items':first},{'items':[{'revision':201}]}]) as read:
+            self.assertEqual(len(client.task_takeovers('alpha','one')),201)
+            self.assertEqual(read.call_args.args[2]['after'],200)
+
+    def test_mcp_lifecycle_tools_route_to_model_dispatch(self):
+        backend = self.backend()
+        backend.dispatch = Mock(return_value={'ok':True})
+        with patch.object(mcp_server,'_MODEL_OPTIONS',{'enabled':True}), \
+             patch.object(model_backend,'Backend',return_value=backend), \
+             patch.object(mcp_server,'_with_conn',side_effect=AssertionError('legacy access')):
+            mcp_server._call_local('frog_task_takeover',
+                {'slug':'one','lease_id':'lease','reason':'Approved recovery'},None)
+            takeover = backend.dispatch.call_args.args[0]
+            self.assertEqual((takeover.task_command,takeover.slug,takeover.lease_id,takeover.reason),
+                             ('takeover','one','lease','Approved recovery'))
+            mcp_server._call_local('frog_task_finish',
+                {'slug':'one','lease_id':'lease','verify':False},None)
+            finish = backend.dispatch.call_args.args[0]
+            self.assertEqual((finish.task_command,finish.lease_id,finish.no_verify),
+                             ('finish','lease',True))
+            mcp_server._call_local('frog_task_takeovers',{'slug':'one'},None)
+            history = backend.dispatch.call_args.args[0]
+            self.assertEqual((history.task_command,history.slug),('takeovers','one'))
+
+    def test_legacy_storage_refuses_model_only_lifecycle_arguments(self):
+        with patch.object(mcp_server,'_MODEL_OPTIONS',{'enabled':False}), \
+             patch.object(mcp_server,'_with_conn',side_effect=lambda db, fn: fn(None)):
+            result = mcp_server._call_local('frog_task_takeover',
+                {'slug':'one','lease_id':'lease','reason':'Approved recovery'},None)
+            self.assertFalse(result['ok'])
+            result = mcp_server._call_local('frog_task_finish',
+                {'slug':'one','lease_id':'lease'},None)
+            self.assertFalse(result['ok'])

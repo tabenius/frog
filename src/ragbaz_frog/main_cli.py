@@ -2156,6 +2156,14 @@ def build_parser() -> argparse.ArgumentParser:
     task_finish.add_argument("slug")
     task_finish.add_argument("--agent")
     task_finish.add_argument("--no-verify", dest="no_verify", action="store_true")
+    task_finish.add_argument("--lease-id", help="Exact model lease returned by claim/acquire")
+    takeover = task_sub.add_parser("takeover", help="Explicit audited recovery of an inactive model assignment")
+    takeover.add_argument("slug")
+    takeover.add_argument("--lease-id", required=True)
+    takeover.add_argument("--reason", required=True)
+    takeover.add_argument("--agent")
+    takeovers = task_sub.add_parser("takeovers", help="Read model task takeover audit history")
+    takeovers.add_argument("slug")
     task_info = task_sub.add_parser("info", help="Show one task")
     task_info.add_argument("slug")
     task_status = task_sub.add_parser("status", help="Update or show task status")
@@ -2842,6 +2850,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.unit_command == "list":
                 return _emit(_payload_with_view(store.unit_list(conn, repo_ref=args.repo_ref), args), args.json)
         if args.command == "task":
+            if args.task_command in ("takeover", "takeovers"):
+                return _emit({"ok": False, "error": "task takeover/audit requires the model backend"}, args.json)
             if args.task_command == "create":
                 return _emit(
                     store.create_task(conn,slug=args.slug,repo_ref=args.repo_ref,title=args.title,
@@ -2892,6 +2902,8 @@ def main(argv: list[str] | None = None) -> int:
                     lock_kind=args.lock_kind, force=args.force,
                     files=args.file, allow_parallel=args.allow_parallel), args.json)
             if args.task_command == "finish":
+                if args.lease_id:
+                    return _emit({"ok": False, "error": "--lease-id is model-only; legacy finish cannot consume it"}, args.json)
                 return _emit(store.task_finish(conn, slug=args.slug,
                     agent=(args.agent or store.current_agent()),
                     verify=not args.no_verify), args.json)
