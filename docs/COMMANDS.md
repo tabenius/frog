@@ -562,6 +562,8 @@ Declare: DEPENDENT depends on DEPENDENCY
 - `dependent`
 - `dependency`
 - `--note`
+- `--kind` — one of `install`, `runtime`, `build`, `debug` (default: `runtime`). Mirrors
+  `dependencies[].kind` in `ragbaz.component.json`; existing unqualified edges are `runtime`.
 
 #### `frog repo dep list`
 

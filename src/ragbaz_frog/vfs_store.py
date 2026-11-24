@@ -11,8 +11,6 @@ import os
 import sqlite3
 import tempfile
 
-# Thread-local storage for current VFS
-import threading
 from pathlib import Path
 
 from . import DEFAULT_DB_PATH
@@ -25,9 +23,8 @@ from .vfs import (
     default_vfs,
     parse_vfs_uri,
     set_vfs,
+    workspace_vfs_context,
 )
-
-_vfs_local = threading.local()
 
 
 def get_workspace_vfs(
@@ -368,57 +365,3 @@ class _RemoteSQLiteConnection:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         return False
-
-
-
-def workspace_vfs_context(
-    workspace_name: str | None = None, config_path: str | None = None
-) -> "Iterator[VFS]":
-    """Context manager that sets up VFS for a workspace."""
-    from .config import resolve_workspace
-    from .vfs import create_vfs, default_vfs
-
-    workspace = resolve_workspace(workspace_name, config_path)
-    if not workspace:
-        vfs = default_vfs()
-    else:
-        db_uri = workspace.get("db_uri")
-        if db_uri:
-            vfs = create_vfs(db_uri)
-        else:
-            root = workspace.get("root")
-            if root:
-                scheme, params = parse_vfs_uri(f"file://{root}")
-                vfs = LocalVFS()
-                vfs.set_root(Path(root))
-            else:
-                vfs = default_vfs()
-    yield vfs
-@contextlib.contextmanager
-def workspace_vfs_context(
-    workspace_name: str | None = None, config_path: str | None = None
-) -> "Iterator[VFS]":
-    """Context manager that sets up VFS for a workspace."""
-    from .config import resolve_workspace
-    from .vfs import create_vfs
-
-    workspace = resolve_workspace(workspace_name, config_path)
-    if not workspace:
-        vfs = default_vfs()
-    else:
-        db_uri = workspace.get("db_uri")
-        if db_uri:
-            vfs = create_vfs(db_uri)
-        else:
-            root = workspace.get("root")
-            if root:
-                vfs = create_vfs(f"file://{root}")
-            else:
-                vfs = default_vfs()
-
-    old_vfs = getattr(_vfs_local, "vfs", None)
-    _vfs_local.vfs = vfs
-    try:
-        yield vfs
-    finally:
-        _vfs_local.vfs = old_vfs

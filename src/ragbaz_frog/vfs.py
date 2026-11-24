@@ -198,13 +198,17 @@ class VFS(abc.ABC):
         return joined
 
     def relative_to(self, path: str, base: str) -> str:
-        """Relative path from base to path."""
-        path = self.resolve(path).rstrip("/")
-        base = self.resolve(base).rstrip("/")
-        if not path.startswith(base):
+        """Relative path from base to path, on whole component boundaries."""
+        path = self.resolve(path).rstrip("/") or "/"
+        base = self.resolve(base).rstrip("/") or "/"
+        if path == base:
+            return ""
+        if base == "/":
+            return path.lstrip("/")
+        prefix = base + "/"
+        if not path.startswith(prefix):
             raise ValueError(f"{path} not under {base}")
-        rel = path[len(base) :].lstrip("/")
-        return rel
+        return path[len(prefix) :]
 
 
 class LocalVFS(VFS):
@@ -226,6 +230,12 @@ class LocalVFS(VFS):
         path = self.resolve(path)
         if path == "/":
             return self._root
+        # Relative paths resolve against the physical cwd, and callers may pass
+        # explicit host paths beneath the root. Neither should be rooted twice.
+        # Check ancestry before existence so new write/rename targets work too.
+        path_obj = Path(path)
+        if path_obj.is_absolute() and path_obj.is_relative_to(self._root):
+            return path_obj
         # Try VFS-relative path first (join with root)
         vfs_relative = path.lstrip("/")
         candidate = self._root / vfs_relative
@@ -233,22 +243,17 @@ class LocalVFS(VFS):
             return candidate
         # If VFS-relative path doesn't exist, check if it's an absolute local path
         # that exists outside the VFS root
-        path_obj = Path(path)
         if path_obj.is_absolute() and path_obj.exists():
-            try:
-                path_obj.relative_to(self._root)
-                # Under VFS root but doesn't exist - return VFS-relative anyway
-                return candidate
-            except ValueError:
-                # Outside VFS root, use absolute path directly
-                return path_obj
+            # Preserve the existing compatibility fallback for outside paths.
+            return path_obj
         # Default: VFS-relative path
         return candidate
 
     def _from_path(self, path: Path) -> str:
         try:
             rel = path.relative_to(self._root)
-            return "/" + rel.as_posix()
+            rel_str = rel.as_posix()
+            return "/" if rel_str == "." else "/" + rel_str
         except ValueError:
             return path.as_posix()
 

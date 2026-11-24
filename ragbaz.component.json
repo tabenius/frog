@@ -1,20 +1,30 @@
 {
-  "$schema": "../docs/schemas/ragbaz.component.schema.json",
-  "schemaVersion": "0.1.0",
+  "$schema": "https://ragbaz.cc/schemas/ragbaz.component.schema.json",
+  "schemaVersion": "0.2.0",
   "identity": {
     "id": "ragbaz.frog",
     "name": "RAGBAZ Frog",
     "version": "0.1.0",
     "repoPath": "ragbaz-frog",
+    "repository": "tabenius/frog",
     "owner": "ragbaz",
     "lifecycle": "production"
   },
   "commercial": {
-    "packageTags": ["managed-operations", "agent-coordination"],
-    "personas": ["internal-operator", "agent-team", "platform-owner"],
+    "packageTags": [
+      "managed-operations",
+      "agent-coordination"
+    ],
+    "personas": [
+      "internal-operator",
+      "agent-team",
+      "platform-owner"
+    ],
     "supportTier": "managed",
     "salesStatus": "internal",
-    "pricingTags": ["included-platform"]
+    "pricingTags": [
+      "included-platform"
+    ]
   },
   "capabilities": {
     "provides": [
@@ -54,30 +64,47 @@
       {
         "name": "frog",
         "command": "/data/src/ragbaz-frog/bin/frog",
-        "capabilities": ["ops.coordination"]
+        "capabilities": [
+          "ops.coordination"
+        ]
       },
       {
         "name": "frog-mcp",
         "command": "/data/src/ragbaz-frog/bin/frog-mcp",
-        "capabilities": ["ops.mcp"]
+        "capabilities": [
+          "ops.mcp"
+        ]
       }
     ],
     "mcpTools": [
       {
         "name": "frog.repo.list",
-        "capabilities": ["ops.coordination"],
-        "permissions": ["repo:read"],
+        "capabilities": [
+          "ops.coordination"
+        ],
+        "permissions": [
+          "repo:read"
+        ],
         "dryRun": true
       },
       {
         "name": "frog.task.claim",
-        "capabilities": ["ops.coordination"],
-        "permissions": ["task:write", "lock:write"]
+        "capabilities": [
+          "ops.coordination"
+        ],
+        "permissions": [
+          "task:write",
+          "lock:write"
+        ]
       },
       {
         "name": "frog.lock.audit",
-        "capabilities": ["ops.coordination"],
-        "permissions": ["lock:read"],
+        "capabilities": [
+          "ops.coordination"
+        ],
+        "permissions": [
+          "lock:read"
+        ],
         "dryRun": true
       }
     ],
@@ -97,14 +124,18 @@
       {
         "name": "lock-audit",
         "description": "Working-tree changes not covered by active locks.",
-        "capabilities": ["ops.coordination"]
+        "capabilities": [
+          "ops.coordination"
+        ]
       }
     ],
     "adminSurfaces": [
       {
         "name": "frog-cli",
         "description": "Human-facing coordination CLI.",
-        "capabilities": ["ops.coordination"]
+        "capabilities": [
+          "ops.coordination"
+        ]
       }
     ]
   },
@@ -129,13 +160,27 @@
     ]
   },
   "security": {
-    "authMethods": ["ssh", "mcp"],
-    "tokenScopes": ["repo:read", "task:write", "lock:write", "workspace:read"],
+    "authMethods": [
+      "ssh",
+      "mcp"
+    ],
+    "tokenScopes": [
+      "repo:read",
+      "task:write",
+      "lock:write",
+      "workspace:read"
+    ],
     "tenantBoundary": "host-level",
-    "dataClasses": ["logs", "metrics"],
+    "dataClasses": [
+      "logs",
+      "metrics"
+    ],
     "secretAccess": "references-only",
     "revocation": "Revoke workspace access by disabling the operator account, SSH path, or MCP client grant.",
-    "auditEvents": ["frog.task.changed", "frog.lock.changed"]
+    "auditEvents": [
+      "frog.task.changed",
+      "frog.lock.changed"
+    ]
   },
   "health": {
     "checks": [
@@ -170,5 +215,19 @@
   },
   "metadata": {
     "candidateWave": "component-manifest-candidate-wave"
+  },
+  "presentation": {
+    "catalog": {
+      "slug": "frog",
+      "name": "Frog",
+      "tag": "beta",
+      "tagLabel": "beta",
+      "short": "Workspace coordination for many agents at once: repositories, tasks, file locks and federation.",
+      "value": "Frog is the coordination layer a multi-agent workspace runs on. It discovers repositories and resolves their identity, schedules tasks by dependency and priority, hands out file locks so two agents cannot silently edit the same file, and records events so a decision can be traced after the session that made it is gone. Rules stay in readable files; the machine-readable state is one SQLite database. It is used daily by the fleet it coordinates.",
+      "repo": "frog",
+      "links": {
+        "site": "/#p-frog"
+      }
+    }
   }
 }

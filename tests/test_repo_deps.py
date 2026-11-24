@@ -35,10 +35,21 @@ class RepoDeps(unittest.TestCase):
     def test_add_and_list_and_self_dep_rejected(self):
         r = store.repo_dep_add(self.conn, "down", "up", note="links")
         self.assertTrue(r["ok"])
+        self.assertEqual(r["kind"], "runtime")
         lst = store.repo_dep_list(self.conn)
         self.assertEqual(len(lst["deps"]), 1)
+        self.assertEqual(lst["deps"][0]["kind"], "runtime")
         self.assertFalse(store.repo_dep_add(self.conn, "up", "up")["ok"])
         self.assertFalse(store.repo_dep_add(self.conn, "up", "nope")["ok"])
+
+    def test_typed_dependency_kinds(self):
+        r = store.repo_dep_add(self.conn, "down", "up", kind="build", note="CI")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["kind"], "build")
+        self.assertEqual(store.repo_dep_list(self.conn)["deps"][0]["kind"], "build")
+        bad = store.repo_dep_add(self.conn, "down", "up", kind="unknown")
+        self.assertFalse(bad["ok"])
+        self.assertIn("unknown dependency kind", bad["error"])
 
     def test_upstream_change_fans_out_to_dependent(self):
         store.repo_dep_add(self.conn, "down", "up")

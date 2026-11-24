@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -27,6 +28,8 @@ EXPECTED_TOOLS = [
     "frog_lock_list", "frog_lock_acquire", "frog_lock_release", "frog_lock_audit",
     "frog_lock_renew", "frog_log_tail", "frog_repo_affected", "frog_task_verify",
     "frog_provider_import", "frog_provider_outbox", "frog_workspace_list", "__health",
+    "dash_list_instances", "dash_read_instance", "dash_read_view",
+    "dash_read_frog", "dash_read_audit",
 ]
 
 
@@ -43,29 +46,35 @@ def _run_mcp(messages, *, db=None, env=None):
     proc = subprocess.Popen(
         [sys.executable, "bin/frog", "--db", db, "mcp", "serve"],
         cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, env=e,
+        stderr=subprocess.PIPE, env=e,
     )
     pending = {m["id"] for m in messages if "id" in m}
     for m in messages:
-        proc.stdin.write(json.dumps(m, separators=(",", ":")) + "\n")
+        proc.stdin.write((json.dumps(m, separators=(",", ":")) + "\n").encode())
     proc.stdin.flush()
     lines = []
+    buffer = b""
     deadline = time.monotonic() + 10
     while pending and time.monotonic() < deadline:
         ready, _, _ = select.select([proc.stdout], [], [], 0.1)
         if not ready:
             continue
-        line = proc.stdout.readline()
-        if not line:
+        chunk = os.read(proc.stdout.fileno(), 65536)
+        if not chunk:
             break
-        lines.append(line)
-        try:
-            pending.discard(json.loads(line).get("id"))
-        except ValueError:
-            pass
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            lines.append(line + b"\n")
+            try:
+                pending.discard(json.loads(line).get("id"))
+            except ValueError:
+                pass
     proc.stdin.close()
+    proc.stdin = None  # communicate() must not flush a closed pipe on Python 3.13.
     rest, stderr = proc.communicate(timeout=10)
-    return subprocess.CompletedProcess(proc.args, proc.returncode, "".join(lines) + rest, stderr), db
+    return subprocess.CompletedProcess(proc.args, proc.returncode,
+                                       (b"".join(lines) + buffer + rest).decode(), stderr.decode()), db
 
 
 def _by_id(lines, msg_id):
@@ -104,7 +113,8 @@ class TestGatewaySmoke(unittest.TestCase):
         init = _by_id(lines, 1)
         self.assertEqual(init["result"]["serverInfo"]["name"], "ragbaz-frog")
         tool_names = [t["name"] for t in _by_id(lines, 2)["result"]["tools"]]
-        self.assertEqual(len(tool_names), 28)
+        self.assertEqual(set(tool_names), set(EXPECTED_TOOLS))
+        self.assertEqual(len(tool_names), len(EXPECTED_TOOLS))
         for name in EXPECTED_TOOLS:
             self.assertIn(name, tool_names, f"Missing tool: {name}")
 
@@ -205,8 +215,8 @@ class TestFrogTaskList(unittest.TestCase):
         self.assertIsInstance(payload.get("tasks", []), list)
 
     def test_task_list_with_created_task(self):
-        # Test via _call_local directly: mcp serve ignores --db (no env override),
-        # so we exercise the handler logic directly against a fresh db.
+        # Exercise the legacy handler explicitly against a fresh database;
+        # the default handler now reads the model HTTP API instead.
         db = fresh_db()
         conn = store.connect(db)
         store.create_task(
@@ -218,7 +228,8 @@ class TestFrogTaskList(unittest.TestCase):
         )
         conn.close()
         ws = {"db": db, "host": {"transport": "local"}, "name": "test"}
-        result = mcp_server._call_local("frog_task_list", {"workflow_status": "idea"}, ws)
+        with patch.object(mcp_server, "_MODEL_OPTIONS", {"enabled": False}):
+            result = mcp_server._call_local("frog_task_list", {"workflow_status": "idea"}, ws)
         self.assertTrue(result.get("ok"), result)
         slugs = [t["slug"] for t in result.get("tasks", [])]
         self.assertIn("test-task-1", slugs)

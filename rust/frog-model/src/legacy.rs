@@ -85,13 +85,13 @@ pub fn execute(connection: &mut Connection, request: Request, workspace: &str, p
         Err(e) => return Err(format!("legacy receipts unavailable (initialise explicitly): {e}")),
     }
     let (changed, entity, event) = match &request.command {
-        Command::CreateTask { repo_id, task_id, title, priority } => {
+        Command::CreateTask { repo_id, task_id, title, priority, initial_status } => {
             let count: i64 = tx.query_row("SELECT count(*) FROM repos WHERE COALESCE(NULLIF(repo_key,''),name)=?1",[repo_id],|r|r.get(0)).map_err(|e|e.to_string())?;
             if count != 1 { return Err("repository identity is missing or ambiguous".into()); }
             let changed = tx.execute("INSERT INTO tasks(slug,repo_path,title,priority,workflow_status,git_status,created_at,updated_at,status_confidence_at)
-                SELECT ?1,repo_path,?2,?3,'todo','not_started',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                SELECT ?1,repo_path,?2,?3,?5,'not_started',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')
                 FROM repos WHERE COALESCE(NULLIF(repo_key,''),name)=?4 ON CONFLICT(slug) DO NOTHING",
-                rusqlite::params![task_id,title,format!("p{priority}"),repo_id]).map_err(|e|e.to_string())?;
+                rusqlite::params![task_id,title,format!("p{priority}"),repo_id,initial_status.as_deref().unwrap_or("todo")]).map_err(|e|e.to_string())?;
             (changed,*&task_id,"task.created")
         },
         Command::AddDependency {task_id, depends_on} => {

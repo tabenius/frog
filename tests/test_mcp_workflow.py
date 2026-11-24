@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from _util import fresh_db
 from ragbaz_frog import mcp_server
 
@@ -6,6 +7,9 @@ from ragbaz_frog import mcp_server
 class McpWorkflow(unittest.TestCase):
     def setUp(self):
         self.ws = {"db": fresh_db()}
+        legacy = patch.object(mcp_server, "_MODEL_OPTIONS", {"enabled": False})
+        legacy.start()
+        self.addCleanup(legacy.stop)
 
     def _call(self, name, args):
         return mcp_server._call_local(name, args, self.ws)

@@ -14,7 +14,7 @@ SPEC.loader.exec_module(UPGRADE)
 
 class ServiceUpgradeTests(unittest.TestCase):
     def test_backup_precedes_upgrade_and_archive_is_read_only(self):
-        with tempfile.TemporaryDirectory(dir='/tmp/opencode') as directory:
+        with tempfile.TemporaryDirectory() as directory:
             database, backup = Path(directory)/'model.db', Path(directory)/'backup.db'
             with sqlite3.connect(database) as conn:
                 conn.executescript((ROOT/'sql/0001_model.sql').read_text().replace('frog_model_','custom_'))

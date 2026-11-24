@@ -1182,13 +1182,29 @@ def write_agent_instructions(
         target_dir_local = _vfs_to_local_path(target_dir_local, vfs)
         target_file_local = os.path.join(target_dir_local, "AGENTS.md")
 
-    # Convert target file to VFS path for VFS operations
-    target_vfs = vfs_from_local_path(target_file_local, vfs)
-    target_dir_vfs = vfs_from_local_path(target_dir_local, vfs)
+    # New absolute paths outside the root cannot be represented as VFS paths:
+    # LocalVFS would treat a nonexistent absolute target as workspace-relative.
+    # Use host pathlib for them so a successful result names the file actually written.
+    from pathlib import Path
 
-    target_local = target_file_local
+    target_path = Path(target_file_local).expanduser()
+    outside_root = isinstance(vfs, LocalVFS) and not _is_path_under_vfs_root(
+        str(target_path), vfs
+    )
+    if outside_root:
+        target_path = target_path.resolve()
+        target_local = str(target_path)
+        target_vfs = None
+        target_dir_vfs = None
+    else:
+        target_local = target_file_local
+        target_vfs = vfs_from_local_path(target_file_local, vfs)
+        target_dir_vfs = vfs_from_local_path(target_dir_local, vfs)
 
-    if vfs_exists(target_vfs, vfs) and not force:
+    exists = (
+        target_path.exists() if outside_root else vfs_exists(target_vfs, vfs)
+    )
+    if exists and not force:
         return {
             "ok": False,
             "error": f"refusing to overwrite existing file: {target_local}",
@@ -1199,8 +1215,14 @@ def write_agent_instructions(
         summary=f"requested agent-instruction write to {target_local}",
         payload={"agents_path": target_local, "force": bool(force)},
     )
-    vfs_mkdir(target_dir_vfs, parents=True, exist_ok=True, vfs=vfs)
-    vfs_write_text(target_vfs, agent_instructions_text(), encoding="utf-8", vfs=vfs)
+    if outside_root:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(agent_instructions_text(), encoding="utf-8")
+    else:
+        vfs_mkdir(target_dir_vfs, parents=True, exist_ok=True, vfs=vfs)
+        vfs_write_text(
+            target_vfs, agent_instructions_text(), encoding="utf-8", vfs=vfs
+        )
     parent_local = target_dir_local
     repo = resolve_repo(conn, parent_local)
     # Only use repo_path if it exactly matches parent_local (FK constraint)
@@ -5139,7 +5161,9 @@ def lock_acquire(
     except sqlite3.Error:
         conn.rollback()
         raise
-    return lock_info(conn, lock_id)
+    # The just-acquired lock must not be reaped by its own return path: a
+    # short lease can elapse while a loaded host finishes the transaction.
+    return lock_info(conn, lock_id, reap=False)
 
 
 def lock_renew(conn, lock_id: int, eta_minutes: int | None) -> dict:
@@ -5600,12 +5624,9 @@ def lock_audit(conn, *, repo_ref: str | None, agent: str) -> dict:
     }
 
 
-def lock_info(conn, lock_id: int) -> dict:
-    _mark_stale_locks(conn)
-
-
-def lock_info(conn, lock_id: int) -> dict:
-    _mark_stale_locks(conn)
+def lock_info(conn, lock_id: int, *, reap: bool = True) -> dict:
+    if reap:
+        _mark_stale_locks(conn)
     row = conn.execute("SELECT * FROM locks WHERE id = ?", (lock_id,)).fetchone()
     if not row:
         return {"ok": False, "error": f"lock not found: {lock_id}"}
@@ -7069,9 +7090,21 @@ def _targets_for_files(conn, repo_path: str, files: list[str]) -> list[dict]:
     return affected
 
 
+REPO_DEP_KINDS = ("install", "runtime", "build", "debug")
+
+
 def repo_dep_add(
-    conn, dependent_ref: str, dependency_ref: str, note: str | None = None
+    conn,
+    dependent_ref: str,
+    dependency_ref: str,
+    note: str | None = None,
+    kind: str = "runtime",
 ) -> dict:
+    if kind not in REPO_DEP_KINDS:
+        return {
+            "ok": False,
+            "error": f"unknown dependency kind: {kind}; expected one of {', '.join(REPO_DEP_KINDS)}",
+        }
     dep = _repo_required(conn, dependent_ref)
     on = _repo_required(conn, dependency_ref)
     if not dep:
@@ -7082,22 +7115,23 @@ def repo_dep_add(
         return {"ok": False, "error": "a repo cannot depend on itself"}
     conn.execute(
         """INSERT OR REPLACE INTO repo_deps(dependent_repo_path,
-           dependency_repo_path, note, created_at) VALUES(?,?,?,?)""",
-        (dep["repo_path"], on["repo_path"], note, utc_now_iso()),
+           dependency_repo_path, note, kind, created_at) VALUES(?,?,?,?,?)""",
+        (dep["repo_path"], on["repo_path"], note, kind, utc_now_iso()),
     )
     record_event(
         conn,
         kind="repo.dep.added",
-        summary=f"{dep['name']} depends on {on['name']}",
+        summary=f"{dep['name']} depends on {on['name']} ({kind})",
         repo_path=dep["repo_path"],
-        payload={"dependency": on["repo_path"], "note": note},
+        payload={"dependency": on["repo_path"], "note": note, "kind": kind},
     )
     conn.commit()
     return {
         "ok": True,
-        "message": f"{dep['name']} -> {on['name']}",
+        "message": f"{dep['name']} -> {on['name']} ({kind})",
         "dependent": dep["repo_path"],
         "dependency": on["repo_path"],
+        "kind": kind,
     }
 
 
