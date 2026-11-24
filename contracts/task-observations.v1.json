@@ -10,12 +10,12 @@
     {"status": "done", "frog_lane": "done", "weftmark_lane": "done", "attention": []},
     {"status": "cancelled", "frog_lane": "done", "weftmark_lane": "done", "attention": []}
   ],
-  "nullable_task_fields": ["repository", "assignee", "ready", "created_at", "updated_at", "status_observed_at"],
+  "nullable_task_fields": ["repository", "assignee", "created_at", "updated_at", "status_observed_at"],
   "valid_timestamps": ["2026-11-24T12:00:00.000Z", "2026-11-24T12:00:00+00:00"],
   "invalid_timestamps": [null, "2026-11-24T12:00:00", "not-a-time"],
   "gateway_freshness": [
-    {"age_seconds": 0, "status": "ok", "stale": false},
-    {"age_seconds": 301, "status": "stale", "stale": true},
+    {"age_seconds": 0, "status": "ready", "stale": false},
+    {"age_seconds": 31, "status": "ready", "stale": true},
     {"age_seconds": -301, "status": "unavailable", "stale": true}
   ],
   "gateway_refusals": [
@@ -28,6 +28,6 @@
     "schema": "frog.kanban-projection.v0", "source": "frog", "read_only": true,
     "observed_at": "2026-11-24T12:00:00.000Z", "revision": 1,
     "lanes": [{"id": "idea", "title": "Idea"}, {"id": "blocked", "title": "Blocked"}, {"id": "in_progress", "title": "Active"}, {"id": "done", "title": "Done"}],
-    "cards": [{"id": "fixture-task", "title": "Synthetic task", "priority": "p0", "status": "todo", "lane": "idea", "repository": null, "assignee": null, "ready": null, "created_at": null, "updated_at": null, "status_observed_at": null, "dependencies": [], "unmet_dependencies": [], "blocks": [], "tags": []}]
+    "cards": [{"id": "fixture-task", "title": "Synthetic task", "priority": "p0", "status": "todo", "lane": "idea", "repository": null, "assignee": null, "ready": false, "created_at": null, "updated_at": null, "status_observed_at": null, "dependencies": [], "unmet_dependencies": [], "blocks": [], "tags": []}]
   }
 }
