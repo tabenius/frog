@@ -220,8 +220,15 @@ class Backend:
         row = self.client.task(self.workspace, args.slug)
         if not row:
             return dict(ok=False, error='task not found')
-        if any(r['id'] != args.slug and r.get('assignee') == 'local-client'
-               and r['status'] in ('in_progress','review','published') for r in self.rows()):
+        other_work = [r for r in self.rows() if r['id'] != args.slug
+                      and r.get('assignee') == 'local-client']
+        pending_review = [r for r in other_work if r['status'] in ('review', 'published')]
+        # Review + exact lease release is an explicit, audited pause. Keep its
+        # assignment/evidence intact without blocking unrelated new work forever.
+        leased = {lock['scope'] for lock in self.client.locks(self.workspace)
+                  if lock['owner'] == 'local-client'} if pending_review else set()
+        if any(r['status'] == 'in_progress' for r in other_work) or any(
+                r['repository'] in leased for r in pending_review):
             raise ModelError('conflict', 'finish or explicitly hand off the current model task first')
         lease = uuid.uuid4().hex
         self.client.acquire_lock(self.workspace, uuid.uuid4().hex,

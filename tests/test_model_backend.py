@@ -180,6 +180,33 @@ class ModelBackendTests(unittest.TestCase):
             backend.takeover(SimpleNamespace(slug='one',agent=None,lease_id='wrong',reason='Recovery'))
         backend.client.take_over_task.assert_not_called()
 
+    def test_claim_after_released_review_preserves_pending_task(self):
+        for status in ('review', 'published'):
+            backend = self.backend()
+            row = {'id':'one','revision':0,'repository':'frog','status':'todo','priority':1,'assignee':None}
+            pending = dict(row, id='parked', repository='mouseion', status=status, assignee='local-client')
+            backend.client.task.return_value = row
+            backend.rows = Mock(return_value=[row, pending])
+            backend.client.locks.return_value = []
+            args = SimpleNamespace(slug='one',agent='local-client',file=[],force=False,
+                                   allow_parallel=False,lock_kind='exclusive')
+            self.assertTrue(backend.claim(args)['ok'])
+            backend.client.transition_task.assert_not_called()
+            self.assertEqual(pending['status'], status)
+
+    def test_claim_still_refuses_in_progress_or_leased_review(self):
+        for status in ('in_progress', 'review', 'published'):
+            backend = self.backend()
+            row = {'id':'one','revision':0,'repository':'frog','status':'todo','priority':1,'assignee':None}
+            backend.client.task.return_value = row
+            backend.rows = Mock(return_value=[row, dict(row, id='other', repository='mouseion', status=status, assignee='local-client')])
+            backend.client.locks.return_value = [{'scope':'mouseion','owner':'local-client'}]
+            args = SimpleNamespace(slug='one',agent='local-client',file=[],force=False,
+                                   allow_parallel=False,lock_kind='exclusive')
+            with self.assertRaises(model_client.ModelError):
+                backend.claim(args)
+            backend.client.acquire_lock.assert_not_called()
+
     def test_finish_verifies_published_revision_and_releases_only_exact_lease(self):
         backend = self.backend()
         backend.client.task.return_value = {'id':'one','revision':9,'repository':'frog',
