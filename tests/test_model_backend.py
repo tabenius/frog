@@ -194,6 +194,22 @@ class ModelBackendTests(unittest.TestCase):
             backend.client.transition_task.assert_not_called()
             self.assertEqual(pending['status'], status)
 
+    def test_finish_uses_atomic_endpoint_and_never_client_side_transition_or_release(self):
+        backend = self.backend()
+        backend.client.task.return_value = {'id':'one','revision':3,'repository':'frog','status':'published','assignee':'local-client'}
+        backend.client.locks.return_value = [{'scope':'frog','owner':'local-client','lease_id':'exact'}]
+        backend.verify = Mock(return_value={'ok':True,'build_operation':'build'})
+        backend.task_info = Mock(return_value={'ok':True})
+        args = SimpleNamespace(slug='one', agent='local-client', no_verify=False, lease_id='exact')
+        self.assertTrue(backend.finish(args)['ok'])
+        self.assertEqual(backend.client.finish_task.call_args.kwargs,
+                         dict(task_id='one',expected_revision=3,lease_id='exact',build_operation='build'))
+        backend.client.transition_task.assert_not_called()
+        backend.client.release_lock.assert_not_called()
+        backend.verify.return_value = {'ok':True}
+        with self.assertRaises(model_client.ModelError):
+            backend.finish(args)
+
     def test_claim_still_refuses_in_progress_or_leased_review(self):
         for status in ('in_progress', 'review', 'published'):
             backend = self.backend()
@@ -212,13 +228,13 @@ class ModelBackendTests(unittest.TestCase):
         backend.client.task.return_value = {'id':'one','revision':9,'repository':'frog',
             'status':'published','priority':1,'assignee':'local-client'}
         backend.client.locks.return_value = [{'scope':'frog','lease_id':'lease','owner':'local-client'}]
-        backend.client.verify.return_value = {'items':[{'passed':True,'receipt':{'items':[{'status':'applied'}]}}]}
+        backend.client.verify.return_value = {'build_operation':'build','items':[{'passed':True,'receipt':{'items':[{'status':'applied'}]}}]}
         args = SimpleNamespace(slug='one',agent=None,no_verify=False,lease_id='lease')
         self.assertTrue(backend.finish(args)['ok'])
         self.assertEqual(backend.client.verify.call_args.args[2],'verify')
-        self.assertEqual(backend.client.transition_task.call_args.kwargs,
-                         {'task_id':'one','expected_revision':9,'status':'done'})
-        self.assertEqual(backend.client.release_lock.call_args.kwargs['lease_id'],'lease')
+        self.assertEqual(backend.client.finish_task.call_args.kwargs,
+                         {'task_id':'one','expected_revision':9,'lease_id':'lease','build_operation':'build'})
+        backend.client.release_lock.assert_not_called()
 
     def test_finish_cannot_skip_gates_or_complete_a_failed_build(self):
         backend = self.backend()

@@ -95,12 +95,34 @@ pub fn execute(connection: &mut Connection, request: crate::Request) -> Result<V
 }
 
 pub fn execute_with_prefix(connection: &mut Connection, request: crate::Request, prefix: &str) -> Result<Value, String> {
+    execute_fenced(connection, request, prefix, None)
+}
+
+/// Native runner evidence and exact lease are checked within the write transaction.
+pub struct FinishFence<'a> {
+    pub lease_id: &'a str,
+    pub build_operation: &'a str,
+    pub source_identity: &'a str,
+}
+
+pub fn execute_verified_finish(connection: &mut Connection, request: crate::Request, prefix: &str, fence: FinishFence<'_>) -> Result<Value, String> {
+    execute_fenced(connection, request, prefix, Some(fence))
+}
+
+fn execute_fenced(connection: &mut Connection, request: crate::Request, prefix: &str, fence: Option<FinishFence<'_>>) -> Result<Value, String> {
     if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err("invalid table prefix".into());
     }
     let needs_idea_schema = matches!(&request.command,
         crate::Command::ProviderImport { status, .. } | crate::Command::TransitionTask { status, .. } if status == "idea")
         || matches!(&request.command, crate::Command::CreateTask { initial_status: Some(status), .. } if status == "idea");
+    let finish = if fence.is_some() {
+        match &request.command {
+            crate::Command::TransitionTask { task_id, expected_revision, status } if status == "done" =>
+                Some((request.workspace_id.clone(), request.actor.clone(), task_id.clone(), *expected_revision)),
+            _ => return Err("finish fence requires completion".into()),
+        }
+    } else { None };
     let plan = crate::plan(request)?;
     let foreign_keys: i64 = connection
         .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -125,6 +147,13 @@ pub fn execute_with_prefix(connection: &mut Connection, request: crate::Request,
     }
     if needs_idea_schema && version != 2 {
         return Err("idea requires explicit model schema v2 upgrade".into());
+    }
+    if let (Some(fence), Some((workspace, actor, task, revision))) = (&fence, &finish) {
+        let valid: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {prefix}tasks t JOIN {prefix}locks l ON l.workspace_id=t.workspace_id AND l.scope=t.repo_id JOIN {prefix}build_runs b ON b.workspace_id=t.workspace_id AND b.task_id=t.task_id WHERE t.workspace_id=?1 AND t.task_id=?2 AND t.revision=?3 AND t.assignee=?4 AND t.status='published' AND l.owner=?4 AND l.lease_id=?5 AND l.expires_at>unixepoch() AND b.operation_id=?6 AND b.revision=t.revision AND b.target='verify' AND json_extract(b.result,'$.source_identity')=?7 AND json_extract(b.result,'$.items[0].passed')=1)"),
+            rusqlite::params![workspace, task, revision, actor, fence.lease_id, fence.build_operation, fence.source_identity], |row| row.get(0)).map_err(describe)?;
+        if !valid { return Err("completion requires current runner evidence and exact live lease".into()); }
+        let fresh: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {prefix}verifications WHERE workspace_id=?1 AND task_id=?2 AND revision=?3 AND target='verify' AND passed=1 AND checked_at>=strftime('%Y-%m-%dT%H:%M:%fZ','now','-5 minutes'))"), rusqlite::params![workspace, task, revision], |row| row.get(0)).map_err(describe)?;
+        if !fresh { return Err("completion verification expired".into()); }
     }
     let mut result = Vec::new();
     for (index, item) in plan.statements.iter().enumerate() {
@@ -164,6 +193,11 @@ pub fn execute_with_prefix(connection: &mut Connection, request: crate::Request,
             statement
                 .execute(rusqlite::params_from_iter(params))
                 .map_err(describe)?;
+        }
+    }
+    if let (Some(fence), Some((workspace, actor, _, _))) = (&fence, &finish) {
+        if result.first().is_some_and(|row| row["status"] == "applied") {
+            transaction.execute(&format!("DELETE FROM {prefix}locks WHERE workspace_id=?1 AND owner=?2 AND lease_id=?3"), rusqlite::params![workspace, actor, fence.lease_id]).map_err(describe)?;
         }
     }
     transaction.commit().map_err(|_| "commit failed")?;

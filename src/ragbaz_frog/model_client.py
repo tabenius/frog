@@ -262,6 +262,16 @@ class ModelClient:
             raise ModelError('verification_failed',payload.get('error','build verification unavailable'),status=status)
         return self._ok(status,payload)
 
+    def finish_task(self, workspace, operation_id, *, task_id, expected_revision, lease_id, build_operation):
+        status, payload = self._request('POST', f"/v1/workspaces/{quote(workspace,safe='')}/finish",
+            body=dict(task_id=task_id, expected_revision=expected_revision, operation_id=operation_id,
+                      lease_id=lease_id, build_operation=build_operation))
+        if status != 200:
+            raise ModelError('completion_failed', payload.get('error', 'fenced completion unavailable'), status=status)
+        if not payload.get('items') or payload['items'][0].get('status') != 'applied':
+            raise ModelError('conflict', 'completion preconditions no longer hold')
+        return self._ok(status, payload)
+
     def locks(self, workspace):
         return self._pages(workspace, 'locks', {}, 'scope')
 

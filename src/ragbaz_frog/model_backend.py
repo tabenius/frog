@@ -199,9 +199,10 @@ class Backend:
         return dict(ok=True,source=source,outbox=[dict(r,slug=r['id'],workflow_status=r['status'],priority=f"p{r['priority']}") for r in rows])
 
     def verify(self, slug, target):
-        result = self.client.verify(self.workspace,slug,target,uuid.uuid4().hex)['items'][0]
+        response = self.client.verify(self.workspace,slug,target,uuid.uuid4().hex)
+        result = response['items'][0]
         accepted = result['receipt']['items'][0]['status'] == 'applied'
-        return dict(ok=result['passed'] and accepted,verification=result)
+        return dict(ok=result['passed'] and accepted,verification=result,build_operation=response.get('build_operation'))
 
     @staticmethod
     def operator(agent):
@@ -270,10 +271,11 @@ class Backend:
         result = self.verify(args.slug, 'verify')
         if not result['ok']:
             return result
-        self.client.transition_task(self.workspace, uuid.uuid4().hex, task_id=args.slug,
-            expected_revision=row['revision'], status='done')
-        self.client.release_lock(self.workspace, uuid.uuid4().hex,
-            scope=row['repository'], lease_id=args.lease_id)
+        if not result.get('build_operation'):
+            raise ModelError('unsupported_operation', 'server lacks fenced completion evidence; upgrade required')
+        self.client.finish_task(self.workspace, uuid.uuid4().hex, task_id=args.slug,
+            expected_revision=row['revision'], lease_id=args.lease_id,
+            build_operation=result['build_operation'])
         return self.task_info(slug=args.slug)
 
     def status(self, args):

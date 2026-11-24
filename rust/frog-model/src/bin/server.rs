@@ -4,6 +4,7 @@ use hyper::{body::Incoming, service::service_fn, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     convert::Infallible,
     sync::{Arc, Mutex},
@@ -13,6 +14,9 @@ use std::{
 type State = Arc<(Mutex<Connection>, String, String, Option<String>, bool)>;
 
 fn operation_request(workspace: &str, value: Value, allow_takeover: bool) -> Result<frog_model::Request, String> {
+    if value["command"]["kind"] == "transition_task" && value["command"]["status"] == "done" {
+        return Err("completion requires the fenced finish endpoint".into());
+    }
     if value["command"]["kind"] == "record_verification" {
         return Err("verification receipts may only be written by the server runner".into());
     }
@@ -26,14 +30,51 @@ fn operation_request(workspace: &str, value: Value, allow_takeover: bool) -> Res
         .map_err(|e| e.to_string())
 }
 
-fn verify_build(state: &State, workspace: &str, body: &Value) -> Result<Value, String> {
+fn build_config() -> Result<Value, String> {
     let config_path = std::env::var("FROG_MODEL_BUILD_CONFIG")
         .map_err(|_| "server has no configured build targets")?;
     let config: Value = serde_json::from_str(
         &std::fs::read_to_string(config_path).map_err(|_| "build config unavailable")?,
     )
     .map_err(|_| "invalid build config")?;
-    verify_build_configured(state, workspace, body, &config)
+    Ok(config)
+}
+
+fn verify_build(state: &State, workspace: &str, body: &Value) -> Result<Value, String> {
+    verify_build_configured(state, workspace, body, &build_config()?)
+}
+
+fn source_identity(specification: &Value) -> Result<String, String> {
+    let cwd = specification["cwd"].as_str().ok_or("server build cwd required")?;
+    let git = |args: &[&str]| -> Result<Vec<u8>, String> {
+        let output = std::process::Command::new("git").args(args).current_dir(cwd).output().map_err(|_| "cannot observe verification source")?;
+        if !output.status.success() { return Err("verification requires a Git worktree".into()); }
+        Ok(output.stdout)
+    };
+    if !git(&["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
+        return Err("completion verification requires a clean source worktree".into());
+    }
+    let mut hash = Sha256::new();
+    hash.update(git(&["rev-parse", "HEAD"])?);
+    hash.update(serde_json::to_vec(specification).map_err(|_| "invalid target specification")?);
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn finish_configured(state: &State, workspace: &str, body: &Value, config: &Value) -> Result<Value, String> {
+    if state.3.is_some() { return Err("fenced finish is unavailable in legacy mode".into()); }
+    if !body.as_object().is_some_and(|value| value.len() == 5) { return Err("expected task_id, expected_revision, operation_id, lease_id and build_operation".into()); }
+    let task = body["task_id"].as_str().ok_or("task_id required")?;
+    let lease = body["lease_id"].as_str().ok_or("lease_id required")?;
+    let operation = body["operation_id"].as_str().ok_or("operation_id required")?;
+    let build = body["build_operation"].as_str().ok_or("build_operation required")?;
+    let revision: u32 = body["expected_revision"].as_u64().ok_or("expected_revision required")?.try_into().map_err(|_| "invalid revision")?;
+    let mut conn = state.0.lock().map_err(|_| "storage lock failed")?;
+    let repo: String = conn.query_row(&format!("SELECT repo_id FROM {}tasks WHERE workspace_id=?1 AND task_id=?2", state.1), [workspace, task], |row| row.get(0)).map_err(|_| "task not found")?;
+    let identity = source_identity(&config[workspace][&repo]["verify"])?;
+    frog_model::sqlite::execute_verified_finish(&mut conn, frog_model::Request {
+        workspace_id: workspace.into(), actor: "local-client".into(), operation_id: operation.into(),
+        command: frog_model::Command::TransitionTask { task_id: task.into(), expected_revision: revision, status: "done".into() },
+    }, &state.1, frog_model::sqlite::FinishFence { lease_id: lease, build_operation: build, source_identity: &identity })
 }
 
 fn verify_build_configured(
@@ -118,6 +159,7 @@ fn verify_build_configured(
         .as_str()
         .ok_or("missing repository")?;
     let specification = &config[workspace][repo][target];
+    let identity = if target == "verify" { Some(source_identity(specification)?) } else { None };
     let argv = specification["argv"]
         .as_array()
         .ok_or("target is not configured on the server")?;
@@ -150,7 +192,7 @@ fn verify_build_configured(
         .spawn()
         .map_err(|_| "build launch failed")?;
     let start = std::time::Instant::now();
-    let passed = loop {
+    let mut passed = loop {
         if let Some(status) = child.try_wait().map_err(|_| "build wait failed")? {
             break status.success();
         }
@@ -161,6 +203,9 @@ fn verify_build_configured(
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    if let Some(identity) = &identity {
+        passed &= source_identity(specification).as_ref() == Ok(identity);
+    }
     let mut conn = state.0.lock().map_err(|_| "storage lock failed")?;
     let receipt = frog_model::sqlite::execute_with_prefix(
         &mut conn,
@@ -177,7 +222,7 @@ fn verify_build_configured(
         },
         &state.1,
     )?;
-    let result = json!({"schema":"frog.model-result.v1","kind":"build_verification","items":[{"task_id":task,"revision":revision,"target":target,"passed":passed,"receipt":receipt}]});
+    let result = json!({"schema":"frog.model-result.v1","kind":"build_verification","source_identity":identity,"build_operation":operation,"items":[{"task_id":task,"revision":revision,"target":target,"passed":passed,"receipt":receipt}]});
     conn.execute(
         &format!(
             "UPDATE {}build_runs SET result=?3 WHERE workspace_id=?1 AND operation_id=?2",
@@ -236,7 +281,7 @@ async fn handle(req: Request<Incoming>, state: State) -> Result<Response<Full<By
             ))
         }
     };
-    if method == hyper::Method::POST && resource == "verify" {
+    if method == hyper::Method::POST && (resource == "verify" || resource == "finish") {
         let value = match serde_json::from_slice::<Value>(&body) {
             Ok(value) => value,
             Err(_) => {
@@ -246,8 +291,10 @@ async fn handle(req: Request<Incoming>, state: State) -> Result<Response<Full<By
                 ))
             }
         };
-        let result =
-            tokio::task::spawn_blocking(move || verify_build(&state, &workspace, &value)).await;
+        let result = tokio::task::spawn_blocking(move || {
+            if resource == "finish" { finish_configured(&state, &workspace, &value, &build_config()?) }
+            else { verify_build(&state, &workspace, &value) }
+        }).await;
         return Ok(match result {
             Ok(Ok(value)) => response(StatusCode::OK, value),
             Ok(Err(error)) => response(StatusCode::BAD_REQUEST, json!({"error":error})),
@@ -461,6 +508,56 @@ mod tests {
         assert_eq!(request.actor, "local-client");
         assert!(operation_request("alpha", json!({"operation_id":"forge",
             "command":{"kind":"record_verification"}}), true).is_err());
+    }
+
+    #[test]
+    fn completion_is_fenced_by_lease_revision_source_and_target_specification() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(dir.path()).output().unwrap().status.success());
+        git(&["init"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial"]);
+        let config = json!({"alpha":{"frog":{"verify":{"argv":["/bin/true"],"cwd":dir.path().to_str().unwrap()}}}});
+        let state = fixture();
+        {
+            let conn = state.0.lock().unwrap();
+            conn.execute("UPDATE frog_model_tasks SET status='published',assignee='local-client' WHERE task_id='one'", []).unwrap();
+            conn.execute("INSERT INTO frog_model_locks(workspace_id,scope,owner,lease_id,expires_at) VALUES('alpha','frog','local-client','exact',unixepoch()+60)", []).unwrap();
+        }
+        let verified = verify_build_configured(&state, "alpha", &json!({"task_id":"one","target":"verify","operation_id":"build"}), &config).unwrap();
+        assert_eq!(verified["items"][0]["passed"], true);
+        let body = json!({"task_id":"one","expected_revision":0,"operation_id":"finish","lease_id":"exact","build_operation":"build"});
+        let mut wrong = body.clone(); wrong["lease_id"] = json!("other");
+        assert!(finish_configured(&state, "alpha", &wrong, &config).is_err());
+        wrong = body.clone(); wrong["expected_revision"] = json!(1);
+        assert!(finish_configured(&state, "alpha", &wrong, &config).is_err());
+        let mut changed = config.clone(); changed["alpha"]["frog"]["verify"]["timeout_seconds"] = json!(2);
+        assert!(finish_configured(&state, "alpha", &body, &changed).is_err());
+        std::fs::write(dir.path().join("dirty"), "changed").unwrap();
+        assert!(finish_configured(&state, "alpha", &body, &config).is_err());
+        std::fs::remove_file(dir.path().join("dirty")).unwrap();
+        state.0.lock().unwrap().execute("UPDATE frog_model_locks SET expires_at=0", []).unwrap();
+        assert!(finish_configured(&state, "alpha", &body, &config).is_err());
+        state.0.lock().unwrap().execute("UPDATE frog_model_locks SET expires_at=unixepoch()+60", []).unwrap();
+        state.0.lock().unwrap().execute("UPDATE frog_model_verifications SET checked_at='2000-01-01T00:00:00.000Z'", []).unwrap();
+        assert!(finish_configured(&state, "alpha", &body, &config).is_err());
+        state.0.lock().unwrap().execute("UPDATE frog_model_verifications SET checked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", []).unwrap();
+        let result = finish_configured(&state, "alpha", &body, &config).unwrap();
+        assert_eq!(result["items"][0]["status"], "applied");
+        let conn = state.0.lock().unwrap();
+        let locks: i64 = conn.query_row("SELECT count(*) FROM frog_model_locks", [], |row| row.get(0)).unwrap();
+        assert_eq!(locks, 0);
+        assert!(operation_request("alpha", json!({"operation_id":"bypass","command":{"kind":"transition_task","task_id":"one","expected_revision":0,"status":"done"}}), true).is_err());
+    }
+
+    #[test]
+    fn completion_verification_refuses_source_mutation_during_build() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [vec!["init"], vec!["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(dir.path()).output().unwrap().status.success());
+        }
+        let config = json!({"alpha":{"frog":{"verify":{"argv":["/bin/sh","-c","echo changed > source"],"cwd":dir.path().to_str().unwrap()}}}});
+        let result = verify_build_configured(&fixture(), "alpha", &json!({"task_id":"one","target":"verify","operation_id":"mutate"}), &config).unwrap();
+        assert_eq!(result["items"][0]["passed"], false);
     }
 
     #[test]
