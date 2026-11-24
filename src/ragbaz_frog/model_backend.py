@@ -203,6 +203,86 @@ class Backend:
         accepted = result['receipt']['items'][0]['status'] == 'applied'
         return dict(ok=result['passed'] and accepted,verification=result)
 
+    @staticmethod
+    def operator(agent):
+        if agent not in (None, 'local-client'):
+            raise ModelError('unsupported_operation', 'the authenticated model operator is local-client; actor impersonation is refused')
+
+    def owned_lease(self, row, lease_id):
+        if not lease_id or not any(r['scope'] == row['repository'] and r['lease_id'] == lease_id
+                                  and r['owner'] == 'local-client' for r in self.client.locks(self.workspace)):
+            raise ModelError('conflict', 'a matching active repository lease is required')
+
+    def claim(self, args):
+        self.operator(args.agent)
+        if args.file or args.force or args.allow_parallel or args.lock_kind != 'exclusive':
+            raise ModelError('unsupported_operation', 'model claim requires --lock-kind exclusive; file/force/parallel metadata are not supported')
+        row = self.client.task(self.workspace, args.slug)
+        if not row:
+            return dict(ok=False, error='task not found')
+        if any(r['id'] != args.slug and r.get('assignee') == 'local-client'
+               and r['status'] in ('in_progress','review','published') for r in self.rows()):
+            raise ModelError('conflict', 'finish or explicitly hand off the current model task first')
+        lease = uuid.uuid4().hex
+        self.client.acquire_lock(self.workspace, uuid.uuid4().hex,
+            scope=row['repository'], lease_id=lease, ttl_seconds=3600)
+        try:
+            self.client.claim_task(self.workspace, uuid.uuid4().hex,
+                task_id=args.slug, expected_revision=row['revision'])
+        except ModelError:
+            try:
+                self.client.release_lock(self.workspace, uuid.uuid4().hex, scope=row['repository'], lease_id=lease)
+            except ModelError:
+                pass  # Preserve the original refusal; never release a replacement lease.
+            raise
+        result = self.task_info(slug=args.slug)
+        result.update(lease_id=lease, scope=row['repository'])
+        return result
+
+    def takeover(self, args):
+        self.operator(args.agent)
+        row = self.client.task(self.workspace, args.slug)
+        if not row:
+            return dict(ok=False, error='task not found')
+        self.owned_lease(row, args.lease_id)
+        self.client.take_over_task(self.workspace, uuid.uuid4().hex, task_id=args.slug,
+            expected_revision=row['revision'], expected_assignee=row.get('assignee'),
+            lease_id=args.lease_id, reason=args.reason)
+        return self.task_info(slug=args.slug)
+
+    def finish(self, args):
+        self.operator(args.agent)
+        if args.no_verify:
+            raise ModelError('unsupported_operation', 'model finish never permits --no-verify')
+        row = self.client.task(self.workspace, args.slug)
+        if not row:
+            return dict(ok=False, error='task not found')
+        if row['status'] != 'published' or row.get('assignee') != 'local-client':
+            raise ModelError('conflict', 'finish requires the authenticated assignee and an explicitly published task')
+        self.owned_lease(row, args.lease_id)
+        result = self.verify(args.slug, 'verify')
+        if not result['ok']:
+            return result
+        self.client.transition_task(self.workspace, uuid.uuid4().hex, task_id=args.slug,
+            expected_revision=row['revision'], status='done')
+        self.client.release_lock(self.workspace, uuid.uuid4().hex,
+            scope=row['repository'], lease_id=args.lease_id)
+        return self.task_info(slug=args.slug)
+
+    def status(self, args):
+        if args.git_status or args.note:
+            raise ModelError('unsupported_operation', 'model status does not support Git-status or note overrides')
+        if not args.workflow_status:
+            return self.task_info(slug=args.slug)
+        if args.workflow_status == 'done':
+            raise ModelError('unsupported_operation', 'use task finish with its exact lease and fresh server verification')
+        row = self.client.task(self.workspace, args.slug)
+        if not row:
+            return dict(ok=False, error='task not found')
+        self.client.transition_task(self.workspace, uuid.uuid4().hex, task_id=args.slug,
+            expected_revision=row['revision'], status=args.workflow_status)
+        return self.task_info(slug=args.slug)
+
     def dispatch(self, args):
         if args.command == 'provider':
             if args.provider_command == 'pull':
@@ -261,6 +341,16 @@ class Backend:
                 return self.task_status(args.slug,workflow_status=args.workflow_status,git_status=args.git_status,note=args.note)
             if args.task_command == 'verify':
                 return self.verify(args.slug,args.target)
+            if args.task_command == 'claim':
+                return self.claim(args)
+            if args.task_command == 'takeover':
+                return self.takeover(args)
+            if args.task_command == 'takeovers':
+                return dict(ok=True, takeovers=self.client.task_takeovers(self.workspace, args.slug))
+            if args.task_command == 'finish':
+                return self.finish(args)
+            if args.task_command == 'status':
+                return self.status(args)
         if args.command == 'repo' and args.repo_command == 'list':
             return {'ok':True,'repos':self.repo_tree_snapshot()['repos']}
         raise ModelError('unsupported_operation',f'{args.command} operation is not supported by the model contract; select --legacy-storage explicitly')

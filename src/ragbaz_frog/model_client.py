@@ -19,7 +19,7 @@ RESULT_SCHEMA = "frog.model-result.v1"
 MAX_BODY = 1024 * 1024
 TIMEOUT = 15
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
-MUTATIONS = {"register_repo", "create_task", "claim_task", "transition_task",
+MUTATIONS = {"register_repo", "create_task", "claim_task", "take_over_task", "transition_task",
              "cancel_task", "add_dependency", "remove_dependency", "edit_task", "edit_task_fields", "provider_import", "acquire_lock", "release_lock"}
 # Frog's historical priority words, mapped to the model's numeric levels.
 PRIORITIES = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
@@ -203,7 +203,16 @@ class ModelClient:
         if status not in STATUSES:
             raise ModelError("invalid_request", "status must be idea, todo, review, published or done")
         return self.write(workspace, operation_id, {"kind": "transition_task", "task_id": task_id,
-                                                    "expected_revision": expected_revision, "status": status})
+                                                     "expected_revision": expected_revision, "status": status})
+
+    def take_over_task(self, workspace, operation_id, *, task_id, expected_revision,
+                       expected_assignee, lease_id, reason):
+        return self.write(workspace, operation_id, dict(kind='take_over_task', task_id=task_id,
+            expected_revision=expected_revision, expected_assignee=expected_assignee,
+            lease_id=lease_id, reason=reason))
+
+    def task_takeovers(self, workspace, task_id):
+        return self._pages(workspace, 'task-takeovers', {'task': task_id}, 'revision')
 
     def cancel_task(self, workspace: str, operation_id: str, *, task_id: str, expected_revision: int) -> dict:
         return self.write(workspace, operation_id, {"kind": "cancel_task", "task_id": task_id,

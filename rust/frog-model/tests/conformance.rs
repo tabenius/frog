@@ -481,6 +481,11 @@ fn transition_requires_owner_and_keeps_review_published_active() {
         "conflict"
     );
     for (revision, status) in [(1, "review"), (2, "published"), (3, "done")] {
+        if status == "done" {
+            execute(&mut db, "alpha", "build-runner", "completion-verification", Command::RecordVerification {
+                task_id: "one".into(), expected_revision: revision, target: "verify".into(), passed: true,
+            });
+        }
         let result = execute(
             &mut db,
             "alpha",
@@ -619,6 +624,11 @@ fn dependencies_gate_claims_and_are_reported_on_the_board() {
         },
     );
     for (revision, status) in [(1, "review"), (2, "published"), (3, "done")] {
+        if status == "done" {
+            execute(&mut db, "alpha", "build-runner", "dependency-verification", Command::RecordVerification {
+                task_id: "two".into(), expected_revision: revision, target: "verify".into(), passed: true,
+            });
+        }
         execute(
             &mut db,
             "alpha",

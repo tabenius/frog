@@ -23,12 +23,11 @@ from ragbaz_frog import mcp_server, store  # noqa: E402
 EXPECTED_TOOLS = [
     "frog_status", "frog_repo_list", "frog_repo_info", "frog_repo_discover",
     "frog_repo_targets", "frog_unit_discover", "frog_unit_list", "frog_task_list",
-    "frog_task_claim", "frog_task_finish", "frog_task_create", "frog_task_edit",
-    "frog_task_dependency", "frog_task_next", "frog_lock_list", "frog_lock_acquire",
-    "frog_lock_release", "frog_lock_audit", "frog_log_tail", "frog_repo_affected",
-    "frog_workspace_list", "__health",
-    "frog_task_verify", "frog_provider_import", "frog_provider_outbox",
-    "frog_lock_renew",
+    "frog_task_claim", "frog_task_finish", "frog_task_takeover", "frog_task_takeovers",
+    "frog_task_create", "frog_task_edit", "frog_task_dependency", "frog_task_next",
+    "frog_lock_list", "frog_lock_acquire", "frog_lock_release", "frog_lock_audit",
+    "frog_lock_renew", "frog_log_tail", "frog_repo_affected", "frog_task_verify",
+    "frog_provider_import", "frog_provider_outbox", "frog_workspace_list", "__health",
     "dash_list_instances", "dash_read_instance", "dash_read_view",
     "dash_read_frog", "dash_read_audit",
 ]

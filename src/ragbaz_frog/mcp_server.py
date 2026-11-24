@@ -201,8 +201,36 @@ def _native_tool_specs() -> list[dict]:
                     "slug": {"type": "string"},
                     "agent": {"type": "string"},
                     "verify": {"type": "boolean"},
+                    "lease_id": {"type": "string"},
                 },
                 "required": ["slug", "agent"],
+            },
+        },
+        {
+            "name": "frog_task_takeover",
+            "description": "Explicitly take over an inactive assignment with a matching lease, reason and audit record.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "slug": {"type": "string"},
+                    "lease_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "agent": {"type": "string"},
+                },
+                "required": ["slug", "lease_id", "reason"],
+            },
+        },
+        {
+            "name": "frog_task_takeovers",
+            "description": "Read the audited takeover history for one task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string"},
+                    "slug": {"type": "string"},
+                },
+                "required": ["slug"],
             },
         },
         {
@@ -421,6 +449,39 @@ def _with_conn(db_path: str, fn):
         conn.close()
 
 
+_MODEL_TASK_COMMANDS = {
+    "frog_task_claim": "claim",
+    "frog_task_takeover": "takeover",
+    "frog_task_takeovers": "takeovers",
+    "frog_task_finish": "finish",
+}
+
+
+def _model_task_args(tool_name: str, arguments: dict):
+    from types import SimpleNamespace
+
+    values = dict(
+        command="task",
+        task_command=_MODEL_TASK_COMMANDS[tool_name],
+        slug=None,
+        agent="local-client",
+        file=[],
+        force=False,
+        allow_parallel=False,
+        lock_kind="exclusive",
+        no_verify=False,
+        lease_id=None,
+        reason=None,
+        workflow_status=None,
+        git_status=None,
+        note=None,
+    )
+    values.update({key: value for key, value in arguments.items() if key != "workspace"})
+    if "verify" in values:
+        values["no_verify"] = not bool(values.pop("verify"))
+    return SimpleNamespace(**values)
+
+
 def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
     from .model_backend import Backend, settings
     options = _MODEL_OPTIONS or settings(config_path=_CONFIG_PATH, legacy_db=_DB_OVERRIDE is not None)
@@ -463,6 +524,8 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
             return backend.task_edit(slug=arguments['slug'], **{k:v for k,v in arguments.items() if k not in ('slug','workspace')})
         if tool_name == 'frog_task_verify':
             return backend.verify(arguments['slug'],arguments.get('target','verify'))
+        if tool_name in _MODEL_TASK_COMMANDS:
+            return backend.dispatch(_model_task_args(tool_name, arguments))
         if tool_name == 'frog_provider_import':
             return backend.provider_sync_in(None,arguments['source'],arguments['items'])
         if tool_name == 'frog_provider_outbox':
@@ -481,6 +544,10 @@ def _call_local(tool_name: str, arguments: dict, workspace: dict | None):
     db_path = _DB_OVERRIDE or (workspace["db"] if workspace else _default_db())
 
     def run(conn):
+        if tool_name in ('frog_task_takeover', 'frog_task_takeovers'):
+            return {'ok': False, 'error': f'{tool_name} requires the model backend'}
+        if tool_name == 'frog_task_finish' and 'lease_id' in arguments:
+            return {'ok': False, 'error': 'lease_id is model-only; legacy finish cannot consume it'}
         if tool_name == "frog_status":
             return store.status_summary(conn, repo_ref=arguments.get("repo_ref"))
         if tool_name == "frog_repo_list":
