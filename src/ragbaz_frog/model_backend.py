@@ -228,8 +228,9 @@ class Backend:
         # assignment/evidence intact without blocking unrelated new work forever.
         leased = {lock['scope'] for lock in self.client.locks(self.workspace)
                   if lock['owner'] == 'local-client'} if pending_review else set()
-        if any(r['status'] == 'in_progress' for r in other_work) or any(
-                r['repository'] in leased for r in pending_review):
+        if self.client.native_work_parking(self.workspace) is not True and (
+                any(r['status'] == 'in_progress' for r in other_work) or any(
+                r['repository'] in leased for r in pending_review)):
             raise ModelError('conflict', 'finish or explicitly hand off the current model task first')
         lease = uuid.uuid4().hex
         self.client.acquire_lock(self.workspace, uuid.uuid4().hex,
@@ -352,6 +353,16 @@ class Backend:
                 return self.verify(args.slug,args.target)
             if args.task_command == 'claim':
                 return self.claim(args)
+            if args.task_command in ('pause', 'resume', 'handoff'):
+                self.operator(args.agent)
+                row = self.client.task(self.workspace, args.slug)
+                if not row:
+                    return dict(ok=False, error='task not found')
+                lease = uuid.uuid4().hex if args.task_command == 'resume' else args.lease_id
+                result = self.client.work_handoff(self.workspace, uuid.uuid4().hex,
+                    task_id=args.slug, expected_revision=row['revision'], action=args.task_command,
+                    lease_id=lease, reason=args.reason, receiver=getattr(args, 'receiver', None))
+                return dict(ok=True, handoff=result['items'][0])
             if args.task_command == 'takeover':
                 return self.takeover(args)
             if args.task_command == 'takeovers':

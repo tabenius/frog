@@ -272,6 +272,23 @@ class ModelClient:
             raise ModelError('conflict', 'completion preconditions no longer hold')
         return self._ok(status, payload)
 
+    def native_work_parking(self, workspace):
+        status, payload = self._request('GET', f"/v1/workspaces/{quote(workspace,safe='')}/work-policy")
+        if status in (400, 404):
+            return False  # Older hosts retain the old conservative client preflight.
+        if status != 200:
+            raise ModelError('unavailable', 'cannot read native claim policy', status=status)
+        result = self._ok(status, payload)
+        return bool(result['items'] and result['items'][0].get('explicit_parking') is True)
+
+    def work_handoff(self, workspace, operation_id, *, task_id, expected_revision, action, lease_id, reason, receiver=None):
+        status, payload = self._request('POST', f"/v1/workspaces/{quote(workspace,safe='')}/work-handoff",
+            body=dict(operation_id=operation_id, task_id=task_id, expected_revision=expected_revision,
+                      action=action, lease_id=lease_id, reason=reason, receiver=receiver))
+        if status != 200:
+            raise ModelError('handoff_failed', payload.get('error', 'work parking unavailable'), status=status)
+        return self._ok(status, payload)
+
     def locks(self, workspace):
         return self._pages(workspace, 'locks', {}, 'scope')
 

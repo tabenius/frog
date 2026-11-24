@@ -95,7 +95,7 @@ pub fn execute(connection: &mut Connection, request: crate::Request) -> Result<V
 }
 
 pub fn execute_with_prefix(connection: &mut Connection, request: crate::Request, prefix: &str) -> Result<Value, String> {
-    execute_fenced(connection, request, prefix, None)
+    execute_fenced(connection, request, prefix, None, false)
 }
 
 /// Native runner evidence and exact lease are checked within the write transaction.
@@ -106,10 +106,15 @@ pub struct FinishFence<'a> {
 }
 
 pub fn execute_verified_finish(connection: &mut Connection, request: crate::Request, prefix: &str, fence: FinishFence<'_>) -> Result<Value, String> {
-    execute_fenced(connection, request, prefix, Some(fence))
+    execute_fenced(connection, request, prefix, Some(fence), false)
 }
 
-fn execute_fenced(connection: &mut Connection, request: crate::Request, prefix: &str, fence: Option<FinishFence<'_>>) -> Result<Value, String> {
+pub fn execute_exclusive_claim(connection: &mut Connection, request: crate::Request, prefix: &str) -> Result<Value, String> {
+    if !matches!(&request.command, crate::Command::ClaimTask { .. }) { return Err("claim required".into()); }
+    execute_fenced(connection, request, prefix, None, true)
+}
+
+fn execute_fenced(connection: &mut Connection, request: crate::Request, prefix: &str, fence: Option<FinishFence<'_>>, enforce_claim: bool) -> Result<Value, String> {
     if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err("invalid table prefix".into());
     }
@@ -122,6 +127,11 @@ fn execute_fenced(connection: &mut Connection, request: crate::Request, prefix: 
                 Some((request.workspace_id.clone(), request.actor.clone(), task_id.clone(), *expected_revision)),
             _ => return Err("finish fence requires completion".into()),
         }
+    } else { None };
+    let claim = if enforce_claim {
+        if let crate::Command::ClaimTask { task_id, .. } = &request.command {
+            Some((request.workspace_id.clone(), request.actor.clone(), task_id.clone()))
+        } else { None }
     } else { None };
     let plan = crate::plan(request)?;
     let foreign_keys: i64 = connection
@@ -147,6 +157,10 @@ fn execute_fenced(connection: &mut Connection, request: crate::Request, prefix: 
     }
     if needs_idea_schema && version != 2 {
         return Err("idea requires explicit model schema v2 upgrade".into());
+    }
+    if let Some((workspace, actor, task)) = &claim {
+        let blocked: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {prefix}tasks t WHERE t.workspace_id=?1 AND t.assignee=?2 AND t.task_id!=?3 AND t.status IN ('in_progress','review','published') AND (NOT EXISTS(SELECT 1 FROM {prefix}task_pauses p WHERE p.workspace_id=t.workspace_id AND p.task_id=t.task_id AND p.revision=t.revision AND p.actor=?2) OR EXISTS(SELECT 1 FROM {prefix}locks l WHERE l.workspace_id=t.workspace_id AND l.scope=t.repo_id AND l.owner=?2 AND l.expires_at>unixepoch())))"), rusqlite::params![workspace, actor, task], |row| row.get(0)).map_err(describe)?;
+        if blocked { return Err("explicit pause or handoff of current work is required".into()); }
     }
     if let (Some(fence), Some((workspace, actor, task, revision))) = (&fence, &finish) {
         let valid: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {prefix}tasks t JOIN {prefix}locks l ON l.workspace_id=t.workspace_id AND l.scope=t.repo_id JOIN {prefix}build_runs b ON b.workspace_id=t.workspace_id AND b.task_id=t.task_id WHERE t.workspace_id=?1 AND t.task_id=?2 AND t.revision=?3 AND t.assignee=?4 AND t.status='published' AND l.owner=?4 AND l.lease_id=?5 AND l.expires_at>unixepoch() AND b.operation_id=?6 AND b.revision=t.revision AND b.target='verify' AND json_extract(b.result,'$.source_identity')=?7 AND json_extract(b.result,'$.items[0].passed')=1)"),

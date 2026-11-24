@@ -1408,6 +1408,9 @@ def _is_coordinator_write(args) -> bool:
             "create",
             "claim",
             "finish",
+            "pause",
+            "resume",
+            "handoff",
             "status",
             "dependency",
             "conflict",
@@ -2179,6 +2182,15 @@ def build_parser() -> argparse.ArgumentParser:
     takeover.add_argument("--agent")
     takeovers = task_sub.add_parser("takeovers", help="Read model task takeover audit history")
     takeovers.add_argument("slug")
+    for action in ("pause", "resume", "handoff"):
+        parking = task_sub.add_parser(action, help="Explicit audited model work parking; never implicit reassignment")
+        parking.add_argument("slug")
+        parking.add_argument("--reason", required=True)
+        parking.add_argument("--agent")
+        if action != "resume":
+            parking.add_argument("--lease-id", required=True)
+        if action == "handoff":
+            parking.add_argument("--receiver", required=True)
     task_info = task_sub.add_parser("info", help="Show one task")
     task_info.add_argument("slug")
     task_status = task_sub.add_parser("status", help="Update or show task status")
@@ -2884,7 +2896,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.unit_command == "list":
                 return _emit(_payload_with_view(store.unit_list(conn, repo_ref=args.repo_ref), args), args.json)
         if args.command == "task":
-            if args.task_command in ("takeover", "takeovers"):
+            if args.task_command in ("takeover", "takeovers", "pause", "resume", "handoff"):
                 return _emit({"ok": False, "error": "task takeover/audit requires the model backend"}, args.json)
             if args.task_command == "create":
                 return _emit(

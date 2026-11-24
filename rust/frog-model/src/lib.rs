@@ -14,7 +14,9 @@ pub const MIGRATION: &str = include_str!("../sql/0001_model.sql");
 pub const SERVICE_MIGRATION: &str = concat!(
     include_str!("../sql/0002_services.sql"),
     "\n",
-    include_str!("../sql/0003_takeovers.sql")
+    include_str!("../sql/0003_takeovers.sql"),
+    "\n",
+    include_str!("../sql/0006_native_handoffs.sql")
 );
 pub const IDEA_MIGRATION: &str = include_str!("../sql/0005_idea_status.sql");
 /// Priorities the model accepts; Frog's legacy vocabulary is a host concern.

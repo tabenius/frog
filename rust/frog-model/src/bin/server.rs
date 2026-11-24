@@ -12,6 +12,8 @@ use std::{
 };
 
 type State = Arc<(Mutex<Connection>, String, String, Option<String>, bool)>;
+#[path = "server/work_handoff.rs"]
+mod work_handoff;
 
 fn operation_request(workspace: &str, value: Value, allow_takeover: bool) -> Result<frog_model::Request, String> {
     if value["command"]["kind"] == "transition_task" && value["command"]["status"] == "done" {
@@ -272,6 +274,9 @@ async fn handle(req: Request<Incoming>, state: State) -> Result<Response<Full<By
             .into_owned()
             .collect();
     let method = req.method().clone();
+    if method == hyper::Method::GET && resource == "work-policy" {
+        return Ok(response(StatusCode::OK, json!({"schema":"frog.model-result.v1","kind":"work_policy","items":[{"explicit_parking":state.3.is_none()}]})));
+    }
     let body = match Limited::new(req.into_body(), 16384).collect().await {
         Ok(body) => body.to_bytes(),
         Err(_) => {
@@ -281,7 +286,7 @@ async fn handle(req: Request<Incoming>, state: State) -> Result<Response<Full<By
             ))
         }
     };
-    if method == hyper::Method::POST && (resource == "verify" || resource == "finish") {
+    if method == hyper::Method::POST && (resource == "verify" || resource == "finish" || resource == "work-handoff") {
         let value = match serde_json::from_slice::<Value>(&body) {
             Ok(value) => value,
             Err(_) => {
@@ -292,7 +297,8 @@ async fn handle(req: Request<Incoming>, state: State) -> Result<Response<Full<By
             }
         };
         let result = tokio::task::spawn_blocking(move || {
-            if resource == "finish" { finish_configured(&state, &workspace, &value, &build_config()?) }
+            if resource == "work-handoff" { work_handoff::change(&state, &workspace, &value) }
+            else if resource == "finish" { finish_configured(&state, &workspace, &value, &build_config()?) }
             else { verify_build(&state, &workspace, &value) }
         }).await;
         return Ok(match result {
@@ -350,6 +356,7 @@ async fn handle(req: Request<Incoming>, state: State) -> Result<Response<Full<By
         }
         match &state.3 {
             Some(workspace) => frog_model::legacy::execute(&mut conn, input, workspace, &state.1),
+            None if matches!(&input.command, frog_model::Command::ClaimTask { .. }) => frog_model::sqlite::execute_exclusive_claim(&mut conn, input, &state.1),
             None => frog_model::sqlite::execute_with_prefix(&mut conn, input, &state.1),
         }
     }).await;
@@ -508,6 +515,51 @@ mod tests {
         assert_eq!(request.actor, "local-client");
         assert!(operation_request("alpha", json!({"operation_id":"forge",
             "command":{"kind":"record_verification"}}), true).is_err());
+    }
+
+    #[test]
+    fn concurrent_native_claims_cannot_both_start_work() {
+        let state = fixture();
+        frog_model::sqlite::execute(&mut state.0.lock().unwrap(), frog_model::Request { workspace_id:"alpha".into(),actor:"owner".into(),operation_id:"create-two".into(),command:frog_model::Command::CreateTask{repo_id:"frog".into(),task_id:"two".into(),title:"Two".into(),priority:1,initial_status:None} }).unwrap();
+        let workers: Vec<_> = ["one", "two"].into_iter().map(|task| {
+            let state = state.clone();
+            std::thread::spawn(move || frog_model::sqlite::execute_exclusive_claim(&mut state.0.lock().unwrap(), frog_model::Request { workspace_id:"alpha".into(),actor:"local-client".into(),operation_id:format!("claim-{task}"),command:frog_model::Command::ClaimTask{task_id:task.into(),expected_revision:0} }, "frog_model_"))
+        }).collect();
+        let results: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(state.0.lock().unwrap().query_row("SELECT count(*) FROM frog_model_tasks WHERE status='in_progress'", [], |row|row.get::<_,i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn explicit_handoff_distinguishes_expiry_and_claims_are_exclusive() {
+        let state = fixture();
+        {
+            let mut conn = state.0.lock().unwrap();
+            conn.execute("UPDATE frog_model_tasks SET status='review',assignee='local-client' WHERE task_id='one'", []).unwrap();
+            for task in ["two", "three"] {
+                frog_model::sqlite::execute(&mut conn, frog_model::Request { workspace_id:"alpha".into(),actor:"owner".into(),operation_id:format!("create-{task}"),command:frog_model::Command::CreateTask{repo_id:"frog".into(),task_id:task.into(),title:task.into(),priority:1,initial_status:None} }).unwrap();
+            }
+        }
+        let claim = |task: &str| frog_model::Request { workspace_id:"alpha".into(),actor:"local-client".into(),operation_id:format!("claim-{task}"),command:frog_model::Command::ClaimTask{task_id:task.into(),expected_revision:0} };
+        assert!(frog_model::sqlite::execute_exclusive_claim(&mut state.0.lock().unwrap(), claim("two"), "frog_model_").is_err());
+        let pause = json!({"task_id":"one","expected_revision":0,"operation_id":"park","action":"handoff","lease_id":"exact","reason":"Await review","receiver":"reviewer"});
+        assert!(work_handoff::change(&state, "alpha", &pause).is_err());
+        state.0.lock().unwrap().execute("INSERT INTO frog_model_locks(workspace_id,scope,owner,lease_id,expires_at) VALUES('alpha','frog','local-client','exact',unixepoch()+60)", []).unwrap();
+        let first = work_handoff::change(&state, "alpha", &pause).unwrap();
+        assert_eq!(first, work_handoff::change(&state, "alpha", &pause).unwrap());
+        let mut altered = pause.clone(); altered["reason"] = json!("other");
+        assert!(work_handoff::change(&state, "alpha", &altered).is_err());
+        let result = frog_model::sqlite::execute_exclusive_claim(&mut state.0.lock().unwrap(), claim("two"), "frog_model_").unwrap();
+        assert_eq!(result["items"][0]["status"], "applied");
+        assert!(frog_model::sqlite::execute_exclusive_claim(&mut state.0.lock().unwrap(), claim("three"), "frog_model_").is_err());
+        let resume = json!({"task_id":"one","expected_revision":1,"operation_id":"resume","action":"resume","lease_id":"new-lease","reason":"Review ready"});
+        assert!(work_handoff::change(&state, "alpha", &resume).is_err());
+        state.0.lock().unwrap().execute("UPDATE frog_model_tasks SET status='done' WHERE task_id='two'", []).unwrap();
+        work_handoff::change(&state, "alpha", &resume).unwrap();
+        let conn = state.0.lock().unwrap();
+        let row: (String, String, u32) = conn.query_row("SELECT status,assignee,revision FROM frog_model_tasks WHERE task_id='one'", [], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(row, ("review".into(),"local-client".into(),2));
+        assert_eq!(conn.query_row("SELECT lease_id FROM frog_model_locks WHERE scope='frog'", [], |row|row.get::<_,String>(0)).unwrap(), "new-lease");
     }
 
     #[test]

@@ -210,6 +210,31 @@ class ModelBackendTests(unittest.TestCase):
         with self.assertRaises(model_client.ModelError):
             backend.finish(args)
 
+    def test_explicit_pause_and_resume_use_observed_revision_and_new_lease(self):
+        backend = self.backend()
+        backend.client.task.return_value = {'id':'one','revision':3}
+        backend.client.work_handoff.return_value = {'items':[{'status':'applied'}]}
+        for action in ('pause', 'resume', 'handoff'):
+            args = SimpleNamespace(command='task', task_command=action, slug='one',agent='local-client',lease_id='old',reason='Review pause',receiver='reviewer')
+            self.assertTrue(backend.dispatch(args)['ok'])
+            call = backend.client.work_handoff.call_args.kwargs
+            self.assertEqual(call['expected_revision'], 3)
+            self.assertEqual(call['action'], action)
+            if action == 'resume':
+                self.assertNotEqual(call['lease_id'], 'old')
+            else:
+                self.assertEqual(call['lease_id'], 'old')
+
+    def test_native_parking_delegates_claim_exclusivity_to_atomic_server_guard(self):
+        backend = self.backend()
+        backend.client.native_work_parking.return_value = True
+        row = {'id':'one','revision':0,'repository':'frog','status':'todo','priority':1,'assignee':None}
+        backend.client.task.return_value = row
+        backend.rows = Mock(return_value=[row, dict(row, id='parked',status='in_progress',assignee='local-client')])
+        args = SimpleNamespace(slug='one',agent='local-client',file=[],force=False,allow_parallel=False,lock_kind='exclusive')
+        self.assertTrue(backend.claim(args)['ok'])
+        backend.client.claim_task.assert_called_once()
+
     def test_claim_still_refuses_in_progress_or_leased_review(self):
         for status in ('in_progress', 'review', 'published'):
             backend = self.backend()
