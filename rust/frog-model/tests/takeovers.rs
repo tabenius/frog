@@ -19,6 +19,7 @@ fn fixture(status: &str) -> Connection {
     for name in ["one", "two"] {
         run(&mut db, "owner", name, Command::CreateTask {
             repo_id:"frog".into(),task_id:name.into(),title:name.into(),priority:1,
+            initial_status:Some("todo".into()),
         });
     }
     // A legacy-import fixture, never a mutation of an actual workspace store.
