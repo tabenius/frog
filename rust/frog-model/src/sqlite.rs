@@ -159,7 +159,10 @@ fn execute_fenced(connection: &mut Connection, request: crate::Request, prefix: 
         return Err("idea requires explicit model schema v2 upgrade".into());
     }
     if let Some((workspace, actor, task)) = &claim {
-        let blocked: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {prefix}tasks t WHERE t.workspace_id=?1 AND t.assignee=?2 AND t.task_id!=?3 AND t.status IN ('in_progress','review','published') AND (NOT EXISTS(SELECT 1 FROM {prefix}task_pauses p WHERE p.workspace_id=t.workspace_id AND p.task_id=t.task_id AND p.revision=t.revision AND p.actor=?2) OR EXISTS(SELECT 1 FROM {prefix}locks l WHERE l.workspace_id=t.workspace_id AND l.scope=t.repo_id AND l.owner=?2 AND l.expires_at>unixepoch())))"), rusqlite::params![workspace, actor, task], |row| row.get(0)).map_err(describe)?;
+        // The client acquires the destination repo lease before claiming. A
+        // fresh lease for this task must not reactivate explicitly parked work
+        // in that same repo. Unparked assignments still block in every repo.
+        let blocked: bool = transaction.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {prefix}tasks t WHERE t.workspace_id=?1 AND t.assignee=?2 AND t.task_id!=?3 AND t.status IN ('in_progress','review','published') AND (NOT EXISTS(SELECT 1 FROM {prefix}task_pauses p WHERE p.workspace_id=t.workspace_id AND p.task_id=t.task_id AND p.revision=t.revision AND p.actor=?2) OR (t.repo_id!=(SELECT repo_id FROM {prefix}tasks WHERE workspace_id=?1 AND task_id=?3) AND EXISTS(SELECT 1 FROM {prefix}locks l WHERE l.workspace_id=t.workspace_id AND l.scope=t.repo_id AND l.owner=?2 AND l.expires_at>unixepoch()))))"), rusqlite::params![workspace, actor, task], |row| row.get(0)).map_err(describe)?;
         if blocked { return Err("explicit pause or handoff of current work is required".into()); }
     }
     if let (Some(fence), Some((workspace, actor, task, revision))) = (&fence, &finish) {

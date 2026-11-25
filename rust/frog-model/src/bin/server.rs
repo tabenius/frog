@@ -549,12 +549,16 @@ mod tests {
         assert_eq!(first, work_handoff::change(&state, "alpha", &pause).unwrap());
         let mut altered = pause.clone(); altered["reason"] = json!("other");
         assert!(work_handoff::change(&state, "alpha", &altered).is_err());
+        // Real CLI order: acquire destination lease, then claim. This must not
+        // make the released pause's old task look active in the same repo.
+        state.0.lock().unwrap().execute("INSERT INTO frog_model_locks(workspace_id,scope,owner,lease_id,expires_at) VALUES('alpha','frog','local-client','second-task',unixepoch()+60)", []).unwrap();
         let result = frog_model::sqlite::execute_exclusive_claim(&mut state.0.lock().unwrap(), claim("two"), "frog_model_").unwrap();
         assert_eq!(result["items"][0]["status"], "applied");
         assert!(frog_model::sqlite::execute_exclusive_claim(&mut state.0.lock().unwrap(), claim("three"), "frog_model_").is_err());
         let resume = json!({"task_id":"one","expected_revision":1,"operation_id":"resume","action":"resume","lease_id":"new-lease","reason":"Review ready"});
         assert!(work_handoff::change(&state, "alpha", &resume).is_err());
         state.0.lock().unwrap().execute("UPDATE frog_model_tasks SET status='done' WHERE task_id='two'", []).unwrap();
+        state.0.lock().unwrap().execute("DELETE FROM frog_model_locks WHERE lease_id='second-task'", []).unwrap();
         work_handoff::change(&state, "alpha", &resume).unwrap();
         let conn = state.0.lock().unwrap();
         let row: (String, String, u32) = conn.query_row("SELECT status,assignee,revision FROM frog_model_tasks WHERE task_id='one'", [], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
